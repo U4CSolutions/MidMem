@@ -131,7 +131,13 @@ export function loadConfig(overrides = {}) {
     /** Work-memory (Perplexity-Brain-style "memory about work"): record agent task attempts,
      *  sources used, dead ends, corrections, artifacts, decisions as first-class entries + graph
      *  edges, and deterministically categorize every ingest. Pure-core; works in all 4 modes. */
-    workMemory: { enabled: env('WORK_MEMORY') !== '0' },
+    workMemory: {
+      enabled: env('WORK_MEMORY') !== '0',
+      /** Skip minting a task node when the label is a bare machine identifier (session UUID,
+       *  timestamped file id, hex digest). The event is still recorded; only the unactionable
+       *  graph node is suppressed. Set MIDMEM_GUARD_OPAQUE_TASK_LABELS=0 to record them anyway. */
+      guardOpaqueTaskLabels: env('GUARD_OPAQUE_TASK_LABELS') !== '0',
+    },
     /** Automatic ingest of agent work + knowledge. When `onMaintain`, the maintenance pass also
      *  runs the (idempotent, hash-deduped) bridge — pulling each stack's session/memory dirs into
      *  the store so ongoing requests are tracked without anyone remembering to ingest. Deterministic. */

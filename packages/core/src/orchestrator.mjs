@@ -17,7 +17,7 @@ import { hybridSearch } from './retrieval.mjs';
 import { checkGrounding, groundingScore } from './grounding.mjs';
 import { makeVectorStore } from './vectorstore.mjs';
 import { handoffBrief as buildHandoffBrief } from './handoff.mjs';
-import { recordWorkEvent, listOpenTasks, consolidateWork, categorizeIngest } from './workmemory.mjs';
+import { recordWorkEvent, listOpenTasks, closeTasks, consolidateWork, categorizeIngest } from './workmemory.mjs';
 import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
 import { genId, sha12, nowISO } from './util.mjs';
 
@@ -234,6 +234,9 @@ export class Orchestrator {
 
   /** Ongoing requests: task nodes not yet marked done. */
   openTasks() { return listOpenTasks(this); }
+
+  /** Bulk-close open task nodes (status → done). Requires a selector; supports dryRun. */
+  closeTasks(opts) { return closeTasks(this, opts); }
 
   /** P5: (re)build the concept graph (embed nodes + communities) on demand. */
   async refreshConcepts(opts) { return refreshConceptGraph(this, opts); }

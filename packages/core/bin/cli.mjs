@@ -29,12 +29,13 @@ try {
     case 'recall-check': out(await o.proactiveRecall(pos.join(' '), { minScore: flags.minScore != null ? Number(flags.minScore) : undefined, maxTokens: flags.maxTokens != null ? Number(flags.maxTokens) : undefined, scopes: flags.scopes?.split(','), force: !!flags.force })); break;
     case 'work': out(await o.recordWork({ kind: flags.kind || pos[0], task: flags.task, content: pos.slice(flags.kind ? 0 : 1).join(' ') || undefined, outcome: flags.outcome, status: flags.status, source: flags.source, artifact: flags.artifact, profile: flags.profile, related: flags.related, scope: flags.scope })); break;
     case 'tasks': out(o.openTasks()); break;
+    case 'close-tasks': out(o.closeTasks({ tasks: flags.task ? [flags.task] : pos, match: typeof flags.match === 'string' ? flags.match : null, opaque: !!flags.opaque, olderThanDays: flags.olderThanDays != null ? Number(flags.olderThanDays) : null, dryRun: !!flags.dryRun })); break;
     case 'claims': out(flags.all ? o.searchClaims(pos.join(' '), { limit: Number(flags.limit) || 50 }) : o.currentClaims(pos.join(' '), { limit: Number(flags.limit) || 50 })); break;
     case 'contradictions': out(o.claimContradictions({ minShared: flags.minShared != null ? Number(flags.minShared) : 3 })); break;
     case 'merge-concepts': out(await o.mergeConcepts(pos[0], pos[1], { type: flags.type || 'concept' })); break;
     case 'refresh-concepts': out(await o.refreshConcepts({ maxEmbedPerPass: flags.max != null ? Number(flags.max) : undefined })); break;
     default:
-      out('Usage: ocmw <init|ingest <path>|remember <text>|query <text>|recall <id>|recall-check <message>|work --kind <type>|tasks|brief|lint|project|promote <id> <tier>|maintain|bridge|handoff <task>> [--kind task_attempt|source_used|dead_end|correction|artifact|decision --task --outcome --status --source --artifact --related --type --title --tier --tiers --scope --scopes --limit --minScore --maxTokens --graph --curated --force --profile local|frontier]');
+      out('Usage: ocmw <init|ingest <path>|remember <text>|query <text>|recall <id>|recall-check <message>|work --kind <type>|tasks|close-tasks [labels…]|brief|lint|project|promote <id> <tier>|maintain|bridge|handoff <task>> [--kind task_attempt|source_used|dead_end|correction|artifact|decision --task --outcome --status --source --artifact --related --type --title --tier --tiers --scope --scopes --limit --minScore --maxTokens --graph --curated --force --profile local|frontier]\n  close-tasks selectors (at least one required): [labels…] | --task <label> | --match <regex> | --opaque | --olderThanDays <n>; preview with --dryRun');
   }
 } catch (e) { console.error('ERROR:', e.message); process.exitCode = 1; }
 finally { o.close(); }

@@ -40,6 +40,26 @@ const CATEGORY_RULES = [
   ['reference',  /\b(https?:\/\/|documentation|reference doc|api docs)\b/i],
 ];
 
+/**
+ * Opaque machine identifiers that are NOT task names — bare session UUIDs, timestamped
+ * file IDs, bare hex digests. The hook seam records whatever the calling stack hands it
+ * as `--task`; when that is a session handle rather than a request, a task node is minted
+ * that nobody can act on and that sits in `listOpenTasks` forever (2026-07-31: 341 of 384
+ * open tasks were exactly these). Deterministic, no LLM, anchored so a real title that
+ * merely CONTAINS an id is untouched.
+ */
+const OPAQUE_TASK_PATTERNS = [
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, // bare UUID
+  /^\d{8}[_-]\d{6}(?:[_-][0-9a-f]{4,})?$/,                           // 20260710_033427_3d468f
+  /^[0-9a-f]{16,}$/i,                                                // bare hex digest
+];
+
+/** True when a task label is a machine identifier rather than a human request. */
+export function isOpaqueTaskLabel(label = '') {
+  const s = String(label).trim();
+  return !!s && OPAQUE_TASK_PATTERNS.some((re) => re.test(s));
+}
+
 /** Deterministic ingest categorizer (no LLM). Returns a single category string. */
 export function categorizeIngest({ type, content = '', title = '' } = {}) {
   if (WORK_EVENT_NAMES.includes(type)) return type;       // a work event is its own category
@@ -81,7 +101,11 @@ export async function recordWorkEvent(o, ev = {}) {
   o.db.prepare('UPDATE entries SET provenance=?, updated_at=? WHERE id=?').run(JSON.stringify(prov), nowISO(), res.id);
 
   // Graph: a stable task node (status tracked here) + typed edges to source/artifact/concepts.
-  if (task) {
+  // An opaque identifier is recorded as an entry but never becomes a task node — the event
+  // keeps its provenance, the ongoing-requests list stays answerable.
+  const opaque = !!task && o.cfg.workMemory?.guardOpaqueTaskLabels !== false && isOpaqueTaskLabel(task);
+  if (opaque) o.db.logOp('work-task-label-skipped', { task: task.slice(0, 80), kind: ev.kind, reason: 'opaque-identifier' });
+  if (task && !opaque) {
     // Only a task_attempt sets the task's status; other events (correction, source_used, …) link to
     // the task but must NOT flip its open/done state — preserve the existing status (default 'open').
     const existing = o.graph.byType('task').find((n) => n.label === task);
@@ -92,7 +116,44 @@ export async function recordWorkEvent(o, ev = {}) {
     for (const c of ev.concepts || []) o.graph.upsertEdge({ from: taskNode, to: o.graph.upsertNode({ type: c.type || 'concept', label: c.name, source: 'work' }), type: 'about', source: 'work' });
   }
   o.db.logOp('record-work', { kind: ev.kind, entry: res.id, task: task.slice(0, 80), status, category: ev.kind });
-  return { success: true, kind: ev.kind, status, category: ev.kind, ...res };
+  return { success: true, kind: ev.kind, status, category: ev.kind, taskNodeSkipped: opaque, ...res };
+}
+
+/**
+ * Bulk-close open task nodes (mark `status: done`). Task nodes are upserted and never
+ * deleted by design — `listOpenTasks` filters on status — so "cleanup" means closing,
+ * not removing, and nothing is destroyed: the entries and edges stay intact.
+ *
+ * At least one selector is REQUIRED so a bare call can never close the whole board.
+ * Selectors are OR-ed: explicit `tasks`, a `match` regex, `opaque` (the machine-identifier
+ * guard above), and `olderThanDays` against the node's updated_at.
+ *
+ * @param {import('./orchestrator.mjs').Orchestrator} o
+ * @param {{tasks?:string[], match?:string, opaque?:boolean, olderThanDays?:number, dryRun?:boolean}} [opts]
+ */
+export function closeTasks(o, { tasks = [], match = null, opaque = false, olderThanDays = null, dryRun = false } = {}) {
+  const wanted = new Set(tasks.map((t) => String(t).trim()).filter(Boolean));
+  if (!wanted.size && !match && !opaque && olderThanDays == null) {
+    throw new Error('closeTasks requires at least one selector: tasks, match, opaque, or olderThanDays');
+  }
+  const re = match ? new RegExp(match, 'i') : null;
+  const cutoff = olderThanDays == null ? null : Date.now() - olderThanDays * 864e5;
+
+  const selected = o.graph.byType('task')
+    .filter((n) => (n.properties?.status || 'open') !== 'done')
+    .filter((n) => wanted.has(n.label)
+      || (re && re.test(n.label))
+      || (opaque && isOpaqueTaskLabel(n.label))
+      || (cutoff != null && n.updated_at && Date.parse(n.updated_at) < cutoff));
+
+  if (!dryRun) {
+    // upsertNode REPLACES properties — merge so nothing else on the node is dropped.
+    for (const n of selected) {
+      o.graph.upsertNode({ type: 'task', label: n.label, source: n.source || 'work', properties: { ...(n.properties || {}), status: 'done' } });
+    }
+    o.db.logOp('close-tasks', { closed: selected.length, opaque, match: match || null, olderThanDays });
+  }
+  return { matched: selected.length, closed: dryRun ? 0 : selected.length, dryRun, tasks: selected.map((n) => n.label) };
 }
 
 /** Ongoing requests = task nodes not yet marked done (latest status wins via upsert). */

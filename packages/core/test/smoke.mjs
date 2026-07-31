@@ -5,7 +5,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Orchestrator, GovernanceError, checkGrounding, groundingScore, categorizeIngest, WORK_EVENT_NAMES } from '../src/index.mjs';
+import { Orchestrator, GovernanceError, checkGrounding, groundingScore, categorizeIngest, isOpaqueTaskLabel, WORK_EVENT_NAMES } from '../src/index.mjs';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; console.log(`  ✓ ${msg}`); } else { fail++; console.log(`  ✗ ${msg}`); } };
@@ -267,6 +267,28 @@ try {
   // work events are first-class entries → retrievable by hybrid search
   const wq = await o.query('proactive recall pre-turn hook', { limit: 5 });
   ok(wq.results.some((r) => /proactive recall/i.test(r.content)), 'recorded work event is retrievable via query');
+
+  // 12b. Opaque task-label guard: machine identifiers are recorded but never become task nodes
+  //      (2026-07-31: session UUIDs + timestamped file ids had minted 341 unactionable open tasks).
+  ok(isOpaqueTaskLabel('f04e6d59-38e1-4cc8-9c99-4aca30644f5c'), 'bare session UUID reads as opaque');
+  ok(isOpaqueTaskLabel('20260710_033427_3d468f'), 'timestamped file id reads as opaque');
+  ok(!isOpaqueTaskLabel('Wire proactive recall'), 'a human request is not opaque');
+  ok(!isOpaqueTaskLabel('migrate DNS for f04e6d59-38e1-4cc8-9c99-4aca30644f5c'), 'a title merely containing an id is not opaque');
+  const wOpaque = await o.recordWork({ kind: 'task_attempt', task: '20260710_033427_3d468f', content: 'bridged session file' });
+  ok(wOpaque.success && wOpaque.taskNodeSkipped === true, 'opaque label still records the event, flagged taskNodeSkipped');
+  ok(!o.openTasks().some((t) => t.task === '20260710_033427_3d468f'), 'opaque label never reaches the ongoing-requests list');
+
+  // 12c. Bulk close: selector required, dryRun previews without mutating, close is idempotent
+  await o.recordWork({ kind: 'task_attempt', task: 'SEO remediation' });
+  await o.recordWork({ kind: 'task_attempt', task: 'DNS migration' });
+  let threw = false;
+  try { o.closeTasks({}); } catch { threw = true; }
+  ok(threw, 'closeTasks refuses to run without a selector');
+  const dry = o.closeTasks({ match: '^DNS migration$', dryRun: true });
+  ok(dry.matched === 1 && dry.closed === 0 && o.openTasks().some((t) => t.task === 'DNS migration'), 'dryRun reports matches without closing');
+  const closed = o.closeTasks({ tasks: ['DNS migration', 'SEO remediation'] });
+  ok(closed.closed === 2 && !o.openTasks().some((t) => ['DNS migration', 'SEO remediation'].includes(t.task)), 'bulk close marks the selected tasks done');
+  ok(o.closeTasks({ tasks: ['DNS migration'] }).closed === 0, 'closing an already-closed task is a no-op');
 
   // 13. proactiveRecall self-gates: surfaces a relevant hit, stays silent on noise
   const prHit = await o.proactiveRecall('how do we wire proactive recall', { minScore: 0, force: true });
