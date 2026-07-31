@@ -362,6 +362,23 @@ try {
   const cfiles = fs.readdirSync(path.join(tmp, 'vault', 'LLM Wiki', 'concepts'));
   ok(cfiles.every((f) => f === f.toLowerCase()), 'concept page filenames are canonical lowercase (case-insensitive-share safe)');
 
+  // 21b. Projection dirty-check: unchanged pages hash-skip (the vault is a network share);
+  //      index.md/log.md carry a timestamp so they always rewrite — everything else skips.
+  const noop = o.project();
+  ok(noop.skipped > 0 && noop.written <= 2, `no-op projection skips unchanged pages (written=${noop.written}, skipped=${noop.skipped})`);
+  // A hand-deleted vault file is repaired despite a matching hash (existence check per dir).
+  const anyEntry = (await o.query('proactive recall pre-turn hook', { limit: 1 })).results[0];
+  const repairDir = path.join(tmp, 'vault', 'LLM Wiki');
+  const someProjected = fs.readdirSync(path.join(repairDir, 'memory')).find((f) => f.endsWith('.md'));
+  fs.unlinkSync(path.join(repairDir, 'memory', someProjected));
+  o.project();
+  ok(fs.existsSync(path.join(repairDir, 'memory', someProjected)), 'hand-deleted vault page is re-written on the next pass');
+  // force:true rewrites everything regardless of hashes (only same-filename duplicates
+  // still skip — first writer wins the pass whether forced or not).
+  const forced = o.project({ force: true });
+  ok(forced.written > noop.written && forced.written + forced.skipped === noop.written + noop.skipped,
+    `force:true rewrites all unique pages (written=${forced.written}, skipped=${forced.skipped})`);
+
   // 22. Projection resilience: one unwritable page (a corrupt share entry) must not abort the pass.
   const survivor = await o.storeMemory({ content: 'page that must still project around a broken sibling', tier: 'fact', type: 'note' });
   const ghost = await o.storeMemory({ content: 'page whose vault file is broken server-side', tier: 'fact', type: 'note' });

@@ -7,7 +7,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { frontmatter, nowISO, canonicalConceptKey } from './util.mjs';
+import { frontmatter, nowISO, canonicalConceptKey, sha12 } from './util.mjs';
 
 /** A projection pass must survive any single bad page — the vault sits on a network share
  *  where one entry can be individually broken (e.g. a server-corrupt CIFS name that EACCESes
@@ -42,21 +42,48 @@ function pruneDir(dir, keep) {
  * @param {import('./memory.mjs').TieredMemory} memory
  * @param {import('./graph.mjs').GraphStore} graph
  */
-export function projectVault(db, memory, graph, cfg) {
+export function projectVault(db, memory, graph, cfg, { force = false } = {}) {
   const root = path.join(cfg.vaultPath, cfg.wikiPath);
   // Root must exist before anything else — if THIS fails the vault is gone (unmounted share),
   // which is a whole-projection failure and should throw as before.
   fs.mkdirSync(root, { recursive: true });
   const entries = memory.listActive();
   let written = 0;
+  let skipped = 0;
   let pruned = 0;
   const state = { failed: 0, errors: [] };
   const keepByDir = new Map(); // dir → Set of filenames that belong in this projection
 
+  // Dirty-check: the vault sits on a network share, so an unconditional pass costs one write
+  // per page (~5.8k pages ≈ 3.5min over CIFS) even when NOTHING changed. Page hashes live in
+  // state.db; a page is skipped only when its hash matches AND the file is present on disk
+  // (one readdir per dir), so hand-deleted vault files still get repaired. `force` rewrites all.
+  const pageHashes = new Map(db.prepare('SELECT path, hash FROM projected_pages').all().map((r) => [r.path, r.hash]));
+  const seenPages = new Set();
+  const upsertHash = db.prepare("INSERT INTO projected_pages(path,hash,updated_at) VALUES(?,?,?) ON CONFLICT(path) DO UPDATE SET hash=excluded.hash, updated_at=excluded.updated_at");
+  const dirListings = new Map();
+  const madeDirs = new Set();
+  const mkdirOnce = (dir) => { if (!madeDirs.has(dir)) { fs.mkdirSync(dir, { recursive: true }); madeDirs.add(dir); } };
+  const listDir = (dir) => {
+    if (!dirListings.has(dir)) { try { dirListings.set(dir, new Set(fs.readdirSync(dir))); } catch { dirListings.set(dir, new Set()); } }
+    return dirListings.get(dir);
+  };
+  const writePage = (dir, fname, body) => {
+    const rel = path.join(path.relative(root, dir) || '.', fname);
+    // Two nodes can canonicalize to one filename (e.g. a task and a concept sharing a label).
+    // First writer wins the pass — without this, the stored hash always belongs to the other
+    // writer and both rewrite every pass forever (hash ping-pong).
+    if (seenPages.has(rel)) { skipped++; return; }
+    seenPages.add(rel);
+    const h = sha12(body);
+    if (!force && pageHashes.get(rel) === h && listDir(dir).has(fname)) { skipped++; return; }
+    if (safeWrite(path.join(dir, fname), body, state)) { written++; upsertHash.run(rel, h, nowISO()); }
+  };
+
   // Per-entry pages, grouped by tier.
   for (const e of entries) {
     const dir = path.join(root, e.tier);
-    fs.mkdirSync(dir, { recursive: true });
+    mkdirOnce(dir);
     if (!keepByDir.has(dir)) keepByDir.set(dir, new Set());
     keepByDir.get(dir).add(`${e.id}.md`);
     const concepts = (e.concepts || []).map((c) => `[[${c.name}]]`);
@@ -70,7 +97,7 @@ export function projectVault(db, memory, graph, cfg) {
       concepts.length ? `## Concepts\n${concepts.join(' · ')}` : '',
       e.provenance ? `\n## Provenance\n\`\`\`json\n${JSON.stringify(e.provenance, null, 2)}\n\`\`\`` : '',
     ].join('\n');
-    if (safeWrite(path.join(dir, `${e.id}.md`), body, state)) written++;
+    writePage(dir, `${e.id}.md`, body);
   }
 
   // Concept/entity pages from the graph. Filenames come from the CANONICAL key, not the raw
@@ -79,7 +106,7 @@ export function projectVault(db, memory, graph, cfg) {
   const g = graph.getGraph();
   if (g.nodes.length) {
     const cdir = path.join(root, 'concepts');
-    fs.mkdirSync(cdir, { recursive: true });
+    mkdirOnce(cdir);
     const ckeep = new Set();
     keepByDir.set(cdir, ckeep);
     for (const n of g.nodes) {
@@ -92,7 +119,7 @@ export function projectVault(db, memory, graph, cfg) {
         links.length ? `## Related\n${links.join('\n')}` : '',
       ].join('\n');
       const fname = `${(canonicalConceptKey(n.label) || n.id).replace(/[^\w.-]+/g, '_')}.md`;
-      if (safeWrite(path.join(cdir, fname), body, state)) written++;
+      writePage(cdir, fname, body);
       ckeep.add(fname); // keep even on failure — a half-broken name must not get pruned into worse state
     }
   }
@@ -114,12 +141,18 @@ export function projectVault(db, memory, graph, cfg) {
     for (const e of es) idx += `- [[${e.tier}/${e.id}]]: ${e.content.slice(0, 80).replace(/\n/g, ' ')}\n`;
     idx += '\n';
   }
-  if (safeWrite(path.join(root, 'index.md'), idx, state)) written++;
+  writePage(root, 'index.md', idx);
 
   const logs = db.prepare('SELECT ts,operation,detail FROM log ORDER BY id DESC LIMIT 50').all();
   let logmd = `# Wiki Log\n\n> Projected from state.db — ${nowISO()}\n\n`;
   for (const l of logs) logmd += `## [${l.ts}] ${l.operation}\n\`\`\`json\n${l.detail}\n\`\`\`\n\n`;
-  if (safeWrite(path.join(root, 'log.md'), logmd, state)) written++;
+  writePage(root, 'log.md', logmd);
 
-  return { written, pruned, failed: state.failed, errors: state.errors, vaultPath: root };
+  // Keep the hash table in lockstep with what this projection owns: rows for pruned or
+  // no-longer-projected pages must go, or a page re-created later under the same path
+  // could be skipped against a stale hash.
+  const dropHash = db.prepare('DELETE FROM projected_pages WHERE path=?');
+  for (const p of pageHashes.keys()) if (!seenPages.has(p)) dropHash.run(p);
+
+  return { written, skipped, pruned, failed: state.failed, errors: state.errors, vaultPath: root };
 }

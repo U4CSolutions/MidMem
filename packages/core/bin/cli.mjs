@@ -23,7 +23,7 @@ try {
     case 'recall': out(o.recall(pos[0])); break;
     case 'brief': out(await o.brief()); break;
     case 'lint': out(o.lint()); break;
-    case 'project': out(o.project()); break;
+    case 'project': out(o.project({ force: !!flags.force })); break;
     case 'promote': out(await o.promote(pos[0], pos[1], { curated: !!flags.curated })); break;
     case 'maintain': out(await o.maintain({ force: !!flags.force })); break;
     case 'recall-check': out(await o.proactiveRecall(pos.join(' '), { minScore: flags.minScore != null ? Number(flags.minScore) : undefined, maxTokens: flags.maxTokens != null ? Number(flags.maxTokens) : undefined, scopes: flags.scopes?.split(','), force: !!flags.force })); break;

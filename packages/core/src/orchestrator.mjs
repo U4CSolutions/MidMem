@@ -307,8 +307,8 @@ export class Orchestrator {
     return governed(this.gov, 'promote', { toTier, curated }, () => { const r = this.memory.promote(id, toTier); this.db.logOp('promote', { id, toTier }); this.#markVaultDirty(); return r; });
   }
 
-  project() {
-    const r = projectVault(this.db, this.memory, this.graph, this.cfg);
+  project({ force = false } = {}) {
+    const r = projectVault(this.db, this.memory, this.graph, this.cfg, { force });
     this.db.logOp('project', r);
     this.db.prepare("INSERT INTO meta(key,value) VALUES('vault_dirty','0') ON CONFLICT(key) DO UPDATE SET value='0'").run();
     return r;

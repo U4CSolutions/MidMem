@@ -118,6 +118,10 @@ export class StateDB {
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, kind TEXT NOT NULL,
         proof_hash TEXT, detail TEXT
       );
+
+      CREATE TABLE IF NOT EXISTS projected_pages (
+        path TEXT PRIMARY KEY, hash TEXT NOT NULL, updated_at TEXT
+      );
     `);
     // Migrations for pre-existing databases (idempotent) — must precede any index on a new column.
     this.#ensureColumn('entries', 'scope', "TEXT NOT NULL DEFAULT 'shared'");

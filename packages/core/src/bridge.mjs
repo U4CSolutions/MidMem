@@ -22,6 +22,15 @@ export async function bridgeMemory(o, { sources = o.cfg.bridgeSources, project =
   const perSource = [];
 
   for (const s of sources) {
+    // Governance allows writes to the agent's own scope + 'shared' (and everything when the
+    // agent IS 'shared'). A bridge running under a stack scope (e.g. the in-maintain bridge
+    // inside an agent's MCP server) must skip the other stack's sources instead of hammering
+    // governance with a denial per file per hour — those sources belong to the shared-scope
+    // cron/CLI bridge.
+    if (o.cfg.agentScope !== 'shared' && s.scope !== o.cfg.agentScope && s.scope !== 'shared') {
+      perSource.push({ dir: s.dir, scope: s.scope, skippedReason: `not writable from agentScope '${o.cfg.agentScope}'` });
+      continue;
+    }
     let files = [];
     try { files = fs.readdirSync(s.dir).filter((f) => f.endsWith('.md')); }
     catch { continue; } // dir may not exist yet (e.g. vault not on NFS yet)
