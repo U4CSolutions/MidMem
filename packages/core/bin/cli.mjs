@@ -16,8 +16,8 @@ try {
   switch (cmd) {
     case 'init': out({ db: o.cfg.dbPath, vault: o.cfg.vaultPath, tiers: o.memory.tierNames }); break;
     case 'ingest': out(await o.ingest({ path: pos[0], type: flags.type || 'note', title: flags.title, scope: flags.scope, curated: !!flags.curated })); break;
-    case 'remember': out(await o.storeMemory({ content: pos.join(' '), tier: flags.tier || 'memory', type: flags.type || 'insight', scope: flags.scope, curated: !!flags.curated })); break;
-    case 'query': out(await o.query(pos.join(' '), { tiers: flags.tiers?.split(','), scopes: flags.scopes?.split(','), limit: Number(flags.limit) || 20, includeGraphContext: !!flags.graph })); break;
+    case 'remember': out(await o.storeMemory({ content: pos.join(' '), tier: flags.tier || 'memory', type: flags.type || 'insight', scope: flags.scope, curated: !!flags.curated, memFunction: typeof flags.function === 'string' ? flags.function : null })); break;
+    case 'query': out(await o.query(pos.join(' '), { tiers: flags.tiers?.split(','), scopes: flags.scopes?.split(','), functions: typeof flags.functions === 'string' ? flags.functions.split(',') : undefined, limit: Number(flags.limit) || 20, includeGraphContext: !!flags.graph })); break;
     case 'bridge': { const { bridgeMemory } = await import('../src/bridge.mjs'); out(await bridgeMemory(o)); break; }
     case 'handoff': out(await o.handoffBrief({ task: pos.join(' '), profile: flags.profile || 'local', scopes: flags.scopes?.split(','), tiers: flags.tiers?.split(',') })); break;
     case 'recall': out(o.recall(pos[0])); break;

@@ -131,6 +131,10 @@ export class StateDB {
     this.#ensureColumn('entries', 'retrieval_count', 'INTEGER NOT NULL DEFAULT 0');
     this.#ensureColumn('entries', 'helpful_count', 'INTEGER NOT NULL DEFAULT 0');
     this.#ensureColumn('entries', 'last_accessed_at', 'TEXT');
+    // v4 (roadmap 2026-08 #4): function axis — memory typed along independent axes (survey
+    // arXiv 2607.25380): mem_function (working|episodic|semantic|procedural|prospective) is
+    // orthogonal to the persistence tier. Nullable: legacy rows resolve via functionForType.
+    this.#ensureColumn('entries', 'mem_function', 'TEXT');
     // v3: backfill the trigram index once for pre-existing rows (triggers cover new rows).
     if (!this.db.prepare("SELECT 1 FROM meta WHERE key='trigram_built'").get()) {
       if (this.db.prepare('SELECT COUNT(*) c FROM entries').get().c > 0)

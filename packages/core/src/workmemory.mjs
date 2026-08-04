@@ -28,6 +28,26 @@ export const WORK_EVENT_TYPES = {
 };
 export const WORK_EVENT_NAMES = Object.keys(WORK_EVENT_TYPES);
 
+/**
+ * Function axis (survey arXiv 2607.25380): memory typed along independent axes — the
+ * persistence tier says how long it lives, mem_function says what ROLE it plays.
+ * Deterministic default per entry type; explicit memFunction on store always wins.
+ *  - episodic: what happened (sessions, attempts, sources touched, artifacts, dead ends)
+ *  - procedural: how to act (corrections reshape behavior; patterns/recipes when packs land)
+ *  - semantic: what is known (ingested knowledge, insights, decisions' rationale)
+ *  - prospective: what must become actionable later (roadmap #6)
+ *  - working: context-assembly-time only — valid but not persisted by default
+ */
+export const MEMORY_FUNCTIONS = ['working', 'episodic', 'semantic', 'procedural', 'prospective'];
+const FUNCTION_OF_TYPE = {
+  task_attempt: 'episodic', source_used: 'episodic', artifact: 'episodic', dead_end: 'episodic',
+  session: 'episodic',
+  correction: 'procedural', pattern: 'procedural', scaffold: 'procedural', recipe: 'procedural',
+  decision: 'semantic', insight: 'semantic', note: 'semantic', research: 'semantic', report: 'semantic',
+  prospective: 'prospective',
+};
+export function functionForType(type) { return FUNCTION_OF_TYPE[type] || 'semantic'; }
+
 /** Categories every ingest is tagged with (provenance.category) — lets the store track
  *  ongoing requests by kind without an LLM. Order matters: first match wins. */
 const CATEGORY_RULES = [

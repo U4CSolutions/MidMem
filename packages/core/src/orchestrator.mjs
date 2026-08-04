@@ -95,10 +95,10 @@ export class Orchestrator {
   }
 
   /** The MCP `remember` op — store a memory directly. */
-  async storeMemory({ content, type = 'insight', tier = 'memory', scope = this.cfg.agentScope, source, concepts, curated = false }) {
+  async storeMemory({ content, type = 'insight', tier = 'memory', scope = this.cfg.agentScope, source, concepts, curated = false, memFunction = null }) {
     const r = await governed(this.gov, 'store', { tier, scope, curated }, async () => {
       const prov = source ? { originalSource: source.path, extractedAt: nowISO(), chain: [{ step: 'remember', source: source.path }] } : null;
-      const stored = this.db.tx(() => this.memory.store({ content, type, tier, scope, provenance: prov, concepts }));
+      const stored = this.db.tx(() => this.memory.store({ content, type, tier, scope, provenance: prov, concepts, memFunction }));
       const { vector, model, mode } = await this.embedder.embed(content);
       await this.memory.upsertVector(stored.id, vector, model, mode);
       if (concepts) for (const c of concepts) this.graph.upsertNode({ type: c.type || 'concept', label: c.name, source: 'remember' });

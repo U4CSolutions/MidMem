@@ -16,8 +16,8 @@ const TOOLS = {
   },
   query: {
     description: 'Hybrid (lexical+vector) search of the knowledge store with provenance. Defaults to this agent\'s scope + shared; pass scopes to override.',
-    schema: S({ query: { type: 'string' }, tiers: { type: 'array', items: { type: 'string' } }, scopes: { type: 'array', items: { type: 'string' } }, limit: { type: 'number' }, maxTokens: { type: 'number' }, includeGraphContext: { type: 'boolean' } }, ['query']),
-    run: (a) => o.query(a.query, { tiers: a.tiers, scopes: a.scopes, limit: a.limit ?? 20, maxTokens: a.maxTokens, includeGraphContext: !!a.includeGraphContext }),
+    schema: S({ query: { type: 'string' }, tiers: { type: 'array', items: { type: 'string' } }, scopes: { type: 'array', items: { type: 'string' } }, functions: { type: 'array', items: { type: 'string' }, description: 'memory-function filter: working|episodic|semantic|procedural|prospective' }, limit: { type: 'number' }, maxTokens: { type: 'number' }, includeGraphContext: { type: 'boolean' } }, ['query']),
+    run: (a) => o.query(a.query, { tiers: a.tiers, scopes: a.scopes, functions: a.functions, limit: a.limit ?? 20, maxTokens: a.maxTokens, includeGraphContext: !!a.includeGraphContext }),
   },
   feedback: {
     description: 'Mark a recalled memory entry helpful (or not) — adjusts its trust score over time.',
@@ -31,8 +31,8 @@ const TOOLS = {
   },
   remember: {
     description: 'Store a memory entry (tier default: memory; wisdom requires curated:true). scope defaults to this agent; pass "shared" to publish to the commons.',
-    schema: S({ content: { type: 'string' }, type: { type: 'string' }, tier: { type: 'string' }, scope: { type: 'string' }, curated: { type: 'boolean' } }, ['content']),
-    run: (a) => o.storeMemory({ content: a.content, type: a.type || 'insight', tier: a.tier || 'memory', scope: a.scope, curated: !!a.curated }),
+    schema: S({ content: { type: 'string' }, type: { type: 'string' }, tier: { type: 'string' }, scope: { type: 'string' }, curated: { type: 'boolean' }, memFunction: { type: 'string', description: 'memory function axis: working|episodic|semantic|procedural|prospective (default derived from type)' } }, ['content']),
+    run: (a) => o.storeMemory({ content: a.content, type: a.type || 'insight', tier: a.tier || 'memory', scope: a.scope, curated: !!a.curated, memFunction: a.memFunction || null }),
   },
   recall: { description: 'Retrieve a memory entry by id.', schema: S({ entryId: { type: 'string' } }, ['entryId']), run: (a) => o.recall(a.entryId) },
   brief: { description: 'Summary of knowledge state across tiers.', schema: S({}), run: () => o.brief() },

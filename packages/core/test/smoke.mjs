@@ -304,6 +304,23 @@ try {
   ok(o.recall(j1.id)?.status !== 'active', 'junk entry is soft-deleted');
   ok(o.recall(j2.id)?.status === 'active', 'legitimate dead_end with real content survives the opaque selector');
 
+  // 12h. Function axis (survey 2607.25380): deterministic defaults per type; explicit override;
+  //      retrieval filters by role; legacy null rows resolve via the same type map.
+  const fnSem = await o.storeMemory({ content: 'zanzibar deployment doctrine document alpha', tier: 'memory' });
+  ok(fnSem.memFunction === 'semantic', 'insight defaults to semantic function');
+  const fnWork = await o.recordWork({ kind: 'task_attempt', task: 'fn axis probe', content: 'zanzibar deployment doctrine attempt beta' });
+  ok(o.recall(fnWork.id).mem_function === 'episodic', 'task_attempt defaults to episodic function');
+  const fnProc = await o.storeMemory({ content: 'zanzibar deployment doctrine recipe gamma', tier: 'memory', memFunction: 'procedural' });
+  ok(fnProc.memFunction === 'procedural', 'explicit memFunction override wins');
+  const fnQ = await o.query('zanzibar deployment doctrine', { functions: ['episodic'], limit: 10 });
+  ok(fnQ.results.some((r) => r.id === fnWork.id) && !fnQ.results.some((r) => r.id === fnSem.id || r.id === fnProc.id),
+    'functions filter returns only the requested role');
+  o.db.prepare('UPDATE entries SET mem_function=NULL WHERE id=?').run(fnWork.id);
+  const fnQ2 = await o.query('zanzibar deployment doctrine', { functions: ['episodic'], limit: 10 });
+  ok(fnQ2.results.some((r) => r.id === fnWork.id), 'legacy NULL mem_function resolves via the type map');
+  let fnBad = false; try { await o.storeMemory({ content: 'x', tier: 'memory', memFunction: 'telepathic' }); } catch { fnBad = true; }
+  ok(fnBad, 'unknown memory function is rejected');
+
   // 12g. Projection QA (WiCER): clean wiki passes; a deleted page fails completeness;
   //      a corrupted page fails sampled fidelity; report-only (probe never mutates).
   o.project();
@@ -316,7 +333,7 @@ try {
   ok(qa1.pass === false && qa1.missingPages.includes(qaVictim.id), 'QA catches a missing page (completeness probe)');
   o.project(); // repair via dirty-check's existence path
   fs.writeFileSync(qaPage, '---\nid: corrupt\n---\ntruncated garbage page');
-  const qa2 = o.probeProjection();
+  const qa2 = o.probeProjection({ sampleSize: 500 }); // full sweep: the victim must be in-sample regardless of recency
   ok(qa2.pass === false && qa2.fidelityFailures.some((f) => f.id === qaVictim.id), 'QA catches a corrupted page (fidelity probe)');
   o.project({ force: true }); // restore for later tests
 

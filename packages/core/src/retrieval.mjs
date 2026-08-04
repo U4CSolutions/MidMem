@@ -9,6 +9,7 @@
  * (Ideas adapted from memory-os: trust scoring, two-pass ref-chain boost, token budget.)
  */
 import { ftsMatchExpr } from './util.mjs';
+import { functionForType } from './workmemory.mjs';
 import { conceptSeedsFromVector } from './concepts.mjs';
 
 /** One FTS lane (token or trigram), scope/tier filtered. Returns ranked entry ids.
@@ -79,7 +80,15 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
   }
 
   // Hydrate candidates once.
-  const cand = [...fused.entries()].map(([id, m]) => ({ id, score: m.score, ranks: m.ranks, entry: memory.get(id) })).filter((c) => c.entry);
+  let cand = [...fused.entries()].map(([id, m]) => ({ id, score: m.score, ranks: m.ranks, entry: memory.get(id) })).filter((c) => c.entry);
+
+  // --- Function-axis filter (survey 2607.25380): restrict to the requested memory ROLE(s).
+  //     Legacy rows (null mem_function) resolve through the same deterministic type map, so
+  //     pre-migration data filters identically to new writes. ---
+  if (opts.functions && opts.functions.length) {
+    const want = new Set(opts.functions);
+    cand = cand.filter((c) => want.has(c.entry.mem_function || functionForType(c.entry.type)));
+  }
 
   // --- Trust boost (usage feedback) ---
   for (const c of cand) c.score += cfg.trustWeight * ((c.entry.trust_score ?? 0.5) - 0.5);
