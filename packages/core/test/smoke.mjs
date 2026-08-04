@@ -304,6 +304,22 @@ try {
   ok(o.recall(j1.id)?.status !== 'active', 'junk entry is soft-deleted');
   ok(o.recall(j2.id)?.status === 'active', 'legitimate dead_end with real content survives the opaque selector');
 
+  // 12g. Projection QA (WiCER): clean wiki passes; a deleted page fails completeness;
+  //      a corrupted page fails sampled fidelity; report-only (probe never mutates).
+  o.project();
+  const qa0 = o.probeProjection();
+  ok(qa0.pass === true && qa0.entries > 0, `projection QA passes on a clean wiki (${qa0.entries} entries)`);
+  const qaVictim = (await o.query('hybrid vector retrieval', { limit: 1 })).results[0];
+  const qaPage = path.join(tmp, 'vault', 'LLM Wiki', qaVictim.tier, `${qaVictim.id}.md`);
+  fs.unlinkSync(qaPage);
+  const qa1 = o.probeProjection();
+  ok(qa1.pass === false && qa1.missingPages.includes(qaVictim.id), 'QA catches a missing page (completeness probe)');
+  o.project(); // repair via dirty-check's existence path
+  fs.writeFileSync(qaPage, '---\nid: corrupt\n---\ntruncated garbage page');
+  const qa2 = o.probeProjection();
+  ok(qa2.pass === false && qa2.fidelityFailures.some((f) => f.id === qaVictim.id), 'QA catches a corrupted page (fidelity probe)');
+  o.project({ force: true }); // restore for later tests
+
   // 12e. Transition verifier (TRUSTMEM): on-subject supersede passes; topic-swap supersede is
   //      denied; evidence-covered supersede passes the coverage gate; ungrounded promote denied.
   const tvOld = o.claims.add({ content: 'The gateway webhook route listens on port 18789 and is healthy' });

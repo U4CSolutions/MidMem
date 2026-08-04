@@ -12,7 +12,7 @@ import { GraphStore } from './graph.mjs';
 import { ClaimStore } from './claims.mjs';
 import { SigmaVerifier } from './verify.mjs';
 import { PolicyEvaluator, governed } from './governance.mjs';
-import { projectVault } from './project.mjs';
+import { projectVault, probeProjection } from './project.mjs';
 import { hybridSearch } from './retrieval.mjs';
 import { checkGrounding, groundingScore } from './grounding.mjs';
 import { makeVectorStore } from './vectorstore.mjs';
@@ -217,7 +217,17 @@ export class Orchestrator {
         // Vault is a projection on possibly-remote storage — its failure must not fail maintenance.
         try { projected = this.project(); } catch (e) { projected = { error: e.message }; }
       }
-      const summary = { swept, promoted, projected, autoIngested, concepts, retention, forced: force };
+      // Projection QA (WiCER): probe the compiled wiki on the heavy pass only (force/daily),
+      // where the concept-embedding work already lives. Report-only; failure must not fail
+      // maintenance — a QA failure is a finding, not an outage.
+      let projectionQA = null;
+      if (force && this.cfg.projectionQA?.enabled !== false) {
+        try {
+          projectionQA = this.probeProjection();
+          if (!projectionQA.pass) this.db.logOp('projection-qa-fail', { missing: projectionQA.missingCount, fidelity: projectionQA.fidelityFailures.length });
+        } catch (e) { projectionQA = { error: e.message }; }
+      }
+      const summary = { swept, promoted, projected, projectionQA, autoIngested, concepts, retention, forced: force };
       this.db.logOp('maintain', summary);
       return summary;
     } finally { this._maintaining = false; }
@@ -326,6 +336,13 @@ export class Orchestrator {
       }
       const r = this.memory.promote(id, toTier); this.db.logOp('promote', { id, toTier }); this.#markVaultDirty(); return r;
     });
+  }
+
+  /** WiCER-style projection QA: completeness + sampled fidelity probes over the compiled wiki. */
+  probeProjection(opts = {}) {
+    const r = probeProjection(this.db, this.memory, this.cfg, { ...this.cfg.projectionQA, ...opts });
+    this.db.logOp('projection-qa', { pass: r.pass, entries: r.entries, missing: r.missingCount, sampled: r.sampled, fidelityFailures: r.fidelityFailures.length });
+    return r;
   }
 
   project({ force = false } = {}) {

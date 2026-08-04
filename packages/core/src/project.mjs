@@ -8,6 +8,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { frontmatter, nowISO, canonicalConceptKey, sha12 } from './util.mjs';
+import { groundingScore } from './grounding.mjs';
 
 /** A projection pass must survive any single bad page — the vault sits on a network share
  *  where one entry can be individually broken (e.g. a server-corrupt CIFS name that EACCESes
@@ -155,4 +156,52 @@ export function projectVault(db, memory, graph, cfg, { force = false } = {}) {
   for (const p of pageHashes.keys()) if (!seenPages.has(p)) dropHash.run(p);
 
   return { written, skipped, pruned, failed: state.failed, errors: state.errors, vaultPath: root };
+}
+
+/**
+ * Projection QA — WiCER-style (arXiv 2605.07068) tests over the compiled wiki: naive
+ * compilation can silently discard or corrupt knowledge, so the projection gets probed,
+ * not trusted. Deterministic, report-only (failures are surfaced, never auto-"fixed"):
+ *
+ *  1. completeness — every ACTIVE entry has its page on disk (one readdir per tier dir;
+ *     the dirty-check can't catch a page that was never written or was hand-deleted
+ *     between passes AND has a stale hash row).
+ *  2. fidelity — for a bounded sample (most recently updated entries), the page on disk
+ *     actually contains the entry's content (grounding overlap ≥ minFidelity). Catches
+ *     truncated/corrupted writes on the network share that returned success.
+ *
+ * Sampling keeps a QA pass cheap over CIFS: completeness is O(dirs) readdirs;
+ * fidelity reads `sampleSize` files, newest-updated first (the pages most likely to
+ * have been rewritten recently — where write corruption would live).
+ */
+export function probeProjection(db, memory, cfg, { sampleSize = 20, minFidelity = 0.9 } = {}) {
+  const root = path.join(cfg.vaultPath, cfg.wikiPath);
+  const entries = memory.listActive();
+  const missing = [];
+  const dirList = new Map();
+  const listing = (dir) => {
+    if (!dirList.has(dir)) { try { dirList.set(dir, new Set(fs.readdirSync(dir))); } catch { dirList.set(dir, new Set()); } }
+    return dirList.get(dir);
+  };
+  for (const e of entries) {
+    if (!listing(path.join(root, e.tier)).has(`${e.id}.md`)) missing.push(e.id);
+  }
+
+  const fidelityFailures = [];
+  const sample = [...entries]
+    .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
+    .slice(0, sampleSize)
+    .filter((e) => !missing.includes(e.id));
+  for (const e of sample) {
+    try {
+      const page = fs.readFileSync(path.join(root, e.tier, `${e.id}.md`), 'utf8');
+      const score = groundingScore(page, e.content);
+      if (score < minFidelity) fidelityFailures.push({ id: e.id, score: Number(score.toFixed(3)) });
+    } catch (err) {
+      fidelityFailures.push({ id: e.id, error: err.code || err.message });
+    }
+  }
+
+  const pass = missing.length === 0 && fidelityFailures.length === 0;
+  return { pass, entries: entries.length, missingPages: missing.slice(0, 20), missingCount: missing.length, sampled: sample.length, fidelityFailures };
 }
