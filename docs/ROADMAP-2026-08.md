@@ -37,7 +37,7 @@
 3. Projection QA — completeness + sampled-fidelity probes, report-only, in forced maintain. ☑ (smoke 121→124, bench PASS)
 4. Function axis — `mem_function` column, deterministic type map, retrieval filter, CLI/MCP. ☑ (smoke 124→130, bench PASS)
 5. Capture packs — data-driven loader, recordPattern, coding-patterns pack, pattern-capture skill. ☑ (smoke 130→136, bench PASS)
-6. Prospective memory — type + due surfacing + CLI/MCP. ☐
+6. Prospective memory — intent+trigger entries, deterministic due surface, resolve; cron fires. ☑ (smoke 136→145, bench PASS)
 7. Revision export — deterministic `export` + maintain refresh. ☐
 8. Adversarial review pass (independent subagent) + full-suite verification + push. ☐
 

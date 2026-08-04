@@ -227,6 +227,67 @@ export async function forgetEntries(o, { ids = [], match = null, opaque = false,
 }
 
 /**
+ * Prospective memory (PM-Bench, arXiv 2607.12385; roadmap #6) — "what must become
+ * actionable later" as its own capability class, separated from historical memory.
+ *
+ * DELIBERATE BOUNDARY: MidMem records intents and their outcomes; it does NOT fire
+ * triggers. Execution belongs to the scheduler that owns time (cron) — PM-Bench's
+ * 65.1% F1 ceiling for in-model trigger recognition is exactly why the system of
+ * record for "when" must stay outside the memory layer. `dueProspective` is a
+ * deterministic read surface a scheduler/hook polls; nothing here acts.
+ */
+export async function recordProspective(o, { intent, trigger = {}, context, scope, expiresWhen = ['completed', 'cancelled'] } = {}) {
+  if (!intent) throw new Error('recordProspective requires an intent');
+  if (trigger.type === 'date') {
+    if (Number.isNaN(Date.parse(trigger.value))) throw new Error(`bad date trigger: ${trigger.value}`);
+  } else if (trigger.type === 'event') {
+    if (!trigger.value || typeof trigger.value !== 'string') throw new Error('event trigger requires a value');
+  } else throw new Error(`unknown trigger type: ${trigger.type} (expected date|event)`);
+
+  const content = `[prospective] ${intent} — trigger: ${trigger.type}=${trigger.value}${context ? ` — ${context}` : ''}`;
+  const res = await o.storeMemory({ content, type: 'prospective', tier: 'memory', scope });
+  const prov = {
+    category: 'prospective', recordedAt: nowISO(),
+    prospective: { intent, trigger, status: 'pending', context: context ?? null, expiresWhen },
+  };
+  o.db.prepare('UPDATE entries SET provenance=?, updated_at=? WHERE id=?').run(JSON.stringify(prov), nowISO(), res.id);
+  o.db.logOp('prospective-add', { id: res.id, trigger: `${trigger.type}=${String(trigger.value).slice(0, 60)}` });
+  return { success: true, ...res, prospective: prov.prospective };
+}
+
+/** Pending intents whose trigger has fired: date triggers ≤ `now`, plus event triggers matching
+ *  `event` when one is passed. Deterministic — `now` is a parameter, never Date.now() implicitly
+ *  hidden from the caller's control. */
+export function dueProspective(o, { now = nowISO(), event = null } = {}) {
+  const rows = o.db.prepare("SELECT id, provenance, scope, created_at FROM entries WHERE type='prospective' AND status='active'").all();
+  const due = [];
+  for (const r of rows) {
+    let p; try { p = JSON.parse(r.provenance || '{}').prospective; } catch { continue; }
+    if (!p || p.status !== 'pending') continue;
+    const t = p.trigger || {};
+    const fired = (t.type === 'date' && Date.parse(t.value) <= Date.parse(now))
+      || (t.type === 'event' && event != null && t.value === event);
+    if (fired) due.push({ id: r.id, intent: p.intent, trigger: t, context: p.context, scope: r.scope, created_at: r.created_at });
+  }
+  return due.sort((a, b) => (a.trigger.value || '').localeCompare(b.trigger.value || ''));
+}
+
+/** Close out an intent: completed | cancelled. The entry archives (leaves active recall)
+ *  but is preserved as history — outcomes are knowledge too. */
+export function resolveProspective(o, id, outcome = 'completed') {
+  if (!['completed', 'cancelled'].includes(outcome)) throw new Error(`bad outcome: ${outcome} (completed|cancelled)`);
+  const row = o.db.prepare("SELECT provenance FROM entries WHERE id=? AND type='prospective'").get(id);
+  if (!row) return { success: false, message: `not a prospective entry: ${id}` };
+  let prov; try { prov = JSON.parse(row.provenance || '{}'); } catch { prov = {}; }
+  if (!prov.prospective) return { success: false, message: `no prospective record on ${id}` };
+  prov.prospective.status = outcome;
+  prov.prospective.resolvedAt = nowISO();
+  o.db.prepare("UPDATE entries SET provenance=?, status='archived', updated_at=? WHERE id=?").run(JSON.stringify(prov), nowISO(), id);
+  o.db.logOp('prospective-resolve', { id, outcome });
+  return { success: true, id, outcome };
+}
+
+/**
  * Deterministic background capture for `maintain()` — pull each stack's session/memory
  * dirs into the store via the (idempotent, hash-deduped) bridge so agent work is
  * auto-ingested without anyone remembering to run it. Projection is left to maintain's

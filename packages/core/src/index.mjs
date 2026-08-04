@@ -18,5 +18,6 @@ export { handoffBrief, HANDOFF_PROFILES } from './handoff.mjs';
 export { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, isOpaqueTaskLabel, consolidateWork, categorizeIngest, functionForType, MEMORY_FUNCTIONS, WORK_EVENT_TYPES, WORK_EVENT_NAMES } from './workmemory.mjs';
 export { verifyTransition, verifyPromotion, subjectOverlap } from './transitions.mjs';
 export { loadPacks, recordPattern } from './packs.mjs';
+export { recordProspective, dueProspective, resolveProspective } from './workmemory.mjs';
 export { refreshConceptGraph, conceptSeedsFromVector, dedupeConceptNodes, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
 export { canonicalConceptKey } from './util.mjs';

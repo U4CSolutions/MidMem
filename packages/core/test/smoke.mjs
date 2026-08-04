@@ -304,6 +304,22 @@ try {
   ok(o.recall(j1.id)?.status !== 'active', 'junk entry is soft-deleted');
   ok(o.recall(j2.id)?.status === 'active', 'legitimate dead_end with real content survives the opaque selector');
 
+  // 12j. Prospective memory (PM-Bench): record → not due before trigger → due after →
+  //      event triggers match by name → resolve archives with outcome → validation rejects junk.
+  const pd = await o.recordProspective({ intent: 'rotate API credentials', trigger: { type: 'date', value: '2026-09-01T00:00:00Z' }, context: 'memory-platform' });
+  ok(pd.success && pd.prospective.status === 'pending', 'date-triggered intent recorded pending');
+  ok(o.recall(pd.id).mem_function === 'prospective', 'prospective entry carries the prospective function');
+  ok(!o.dueProspective({ now: '2026-08-31T00:00:00Z' }).some((x) => x.id === pd.id), 'not due before its trigger date');
+  ok(o.dueProspective({ now: '2026-09-01T00:00:01Z' }).some((x) => x.id === pd.id), 'due once the trigger date passes');
+  const pe = await o.recordProspective({ intent: 'rebuild wiki after runtime upgrade', trigger: { type: 'event', value: 'lmstudio-runtime-upgraded' } });
+  ok(!o.dueProspective({ now: '2027-01-01T00:00:00Z' }).some((x) => x.id === pe.id), 'event intent never fires on time alone');
+  ok(o.dueProspective({ event: 'lmstudio-runtime-upgraded' }).some((x) => x.id === pe.id), 'event intent fires on its named event');
+  const pres = o.resolveProspective(pd.id, 'completed');
+  ok(pres.success && !o.dueProspective({ now: '2026-09-02T00:00:00Z' }).some((x) => x.id === pd.id), 'resolved intent leaves the due list');
+  ok(o.recall(pd.id) === null || o.recall(pd.id).status !== 'active', 'resolved intent archived (kept as history)');
+  let pBad = false; try { await o.recordProspective({ intent: 'x', trigger: { type: 'date', value: 'not-a-date' } }); } catch { pBad = true; }
+  ok(pBad, 'bad date trigger rejected');
+
   // 12i. Capture packs: builtin coding-patterns pack loads; recordPattern lands with the pack's
   //      tier+function and typed edges; pack categorizer rule outranks generic; unknown type rejected.
   const pk = o.listPacks();

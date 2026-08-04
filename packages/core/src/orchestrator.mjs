@@ -17,7 +17,7 @@ import { hybridSearch } from './retrieval.mjs';
 import { checkGrounding, groundingScore } from './grounding.mjs';
 import { makeVectorStore } from './vectorstore.mjs';
 import { handoffBrief as buildHandoffBrief } from './handoff.mjs';
-import { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, consolidateWork, categorizeIngest } from './workmemory.mjs';
+import { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, consolidateWork, categorizeIngest, recordProspective, dueProspective, resolveProspective } from './workmemory.mjs';
 import { verifyTransition, verifyPromotion, auditTransition } from './transitions.mjs';
 import { loadPacks, recordPattern } from './packs.mjs';
 import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
@@ -262,6 +262,15 @@ export class Orchestrator {
 
   /** Bulk soft-forget entries by selector (content selector required; supports dryRun). */
   forgetEntries(opts) { return forgetEntries(this, opts); }
+
+  /** Prospective memory: record an intent (date|event trigger). MidMem informs; cron fires. */
+  async recordProspective(opts) { return recordProspective(this, opts); }
+
+  /** Pending intents whose trigger has fired (deterministic; `now`/`event` are caller inputs). */
+  dueProspective(opts) { return dueProspective(this, opts); }
+
+  /** Resolve an intent: completed | cancelled (archives the entry, keeps the history). */
+  resolveProspective(id, outcome) { return resolveProspective(this, id, outcome); }
 
   /** P5: (re)build the concept graph (embed nodes + communities) on demand. */
   async refreshConcepts(opts) { return refreshConceptGraph(this, opts); }
