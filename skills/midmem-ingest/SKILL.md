@@ -18,6 +18,25 @@ trust an extractor's own claim of faithfulness — read the grounding numbers.
   REPORT as one document (`--type research`), then — only for items the report marks
   high-relevance or the operator names — fetch and ingest those sources individually.
 
+## Citations review (REQUIRED for reports/digests — before ingesting)
+Recurring research digests carry citations; review the structure and build a manifest FIRST:
+1. **Extract every citation link** (`[Title](url)` markdown). **Canonicalize each URL**: strip
+   tracking params (`?utm_source=…` and friends); for arXiv keep the bare `abs/<id>` URL and
+   record the paper id.
+2. **Flag uncited claims:** any section making benchmark/experiment claims with NO link gets
+   flagged inline in the staged copy (`Citation: NONE PROVIDED…`) and marked `ingest: BLOCKED`
+   in the manifest — never fetch-and-ingest a paper you had to guess the identity of.
+3. **Dedup against the store** per paper id (search content + provenance) — papers already
+   present are marked `skip: in store`; hash-dedup only catches identical files, not the same
+   paper cited by two digests.
+4. **Write `citations.json`** beside the staged report: section, title, id, canonical URL,
+   digest status (new vs continuing), ingest decision. This is the deterministic provenance for
+   any follow-up per-paper ingest.
+5. Ingest decisions: papers the digest marks **new/highest-relevance** (or the operator names)
+   → fetch into the same staging dir and ingest individually. Continuing/"tracked" papers → do
+   NOT bulk-ingest; note whether per-paper evidence exists in the store and surface the gap to
+   the operator instead.
+
 ## Procedure
 1. **Finish the source before ingesting.** Mid-edit ingests mint duplicates; a re-ingest after
    changes supersedes cleanly. A doc from outside the allowed roots gets COPIED into staging
