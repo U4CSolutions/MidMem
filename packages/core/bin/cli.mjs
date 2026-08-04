@@ -30,6 +30,7 @@ try {
     case 'work': out(await o.recordWork({ kind: flags.kind || pos[0], task: flags.task, content: pos.slice(flags.kind ? 0 : 1).join(' ') || undefined, outcome: flags.outcome, status: flags.status, source: flags.source, artifact: flags.artifact, profile: flags.profile, related: flags.related, scope: flags.scope })); break;
     case 'tasks': out(o.openTasks()); break;
     case 'close-tasks': out(o.closeTasks({ tasks: flags.task ? [flags.task] : pos, match: typeof flags.match === 'string' ? flags.match : null, opaque: !!flags.opaque, olderThanDays: flags.olderThanDays != null ? Number(flags.olderThanDays) : null, dryRun: !!flags.dryRun })); break;
+    case 'forget-entries': out(await o.forgetEntries({ ids: pos, match: typeof flags.match === 'string' ? flags.match : null, opaque: !!flags.opaque, scope: typeof flags.scope === 'string' ? flags.scope : null, types: typeof flags.types === 'string' ? flags.types.split(',') : [], olderThanDays: flags.olderThanDays != null ? Number(flags.olderThanDays) : null, dryRun: !!flags.dryRun })); break;
     case 'claims': out(flags.all ? o.searchClaims(pos.join(' '), { limit: Number(flags.limit) || 50 }) : o.currentClaims(pos.join(' '), { limit: Number(flags.limit) || 50 })); break;
     case 'contradictions': out(o.claimContradictions({ minShared: flags.minShared != null ? Number(flags.minShared) : 3 })); break;
     case 'merge-concepts': out(await o.mergeConcepts(pos[0], pos[1], { type: flags.type || 'concept' })); break;

@@ -165,6 +165,45 @@ export function listOpenTasks(o) {
 }
 
 /**
+ * Bulk soft-forget entries by selector — the entry-level sibling of `closeTasks` (born the
+ * same way: 1,400 junk work-event entries from one misconfigured capture week, and `forget`
+ * only takes a single id). Same safety contract: at least one CONTENT selector is required
+ * (`ids`, `match` on content, or `opaque` — matching work events whose task label is a bare
+ * machine identifier or whose content is captured prompt boilerplate); `scope`/`types` only
+ * narrow, they can never select on their own. Soft-only (status='deleted', reversible until
+ * retention hard-prunes); `dryRun` previews. Routed through orchestrator.forget so
+ * governance, logging and vault-dirty behave exactly like a single forget.
+ *
+ * @param {import('./orchestrator.mjs').Orchestrator} o
+ * @param {{ids?:string[], match?:string, opaque?:boolean, scope?:string, types?:string[],
+ *          olderThanDays?:number, dryRun?:boolean}} [opts]
+ */
+export async function forgetEntries(o, { ids = [], match = null, opaque = false, scope = null, types = [], olderThanDays = null, dryRun = false } = {}) {
+  const wanted = new Set(ids.map((s) => String(s).trim()).filter(Boolean));
+  if (!wanted.size && !match && !opaque) {
+    throw new Error('forgetEntries requires a content selector: ids, match, or opaque (scope/types/olderThanDays only narrow)');
+  }
+  const re = match ? new RegExp(match, 'i') : null;
+  const cutoff = olderThanDays == null ? null : Date.now() - olderThanDays * 864e5;
+  const OPAQUE_CONTENT = /^\[(?:task_attempt|source_used|dead_end|correction|artifact|decision)\]\s+(?:\S+\s+—\s+\[IMPORTANT: You are running as|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b|\d{8}[_-]\d{6})/i;
+
+  const rows = o.db.prepare("SELECT id, scope, type, content, created_at FROM entries WHERE status='active'").all();
+  const selected = rows.filter((r) => {
+    if (scope && r.scope !== scope) return false;
+    if (types.length && !types.includes(r.type)) return false;
+    if (cutoff != null && Date.parse(r.created_at) >= cutoff) return false;
+    return wanted.has(r.id) || (re && re.test(r.content || '')) || (opaque && OPAQUE_CONTENT.test(r.content || ''));
+  });
+
+  let forgotten = 0;
+  if (!dryRun) {
+    for (const r of selected) { const res = await o.forget(r.id, { soft: true }); if (res.success) forgotten++; }
+    o.db.logOp('forget-entries', { forgotten, match: match || null, opaque, scope, types: types.join(',') || null });
+  }
+  return { matched: selected.length, forgotten, dryRun, sample: selected.slice(0, 5).map((r) => r.id) };
+}
+
+/**
  * Deterministic background capture for `maintain()` — pull each stack's session/memory
  * dirs into the store via the (idempotent, hash-deduped) bridge so agent work is
  * auto-ingested without anyone remembering to run it. Projection is left to maintain's

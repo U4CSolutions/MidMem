@@ -290,6 +290,20 @@ try {
   ok(closed.closed === 2 && !o.openTasks().some((t) => ['DNS migration', 'SEO remediation'].includes(t.task)), 'bulk close marks the selected tasks done');
   ok(o.closeTasks({ tasks: ['DNS migration'] }).closed === 0, 'closing an already-closed task is a no-op');
 
+  // 12d. Bulk forget: content selector required; opaque matches boilerplate work events;
+  //      dryRun previews; scope narrows; soft (status flip) not hard delete.
+  const j1 = await o.recordWork({ kind: 'dead_end', task: 'f04e6d59-38e1-4cc8-9c99-4aca30644f5c', content: '[IMPORTANT: You are running as a scheduled task' });
+  const j2 = await o.recordWork({ kind: 'dead_end', task: 'real parser dead end', content: 'regex over minified bundle is too brittle keepme' });
+  let fthrew = false;
+  try { await o.forgetEntries({ scope: 'shared' }); } catch { fthrew = true; }
+  ok(fthrew, 'forgetEntries refuses scope-only selection');
+  const fdry = await o.forgetEntries({ opaque: true, dryRun: true });
+  ok(fdry.matched >= 1 && fdry.forgotten === 0, `bulk forget dryRun previews without deleting (matched=${fdry.matched})`);
+  const freal = await o.forgetEntries({ opaque: true });
+  ok(freal.forgotten >= 1, 'bulk forget removes opaque boilerplate work events');
+  ok(o.recall(j1.id)?.status !== 'active', 'junk entry is soft-deleted');
+  ok(o.recall(j2.id)?.status === 'active', 'legitimate dead_end with real content survives the opaque selector');
+
   // 13. proactiveRecall self-gates: surfaces a relevant hit, stays silent on noise
   const prHit = await o.proactiveRecall('how do we wire proactive recall', { minScore: 0, force: true });
   ok(prHit.inject && prHit.used.length > 0, 'proactiveRecall surfaces an inject block for a relevant message');
