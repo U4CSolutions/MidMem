@@ -20,6 +20,7 @@ import { handoffBrief as buildHandoffBrief } from './handoff.mjs';
 import { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, consolidateWork, categorizeIngest, recordProspective, dueProspective, resolveProspective } from './workmemory.mjs';
 import { verifyTransition, verifyPromotion, auditTransition } from './transitions.mjs';
 import { loadPacks, recordPattern } from './packs.mjs';
+import { exportKnowledge } from './export.mjs';
 import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
 import { genId, sha12, nowISO } from './util.mjs';
 
@@ -238,7 +239,11 @@ export class Orchestrator {
           if (!projectionQA.pass) this.db.logOp('projection-qa-fail', { missing: projectionQA.missingCount, fidelity: projectionQA.fidelityFailures.length });
         } catch (e) { projectionQA = { error: e.message }; }
       }
-      const summary = { swept, promoted, projected, projectionQA, autoIngested, concepts, retention, forced: force };
+      let exported = null;
+      if (force && this.cfg.export?.enabled !== false) {
+        try { exported = this.exportKnowledge(); } catch (e) { exported = { error: e.message }; }
+      }
+      const summary = { swept, promoted, projected, projectionQA, exported, autoIngested, concepts, retention, forced: force };
       this.db.logOp('maintain', summary);
       return summary;
     } finally { this._maintaining = false; }
@@ -271,6 +276,9 @@ export class Orchestrator {
 
   /** Resolve an intent: completed | cancelled (archives the entry, keeps the history). */
   resolveProspective(id, outcome) { return resolveProspective(this, id, outcome); }
+
+  /** Deterministic knowledge snapshot (JSONL, stable bytes) for git revision history. */
+  exportKnowledge() { const r = exportKnowledge(this.db, this.cfg); this.db.logOp('export', { rows: r.rows }); return r; }
 
   /** P5: (re)build the concept graph (embed nodes + communities) on demand. */
   async refreshConcepts(opts) { return refreshConceptGraph(this, opts); }

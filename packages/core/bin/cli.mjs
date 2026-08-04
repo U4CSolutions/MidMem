@@ -36,6 +36,7 @@ try {
     case 'merge-concepts': out(await o.mergeConcepts(pos[0], pos[1], { type: flags.type || 'concept' })); break;
     case 'refresh-concepts': out(await o.refreshConcepts({ maxEmbedPerPass: flags.max != null ? Number(flags.max) : undefined })); break;
     case 'packs': out(o.listPacks()); break;
+    case 'export': out(o.exportKnowledge()); break;
     case 'prospective': {
       const sub = pos[0];
       if (sub === 'add') out(await o.recordProspective({ intent: flags.intent || pos.slice(1).join(' '), trigger: { type: flags.on ? 'date' : 'event', value: flags.on || flags.event }, context: flags.context, scope: flags.scope }));

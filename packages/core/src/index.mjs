@@ -19,5 +19,6 @@ export { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, isOpaqueTask
 export { verifyTransition, verifyPromotion, subjectOverlap } from './transitions.mjs';
 export { loadPacks, recordPattern } from './packs.mjs';
 export { recordProspective, dueProspective, resolveProspective } from './workmemory.mjs';
+export { exportKnowledge } from './export.mjs';
 export { refreshConceptGraph, conceptSeedsFromVector, dedupeConceptNodes, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
 export { canonicalConceptKey } from './util.mjs';

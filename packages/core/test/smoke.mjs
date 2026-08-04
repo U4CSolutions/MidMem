@@ -304,6 +304,20 @@ try {
   ok(o.recall(j1.id)?.status !== 'active', 'junk entry is soft-deleted');
   ok(o.recall(j2.id)?.status === 'active', 'legitimate dead_end with real content survives the opaque selector');
 
+  // 12k. Revision export: deterministic bytes on an unchanged store; a knowledge mutation
+  //      changes the snapshot; vectors/log/audit stay out of it.
+  const expPath = path.join(tmp, 'snapshots', 'export.jsonl');
+  o.cfg.export = { enabled: true, path: expPath };
+  const ex1 = o.exportKnowledge();
+  ok(ex1.rows > 0 && fs.existsSync(expPath), `export wrote ${ex1.rows} rows`);
+  const bytes1 = fs.readFileSync(expPath, 'utf8');
+  o.exportKnowledge();
+  ok(fs.readFileSync(expPath, 'utf8') === bytes1, 'unchanged store exports byte-identical snapshot');
+  ok(!/"_table":"(vectors|log|audit)"/.test(bytes1), 'volatile tables excluded from the snapshot');
+  await o.storeMemory({ content: 'export delta probe entry', tier: 'fact' });
+  o.exportKnowledge();
+  ok(fs.readFileSync(expPath, 'utf8') !== bytes1, 'a knowledge mutation changes the snapshot');
+
   // 12j. Prospective memory (PM-Bench): record → not due before trigger → due after →
   //      event triggers match by name → resolve archives with outcome → validation rejects junk.
   const pd = await o.recordProspective({ intent: 'rotate API credentials', trigger: { type: 'date', value: '2026-09-01T00:00:00Z' }, context: 'memory-platform' });

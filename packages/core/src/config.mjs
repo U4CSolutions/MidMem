@@ -131,6 +131,13 @@ export function loadConfig(overrides = {}) {
     /** Work-memory (Perplexity-Brain-style "memory about work"): record agent task attempts,
      *  sources used, dead ends, corrections, artifacts, decisions as first-class entries + graph
      *  edges, and deterministically categorize every ingest. Pure-core; works in all 4 modes. */
+    /** Revision export (roadmap #7): deterministic JSONL snapshot of the knowledge tables
+     *  (no vectors/log/audit), stable bytes for an unchanged store — commit it to give the
+     *  knowledge product git history. Refreshed by forced/daily maintain. */
+    export: {
+      enabled: env('EXPORT_ENABLED') !== '0',
+      path: env('EXPORT_PATH') || path.join(REPO, 'snapshots', 'state-export.jsonl'),
+    },
     /** Capture packs (roadmap #5): domain extensibility as data — JSON packs registering entry
      *  types (tier + function + edge), categorizer rules and edge vocabularies. Builtin dir ships
      *  with the repo; extra packs via MIDMEM_CAPTURE_PACKS (';'-separated file paths). */
