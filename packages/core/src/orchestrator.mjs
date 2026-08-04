@@ -19,6 +19,7 @@ import { makeVectorStore } from './vectorstore.mjs';
 import { handoffBrief as buildHandoffBrief } from './handoff.mjs';
 import { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, consolidateWork, categorizeIngest } from './workmemory.mjs';
 import { verifyTransition, verifyPromotion, auditTransition } from './transitions.mjs';
+import { loadPacks, recordPattern } from './packs.mjs';
 import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
 import { genId, sha12, nowISO } from './util.mjs';
 
@@ -34,7 +35,17 @@ export class Orchestrator {
     this.claims = new ClaimStore(this.db);
     this.verifier = new SigmaVerifier(this.db, this.graph, this.cfg);
     this.gov = { evaluator: new PolicyEvaluator(this.cfg), db: this.db };
+    // Capture packs load at construction (data, deterministic): same config → same
+    // type/rule/edge universe. Errors are carried, not thrown — a bad pack file must
+    // not take the orchestrator down.
+    this.packs = loadPacks(this.cfg);
   }
+
+  /** Loaded capture packs (name/version/types) + any load errors. */
+  listPacks() { return { packs: this.packs.packs, errors: this.packs.errors }; }
+
+  /** Record a structured domain entry via a pack-registered type (governed storeMemory inside). */
+  async recordPattern(rec = {}) { return recordPattern(this, rec); }
 
   /** Ingest a raw source: extract → store (memory tier) → embed → graph → claims → verify. */
   async ingest({ path, type = 'note', title, metadata = {}, curated = false, scope = this.cfg.agentScope }) {
@@ -60,7 +71,7 @@ export class Orchestrator {
       const { vector, model, mode } = await this.embedder.embed(ex.summary);
       const sourceId = genId('src', path);
       // Deterministic category tag so the store tracks ongoing requests by kind (research/build/...).
-      const category = categorizeIngest({ type, content: ex.summary, title });
+      const category = categorizeIngest({ type, content: ex.summary, title }, this.packs?.rules || []);
       const prov = { originalSource: path, extractedAt: nowISO(), category, grounding, chain: [{ step: 'ingest', source: path }] };
       // Sources row (the dedup hash) commits WITH the entry: a failed ingest must not
       // leave the hash behind, or re-ingests would be skipped as 'unchanged' forever.

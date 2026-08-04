@@ -5,6 +5,11 @@
  */
 import { genId, nowISO, sha12, json, canonicalConceptKey } from './util.mjs';
 
+/** Capture packs may register additional domain edge vocabularies at load (packs.mjs).
+ *  Deterministic: packs are data loaded at construction, so the same config always
+ *  yields the same edge-type universe. */
+export function registerEdgeTypes(types = []) { for (const t of types) if (t && typeof t === 'string') EDGE_TYPES.add(t); }
+
 const EDGE_TYPES = new Set([
   'references', 'contradicts', 'supports', 'relates',
   // work-memory relations (task → source/artifact/concept/correction)

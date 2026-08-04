@@ -304,6 +304,20 @@ try {
   ok(o.recall(j1.id)?.status !== 'active', 'junk entry is soft-deleted');
   ok(o.recall(j2.id)?.status === 'active', 'legitimate dead_end with real content survives the opaque selector');
 
+  // 12i. Capture packs: builtin coding-patterns pack loads; recordPattern lands with the pack's
+  //      tier+function and typed edges; pack categorizer rule outranks generic; unknown type rejected.
+  const pk = o.listPacks();
+  ok(pk.packs.some((p) => p.name === 'coding-patterns') && pk.errors.length === 0, `builtin pack loaded (${pk.packs.map((p) => p.name).join(',')})`);
+  const pat = await o.recordPattern({ type: 'pattern', title: 'Selector-required bulk mutation', context: 'bulk store mutations', problem: 'a bare call could clear everything', solution: 'require an explicit selector and offer dryRun preview', evidence: ['midmem-kb-store@2e12489'], concepts: [{ name: 'safety gates' }] });
+  ok(pat.success && pat.pack === 'coding-patterns' && pat.memFunction === 'procedural', 'pattern recorded via pack with procedural function');
+  const patQ = await o.query('selector required bulk mutation dryRun', { functions: ['procedural'], limit: 5 });
+  ok(patQ.results.some((r) => r.id === pat.id), 'recorded pattern retrievable through the procedural lens');
+  const patNode = o.graph.byType('pattern').find((n) => n.label === 'Selector-required bulk mutation');
+  ok(!!patNode && o.graph.neighbors(patNode.id).some((e) => e.type === 'applies'), 'pattern node linked to evidence with the pack-registered edge type');
+  ok(categorizeIngest({ type: 'note', content: 'a reusable component scaffold for dashboards' }, o.packs.rules) === 'pattern', 'pack categorizer rule outranks the generic set');
+  let pkBad = false; try { await o.recordPattern({ type: 'sorcery', title: 'x' }); } catch { pkBad = true; }
+  ok(pkBad, 'unknown pack type rejected');
+
   // 12h. Function axis (survey 2607.25380): deterministic defaults per type; explicit override;
   //      retrieval filters by role; legacy null rows resolve via the same type map.
   const fnSem = await o.storeMemory({ content: 'zanzibar deployment doctrine document alpha', tier: 'memory' });

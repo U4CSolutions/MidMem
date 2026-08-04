@@ -1,0 +1,15 @@
+{
+  "name": "coding-patterns",
+  "version": 1,
+  "description": "Capture architecture/coding patterns, reusable scaffolding and anti-patterns from builds. Promotion to wisdom is earned by reuse (lease renewals), never declared.",
+  "entryTypes": {
+    "pattern":      { "tier": "memory", "function": "procedural", "edge": "applies",      "fields": ["context", "problem", "solution", "evidence"] },
+    "scaffold":     { "tier": "memory", "function": "procedural", "edge": "derived_from", "fields": ["context", "solution", "evidence"] },
+    "anti-pattern": { "tier": "memory", "function": "procedural", "edge": "failed_in",    "fields": ["context", "problem", "evidence"] },
+    "recipe":       { "tier": "memory", "function": "procedural", "edge": "worked_in",    "fields": ["context", "solution", "evidence"] }
+  },
+  "categorizerRules": [
+    ["pattern", "\\b(design pattern|architecture pattern|scaffold(ing)?|boilerplate|reusable (component|module|template))\\b"]
+  ],
+  "edgeTypes": ["applies", "derived_from", "worked_in", "failed_in"]
+}

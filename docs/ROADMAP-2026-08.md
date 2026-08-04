@@ -36,7 +36,7 @@
 2. Write-path conflict tagging — `relate()` at claims.add, lint writeConflicts queue. ☑ (smoke 117→121, bench PASS)
 3. Projection QA — completeness + sampled-fidelity probes, report-only, in forced maintain. ☑ (smoke 121→124, bench PASS)
 4. Function axis — `mem_function` column, deterministic type map, retrieval filter, CLI/MCP. ☑ (smoke 124→130, bench PASS)
-5. Capture packs — pack loader + `recordPattern` + example pack + skill. ☐
+5. Capture packs — data-driven loader, recordPattern, coding-patterns pack, pattern-capture skill. ☑ (smoke 130→136, bench PASS)
 6. Prospective memory — type + due surfacing + CLI/MCP. ☐
 7. Revision export — deterministic `export` + maintain refresh. ☐
 8. Adversarial review pass (independent subagent) + full-suite verification + push. ☐

@@ -131,6 +131,14 @@ export function loadConfig(overrides = {}) {
     /** Work-memory (Perplexity-Brain-style "memory about work"): record agent task attempts,
      *  sources used, dead ends, corrections, artifacts, decisions as first-class entries + graph
      *  edges, and deterministically categorize every ingest. Pure-core; works in all 4 modes. */
+    /** Capture packs (roadmap #5): domain extensibility as data — JSON packs registering entry
+     *  types (tier + function + edge), categorizer rules and edge vocabularies. Builtin dir ships
+     *  with the repo; extra packs via MIDMEM_CAPTURE_PACKS (';'-separated file paths). */
+    capturePacks: {
+      enabled: env('CAPTURE_PACKS_ENABLED') !== '0',
+      builtinDir: env('CAPTURE_PACKS_DIR') || path.join(REPO, 'config', 'packs'),
+      paths: (env('CAPTURE_PACKS') || '').split(';').filter(Boolean),
+    },
     /** Projection QA (WiCER-style, arXiv 2605.07068): deterministic probes over the compiled
      *  wiki on the forced/daily maintain — completeness (every active entry has its page) +
      *  sampled fidelity (page actually contains the entry's content). Report-only. */

@@ -80,11 +80,14 @@ export function isOpaqueTaskLabel(label = '') {
   return !!s && OPAQUE_TASK_PATTERNS.some((re) => re.test(s));
 }
 
-/** Deterministic ingest categorizer (no LLM). Returns a single category string. */
-export function categorizeIngest({ type, content = '', title = '' } = {}) {
+/** Deterministic ingest categorizer (no LLM). Returns a single category string.
+ *  `extraRules` (capture packs) are checked FIRST — domain rules outrank the generic set,
+ *  first match still wins, so pack order stays deterministic. */
+export function categorizeIngest({ type, content = '', title = '' } = {}, extraRules = []) {
   if (WORK_EVENT_NAMES.includes(type)) return type;       // a work event is its own category
   if (type === 'session') return 'session';
   const hay = `${title}\n${content}`.slice(0, 2000);
+  for (const [cat, re] of extraRules) if (re.test(hay)) return cat;
   for (const [cat, re] of CATEGORY_RULES) if (re.test(hay)) return cat;
   return 'knowledge';
 }
