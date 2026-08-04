@@ -323,6 +323,18 @@ try {
   o.db.prepare('UPDATE entries SET provenance=? WHERE id=?').run(JSON.stringify({ grounding: { summaryScore: 0.9 } }), tvEntry.id);
   ok((await o.promote(tvEntry.id, 'memory')).success !== false, 'well-grounded entry promotes normally');
 
+  // 12f. Write-path conflict tagging (MOSAIC): incoming claims are related to live neighbors
+  //      at write time — contradictory/corroborating/superseding-candidate/additive/novel.
+  const wr1 = o.claims.add({ content: 'The staging database runs postgres fourteen on the blue cluster' });
+  ok(!wr1.metadata.writeRelation, 'first claim in a locality is novel (no tag)');
+  const wr2 = o.claims.add({ content: 'The staging database does not run postgres fourteen on the blue cluster' });
+  ok(wr2.metadata.writeRelation?.relation === 'contradictory' && wr2.metadata.writeRelation.neighborId === wr1.id,
+    'negated twin is tagged contradictory against its neighbor at WRITE time');
+  const wr3 = o.claims.add({ content: 'The staging database runs postgres fourteen on the blue cluster nodes' });
+  ok(['corroborating', 'superseding-candidate'].includes(wr3.metadata.writeRelation?.relation),
+    `near-duplicate is tagged ${wr3.metadata.writeRelation?.relation} (same polarity, high overlap)`);
+  ok(o.lint().writeConflicts.some((c) => c.id === wr2.id), 'lint surfaces the write-time conflict queue');
+
   // 13. proactiveRecall self-gates: surfaces a relevant hit, stays silent on noise
   const prHit = await o.proactiveRecall('how do we wire proactive recall', { minScore: 0, force: true });
   ok(prHit.inject && prHit.used.length > 0, 'proactiveRecall surfaces an inject block for a relevant message');

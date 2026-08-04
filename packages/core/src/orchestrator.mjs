@@ -298,7 +298,12 @@ export class Orchestrator {
       "SELECT id, trust_score, content FROM entries WHERE status='active' AND tier='wisdom' AND trust_score < 0.3",
     ).all().map((r) => ({ id: r.id, trust: r.trust_score, content: r.content.slice(0, 80) }));
     const dupeConcepts = conceptDupeCandidates(this);
-    return { contradictions: conflicts.conflicts, orphans, lowTrustWisdom, dupeConcepts, summary: { nodes: g.nodes.length, edges: g.edges.length, entries: Object.values(this.memory.stats()).reduce((a, b) => a + b, 0) } };
+    // Write-path conflicts (MOSAIC): claims that arrived tagged contradictory and are still live —
+    // the write-time queue of judgment calls, distinct from the pairwise audit above.
+    const writeConflicts = this.claims.getAll()
+      .filter((c) => (c.status === 'active' || c.status === 'verified') && c.metadata?.writeRelation?.relation === 'contradictory')
+      .map((c) => ({ id: c.id, neighbor: c.metadata.writeRelation.neighborId, content: c.content.slice(0, 120) }));
+    return { contradictions: conflicts.conflicts, writeConflicts, orphans, lowTrustWisdom, dupeConcepts, summary: { nodes: g.nodes.length, edges: g.edges.length, entries: Object.values(this.memory.stats()).reduce((a, b) => a + b, 0) } };
   }
 
   async forget(id, { soft = true, force = false } = {}) {

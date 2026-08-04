@@ -33,7 +33,7 @@
 
 ## Sequencing & status
 1. Transition verifier — core `verifyTransition` + wiring into supersede/promote. ☑ (smoke 111→117, bench PASS)
-2. Write-path conflict tagging — `relateClaim` at claims.add + storeMemory claims. ☐
+2. Write-path conflict tagging — `relate()` at claims.add, lint writeConflicts queue. ☑ (smoke 117→121, bench PASS)
 3. Projection QA — probe pass in forced/daily maintain. ☐
 4. Function axis — `mem_function` column, defaults, retrieval filter, surfaces. ☐
 5. Capture packs — pack loader + `recordPattern` + example pack + skill. ☐
