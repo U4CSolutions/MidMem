@@ -131,7 +131,46 @@ export function loadConfig(overrides = {}) {
     /** Work-memory (Perplexity-Brain-style "memory about work"): record agent task attempts,
      *  sources used, dead ends, corrections, artifacts, decisions as first-class entries + graph
      *  edges, and deterministically categorize every ingest. Pure-core; works in all 4 modes. */
-    workMemory: { enabled: env('WORK_MEMORY') !== '0' },
+    /** Revision export (roadmap #7): deterministic JSONL snapshot of the knowledge tables
+     *  (no vectors/log/audit), stable bytes for an unchanged store — commit it to give the
+     *  knowledge product git history. Refreshed by forced/daily maintain. */
+    export: {
+      enabled: env('EXPORT_ENABLED') !== '0',
+      path: env('EXPORT_PATH') || path.join(REPO, 'snapshots', 'state-export.jsonl'),
+    },
+    /** Capture packs (roadmap #5): domain extensibility as data — JSON packs registering entry
+     *  types (tier + function + edge), categorizer rules and edge vocabularies. Builtin dir ships
+     *  with the repo; extra packs via MIDMEM_CAPTURE_PACKS (';'-separated file paths). */
+    capturePacks: {
+      enabled: env('CAPTURE_PACKS_ENABLED') !== '0',
+      builtinDir: env('CAPTURE_PACKS_DIR') || path.join(REPO, 'config', 'packs'),
+      paths: (env('CAPTURE_PACKS') || '').split(';').filter(Boolean),
+    },
+    /** Projection QA (WiCER-style, arXiv 2605.07068): deterministic probes over the compiled
+     *  wiki on the forced/daily maintain — completeness (every active entry has its page) +
+     *  sampled fidelity (page actually contains the entry's content). Report-only. */
+    projectionQA: {
+      enabled: env('PROJECTION_QA') !== '0',
+      sampleSize: Number(env('PROJECTION_QA_SAMPLE') ?? 20),
+      minFidelity: Number(env('PROJECTION_QA_MIN_FIDELITY') ?? 0.9),
+    },
+    /** Transition verifier (TRUSTMEM-style, arXiv 2606.25161): deterministic checks on memory
+     *  TRANSITIONS — supersede stays on-subject + evidence-covered; promotion requires the
+     *  write-time grounding floor. Receipts always audit; deny is the default. */
+    transitions: {
+      enabled: env('TRANSITION_VERIFY') !== '0',
+      deny: env('TRANSITION_DENY') !== '0',
+      minSubjectOverlap: Number(env('TRANSITION_MIN_SUBJECT') ?? 0.15),
+      minCoverage: Number(env('TRANSITION_MIN_COVERAGE') ?? 0.6),
+      promoteMinGrounding: Number(env('PROMOTE_MIN_GROUNDING') ?? 0.3),
+    },
+    workMemory: {
+      enabled: env('WORK_MEMORY') !== '0',
+      /** Skip minting a task node when the label is a bare machine identifier (session UUID,
+       *  timestamped file id, hex digest). The event is still recorded; only the unactionable
+       *  graph node is suppressed. Set MIDMEM_GUARD_OPAQUE_TASK_LABELS=0 to record them anyway. */
+      guardOpaqueTaskLabels: env('GUARD_OPAQUE_TASK_LABELS') !== '0',
+    },
     /** Automatic ingest of agent work + knowledge. When `onMaintain`, the maintenance pass also
      *  runs the (idempotent, hash-deduped) bridge — pulling each stack's session/memory dirs into
      *  the store so ongoing requests are tracked without anyone remembering to ingest. Deterministic. */

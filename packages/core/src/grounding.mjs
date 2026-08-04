@@ -16,13 +16,13 @@ const STOP = new Set((
 ).split(/\s+/));
 
 /** Content words: lowercased alnum tokens > 2 chars, minus stopwords. */
-function words(s) {
+export function contentWords(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
     .filter((w) => w.length > 2 && !STOP.has(w));
 }
 
 function scoreAgainst(haySet, phrase) {
-  const w = words(phrase);
+  const w = contentWords(phrase);
   if (!w.length) return 1; // nothing groundable (degenerate) — don't penalize
   let hit = 0;
   for (const t of w) if (haySet.has(t)) hit++;
@@ -31,7 +31,7 @@ function scoreAgainst(haySet, phrase) {
 
 /** Fraction of `phrase` content-words present in `sourceText` (0..1; empty phrase → 1). */
 export function groundingScore(sourceText, phrase) {
-  return scoreAgainst(new Set(words(sourceText)), phrase);
+  return scoreAgainst(new Set(contentWords(sourceText)), phrase);
 }
 
 /**
@@ -41,7 +41,7 @@ export function groundingScore(sourceText, phrase) {
  * Each returned item carries `groundingScore`.
  */
 export function checkGrounding(sourceText, items, getText, minOverlap = 0.5) {
-  const hay = new Set(words(sourceText));
+  const hay = new Set(contentWords(sourceText));
   const grounded = [];
   const ungrounded = [];
   for (const it of items || []) {

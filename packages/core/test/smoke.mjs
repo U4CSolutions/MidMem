@@ -5,7 +5,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Orchestrator, GovernanceError, checkGrounding, groundingScore, categorizeIngest, WORK_EVENT_NAMES } from '../src/index.mjs';
+import { Orchestrator, GovernanceError, checkGrounding, groundingScore, categorizeIngest, isOpaqueTaskLabel, WORK_EVENT_NAMES } from '../src/index.mjs';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; console.log(`  ✓ ${msg}`); } else { fail++; console.log(`  ✗ ${msg}`); } };
@@ -268,6 +268,170 @@ try {
   const wq = await o.query('proactive recall pre-turn hook', { limit: 5 });
   ok(wq.results.some((r) => /proactive recall/i.test(r.content)), 'recorded work event is retrievable via query');
 
+  // 12b. Opaque task-label guard: machine identifiers are recorded but never become task nodes
+  //      (2026-07-31: session UUIDs + timestamped file ids had minted 341 unactionable open tasks).
+  ok(isOpaqueTaskLabel('f04e6d59-38e1-4cc8-9c99-4aca30644f5c'), 'bare session UUID reads as opaque');
+  ok(isOpaqueTaskLabel('20260710_033427_3d468f'), 'timestamped file id reads as opaque');
+  ok(!isOpaqueTaskLabel('Wire proactive recall'), 'a human request is not opaque');
+  ok(!isOpaqueTaskLabel('migrate DNS for f04e6d59-38e1-4cc8-9c99-4aca30644f5c'), 'a title merely containing an id is not opaque');
+  const wOpaque = await o.recordWork({ kind: 'task_attempt', task: '20260710_033427_3d468f', content: 'bridged session file' });
+  ok(wOpaque.success && wOpaque.taskNodeSkipped === true, 'opaque label still records the event, flagged taskNodeSkipped');
+  ok(!o.openTasks().some((t) => t.task === '20260710_033427_3d468f'), 'opaque label never reaches the ongoing-requests list');
+
+  // 12c. Bulk close: selector required, dryRun previews without mutating, close is idempotent
+  await o.recordWork({ kind: 'task_attempt', task: 'SEO remediation' });
+  await o.recordWork({ kind: 'task_attempt', task: 'DNS migration' });
+  let threw = false;
+  try { o.closeTasks({}); } catch { threw = true; }
+  ok(threw, 'closeTasks refuses to run without a selector');
+  const dry = o.closeTasks({ match: '^DNS migration$', dryRun: true });
+  ok(dry.matched === 1 && dry.closed === 0 && o.openTasks().some((t) => t.task === 'DNS migration'), 'dryRun reports matches without closing');
+  const closed = o.closeTasks({ tasks: ['DNS migration', 'SEO remediation'] });
+  ok(closed.closed === 2 && !o.openTasks().some((t) => ['DNS migration', 'SEO remediation'].includes(t.task)), 'bulk close marks the selected tasks done');
+  ok(o.closeTasks({ tasks: ['DNS migration'] }).closed === 0, 'closing an already-closed task is a no-op');
+
+  // 12d. Bulk forget: content selector required; opaque matches boilerplate work events;
+  //      dryRun previews; scope narrows; soft (status flip) not hard delete.
+  const j1 = await o.recordWork({ kind: 'dead_end', task: 'f04e6d59-38e1-4cc8-9c99-4aca30644f5c', content: '[IMPORTANT: You are running as a scheduled task' });
+  const j2 = await o.recordWork({ kind: 'dead_end', task: 'real parser dead end', content: 'regex over minified bundle is too brittle keepme' });
+  let fthrew = false;
+  try { await o.forgetEntries({ scope: 'shared' }); } catch { fthrew = true; }
+  ok(fthrew, 'forgetEntries refuses scope-only selection');
+  const fdry = await o.forgetEntries({ opaque: true, dryRun: true });
+  ok(fdry.matched >= 1 && fdry.forgotten === 0, `bulk forget dryRun previews without deleting (matched=${fdry.matched})`);
+  const freal = await o.forgetEntries({ opaque: true });
+  ok(freal.forgotten >= 1, 'bulk forget removes opaque boilerplate work events');
+  ok(o.recall(j1.id)?.status !== 'active', 'junk entry is soft-deleted');
+  ok(o.recall(j2.id)?.status === 'active', 'legitimate dead_end with real content survives the opaque selector');
+
+  // 12l. Review-pass regressions (2026-08-04 adversarial review findings 1–4):
+  // (1) a pending prospective intent must be lease-exempt — the memory tier's TTL must not
+  //     archive it before a far-future trigger fires.
+  const rvP = await o.recordProspective({ intent: 'far future intent', trigger: { type: 'date', value: '2030-01-01T00:00:00Z' } });
+  ok(o.db.prepare('SELECT expires_at FROM entries WHERE id=?').get(rvP.id).expires_at === null, 'pending intent carries no lease (F1: TTL cannot kill it before its trigger)');
+  // (2) subject gate is stopword-aware: article-only overlap must NOT clear the floor.
+  const rvV = (await import('../src/transitions.mjs')).verifyTransition({ before: 'The gateway webhook route listens on port 18789 and is healthy', after: 'The bananas and the paper bag were ripening on the counter' });
+  ok(rvV.pass === false, `F2: topic swap sharing only stopwords is denied (subjectOverlap=${rvV.subjectOverlap})`);
+  // (3) a legitimate negation-supersede must not leave a permanent write-conflict.
+  const rvC = o.claims.add({ content: 'matrix plugin channel pipeline is configured and enabled on the gateway' });
+  const rvS = o.supersedeClaim(rvC.id, { content: 'matrix plugin channel pipeline is not enabled on the gateway anymore' });
+  ok(rvS.success === true, 'F3: negation-supersede passes the verifier');
+  ok(!o.lint().writeConflicts.some((c) => c.id === rvS.current || c.neighbor === rvC.id), 'F3: supersede leaves no write-conflict against its own superseded claim');
+  // (4) maintain must not report a grounding-denied entry as promoted, nor re-deny forever.
+  const rvE = await o.storeMemory({ content: 'popular but ungrounded probe delta epsilon', tier: 'fact' });
+  o.db.prepare('UPDATE entries SET provenance=?, retrieval_count=99, trust_score=0.9 WHERE id=?').run(JSON.stringify({ grounding: { summaryScore: 0.05 } }), rvE.id);
+  const rvM = await o.maintain({ force: false });
+  ok(!(rvM.promoted || []).some((c) => c.id === rvE.id) && o.recall(rvE.id).tier === 'fact', 'F4: grounding-denied candidate neither promoted nor misreported');
+  ok(o.db.prepare("SELECT COUNT(*) c FROM audit WHERE kind='transition:promote' AND detail LIKE '%' || ? || '%'").get(rvE.id).c === 0, 'F4: pre-filter avoids per-pass audit spam for permanently ineligible entries');
+
+  // 12k. Revision export: deterministic bytes on an unchanged store; a knowledge mutation
+  //      changes the snapshot; vectors/log/audit stay out of it.
+  const expPath = path.join(tmp, 'snapshots', 'export.jsonl');
+  o.cfg.export = { enabled: true, path: expPath };
+  const ex1 = o.exportKnowledge();
+  ok(ex1.rows > 0 && fs.existsSync(expPath), `export wrote ${ex1.rows} rows`);
+  const bytes1 = fs.readFileSync(expPath, 'utf8');
+  o.exportKnowledge();
+  ok(fs.readFileSync(expPath, 'utf8') === bytes1, 'unchanged store exports byte-identical snapshot');
+  ok(!/"_table":"(vectors|log|audit)"/.test(bytes1), 'volatile tables excluded from the snapshot');
+  await o.storeMemory({ content: 'export delta probe entry', tier: 'fact' });
+  o.exportKnowledge();
+  ok(fs.readFileSync(expPath, 'utf8') !== bytes1, 'a knowledge mutation changes the snapshot');
+
+  // 12j. Prospective memory (PM-Bench): record → not due before trigger → due after →
+  //      event triggers match by name → resolve archives with outcome → validation rejects junk.
+  const pd = await o.recordProspective({ intent: 'rotate API credentials', trigger: { type: 'date', value: '2026-09-01T00:00:00Z' }, context: 'memory-platform' });
+  ok(pd.success && pd.prospective.status === 'pending', 'date-triggered intent recorded pending');
+  ok(o.recall(pd.id).mem_function === 'prospective', 'prospective entry carries the prospective function');
+  ok(!o.dueProspective({ now: '2026-08-31T00:00:00Z' }).some((x) => x.id === pd.id), 'not due before its trigger date');
+  ok(o.dueProspective({ now: '2026-09-01T00:00:01Z' }).some((x) => x.id === pd.id), 'due once the trigger date passes');
+  const pe = await o.recordProspective({ intent: 'rebuild wiki after runtime upgrade', trigger: { type: 'event', value: 'lmstudio-runtime-upgraded' } });
+  ok(!o.dueProspective({ now: '2027-01-01T00:00:00Z' }).some((x) => x.id === pe.id), 'event intent never fires on time alone');
+  ok(o.dueProspective({ event: 'lmstudio-runtime-upgraded' }).some((x) => x.id === pe.id), 'event intent fires on its named event');
+  const pres = o.resolveProspective(pd.id, 'completed');
+  ok(pres.success && !o.dueProspective({ now: '2026-09-02T00:00:00Z' }).some((x) => x.id === pd.id), 'resolved intent leaves the due list');
+  ok(o.recall(pd.id) === null || o.recall(pd.id).status !== 'active', 'resolved intent archived (kept as history)');
+  let pBad = false; try { await o.recordProspective({ intent: 'x', trigger: { type: 'date', value: 'not-a-date' } }); } catch { pBad = true; }
+  ok(pBad, 'bad date trigger rejected');
+
+  // 12i. Capture packs: builtin coding-patterns pack loads; recordPattern lands with the pack's
+  //      tier+function and typed edges; pack categorizer rule outranks generic; unknown type rejected.
+  const pk = o.listPacks();
+  ok(pk.packs.some((p) => p.name === 'coding-patterns') && pk.errors.length === 0, `builtin pack loaded (${pk.packs.map((p) => p.name).join(',')})`);
+  const pat = await o.recordPattern({ type: 'pattern', title: 'Selector-required bulk mutation', context: 'bulk store mutations', problem: 'a bare call could clear everything', solution: 'require an explicit selector and offer dryRun preview', evidence: ['midmem-kb-store@2e12489'], concepts: [{ name: 'safety gates' }] });
+  ok(pat.success && pat.pack === 'coding-patterns' && pat.memFunction === 'procedural', 'pattern recorded via pack with procedural function');
+  const patQ = await o.query('selector required bulk mutation dryRun', { functions: ['procedural'], limit: 5 });
+  ok(patQ.results.some((r) => r.id === pat.id), 'recorded pattern retrievable through the procedural lens');
+  const patNode = o.graph.byType('pattern').find((n) => n.label === 'Selector-required bulk mutation');
+  ok(!!patNode && o.graph.neighbors(patNode.id).some((e) => e.type === 'applies'), 'pattern node linked to evidence with the pack-registered edge type');
+  ok(categorizeIngest({ type: 'note', content: 'a reusable component scaffold for dashboards' }, o.packs.rules) === 'pattern', 'pack categorizer rule outranks the generic set');
+  let pkBad = false; try { await o.recordPattern({ type: 'sorcery', title: 'x' }); } catch { pkBad = true; }
+  ok(pkBad, 'unknown pack type rejected');
+
+  // 12h. Function axis (survey 2607.25380): deterministic defaults per type; explicit override;
+  //      retrieval filters by role; legacy null rows resolve via the same type map.
+  const fnSem = await o.storeMemory({ content: 'zanzibar deployment doctrine document alpha', tier: 'memory' });
+  ok(fnSem.memFunction === 'semantic', 'insight defaults to semantic function');
+  const fnWork = await o.recordWork({ kind: 'task_attempt', task: 'fn axis probe', content: 'zanzibar deployment doctrine attempt beta' });
+  ok(o.recall(fnWork.id).mem_function === 'episodic', 'task_attempt defaults to episodic function');
+  const fnProc = await o.storeMemory({ content: 'zanzibar deployment doctrine recipe gamma', tier: 'memory', memFunction: 'procedural' });
+  ok(fnProc.memFunction === 'procedural', 'explicit memFunction override wins');
+  const fnQ = await o.query('zanzibar deployment doctrine', { functions: ['episodic'], limit: 10 });
+  ok(fnQ.results.some((r) => r.id === fnWork.id) && !fnQ.results.some((r) => r.id === fnSem.id || r.id === fnProc.id),
+    'functions filter returns only the requested role');
+  o.db.prepare('UPDATE entries SET mem_function=NULL WHERE id=?').run(fnWork.id);
+  const fnQ2 = await o.query('zanzibar deployment doctrine', { functions: ['episodic'], limit: 10 });
+  ok(fnQ2.results.some((r) => r.id === fnWork.id), 'legacy NULL mem_function resolves via the type map');
+  let fnBad = false; try { await o.storeMemory({ content: 'x', tier: 'memory', memFunction: 'telepathic' }); } catch { fnBad = true; }
+  ok(fnBad, 'unknown memory function is rejected');
+
+  // 12g. Projection QA (WiCER): clean wiki passes; a deleted page fails completeness;
+  //      a corrupted page fails sampled fidelity; report-only (probe never mutates).
+  o.project();
+  const qa0 = o.probeProjection();
+  ok(qa0.pass === true && qa0.entries > 0, `projection QA passes on a clean wiki (${qa0.entries} entries)`);
+  const qaVictim = (await o.query('hybrid vector retrieval', { limit: 1 })).results[0];
+  const qaPage = path.join(tmp, 'vault', 'LLM Wiki', qaVictim.tier, `${qaVictim.id}.md`);
+  fs.unlinkSync(qaPage);
+  const qa1 = o.probeProjection();
+  ok(qa1.pass === false && qa1.missingPages.includes(qaVictim.id), 'QA catches a missing page (completeness probe)');
+  o.project(); // repair via dirty-check's existence path
+  fs.writeFileSync(qaPage, '---\nid: corrupt\n---\ntruncated garbage page');
+  const qa2 = o.probeProjection({ sampleSize: 500 }); // full sweep: the victim must be in-sample regardless of recency
+  ok(qa2.pass === false && qa2.fidelityFailures.some((f) => f.id === qaVictim.id), 'QA catches a corrupted page (fidelity probe)');
+  o.project({ force: true }); // restore for later tests
+
+  // 12e. Transition verifier (TRUSTMEM): on-subject supersede passes; topic-swap supersede is
+  //      denied; evidence-covered supersede passes the coverage gate; ungrounded promote denied.
+  const tvOld = o.claims.add({ content: 'The gateway webhook route listens on port 18789 and is healthy' });
+  const tvSwap = o.supersedeClaim(tvOld.id, { content: 'Bananas ripen faster inside a paper bag entirely' });
+  ok(tvSwap.success === false && tvSwap.denied === 'transition-verifier', 'supersede with a topic swap is denied (corruption guard)');
+  const tvOk = o.supersedeClaim(tvOld.id, { content: 'The gateway webhook route on port 18789 was de-registered and is unhealthy' });
+  ok(tvOk.success === true, 'on-subject supersede passes the verifier');
+  const tvEvOld = o.claims.add({ content: 'The build pipeline deploys from the main branch' });
+  const tvEvBad = o.supersedeClaim(tvEvOld.id, { content: 'The build pipeline deploys from the release branch after quantum blockchain approval', evidence: 'ops note: pipeline still deploys from main' });
+  ok(tvEvBad.success === false, 'evidence-contradicting insertion fails the coverage gate');
+  ok(o.db.prepare("SELECT COUNT(*) c FROM audit WHERE kind='transition:supersede'").get().c >= 3, 'every supersede transition wrote an audit receipt');
+  // promotion floor: a poorly-grounded ingest must not climb tiers
+  const tvEntry = await o.storeMemory({ content: 'well grounded direct write for promotion test', tier: 'fact' });
+  o.db.prepare('UPDATE entries SET provenance=? WHERE id=?').run(JSON.stringify({ grounding: { summaryScore: 0.1 } }), tvEntry.id);
+  const tvProm = await o.promote(tvEntry.id, 'memory');
+  ok(tvProm.success === false && tvProm.denied === 'transition-verifier', 'promotion denied for entry below the write-time grounding floor');
+  o.db.prepare('UPDATE entries SET provenance=? WHERE id=?').run(JSON.stringify({ grounding: { summaryScore: 0.9 } }), tvEntry.id);
+  ok((await o.promote(tvEntry.id, 'memory')).success !== false, 'well-grounded entry promotes normally');
+
+  // 12f. Write-path conflict tagging (MOSAIC): incoming claims are related to live neighbors
+  //      at write time — contradictory/corroborating/superseding-candidate/additive/novel.
+  const wr1 = o.claims.add({ content: 'The staging database runs postgres fourteen on the blue cluster' });
+  ok(!wr1.metadata.writeRelation, 'first claim in a locality is novel (no tag)');
+  const wr2 = o.claims.add({ content: 'The staging database does not run postgres fourteen on the blue cluster' });
+  ok(wr2.metadata.writeRelation?.relation === 'contradictory' && wr2.metadata.writeRelation.neighborId === wr1.id,
+    'negated twin is tagged contradictory against its neighbor at WRITE time');
+  const wr3 = o.claims.add({ content: 'The staging database runs postgres fourteen on the blue cluster nodes' });
+  ok(['corroborating', 'superseding-candidate'].includes(wr3.metadata.writeRelation?.relation),
+    `near-duplicate is tagged ${wr3.metadata.writeRelation?.relation} (same polarity, high overlap)`);
+  ok(o.lint().writeConflicts.some((c) => c.id === wr2.id), 'lint surfaces the write-time conflict queue');
+
   // 13. proactiveRecall self-gates: surfaces a relevant hit, stays silent on noise
   const prHit = await o.proactiveRecall('how do we wire proactive recall', { minScore: 0, force: true });
   ok(prHit.inject && prHit.used.length > 0, 'proactiveRecall surfaces an inject block for a relevant message');
@@ -339,6 +503,23 @@ try {
   ok(!fs.existsSync(path.join(factDir, `${staleEntry.id}.md`)) && reproj.pruned >= 1, `stale vault page pruned on reprojection (pruned=${reproj.pruned})`);
   const cfiles = fs.readdirSync(path.join(tmp, 'vault', 'LLM Wiki', 'concepts'));
   ok(cfiles.every((f) => f === f.toLowerCase()), 'concept page filenames are canonical lowercase (case-insensitive-share safe)');
+
+  // 21b. Projection dirty-check: unchanged pages hash-skip (the vault is a network share);
+  //      index.md/log.md carry a timestamp so they always rewrite — everything else skips.
+  const noop = o.project();
+  ok(noop.skipped > 0 && noop.written <= 2, `no-op projection skips unchanged pages (written=${noop.written}, skipped=${noop.skipped})`);
+  // A hand-deleted vault file is repaired despite a matching hash (existence check per dir).
+  const anyEntry = (await o.query('proactive recall pre-turn hook', { limit: 1 })).results[0];
+  const repairDir = path.join(tmp, 'vault', 'LLM Wiki');
+  const someProjected = fs.readdirSync(path.join(repairDir, 'memory')).find((f) => f.endsWith('.md'));
+  fs.unlinkSync(path.join(repairDir, 'memory', someProjected));
+  o.project();
+  ok(fs.existsSync(path.join(repairDir, 'memory', someProjected)), 'hand-deleted vault page is re-written on the next pass');
+  // force:true rewrites everything regardless of hashes (only same-filename duplicates
+  // still skip — first writer wins the pass whether forced or not).
+  const forced = o.project({ force: true });
+  ok(forced.written > noop.written && forced.written + forced.skipped === noop.written + noop.skipped,
+    `force:true rewrites all unique pages (written=${forced.written}, skipped=${forced.skipped})`);
 
   // 22. Projection resilience: one unwritable page (a corrupt share entry) must not abort the pass.
   const survivor = await o.storeMemory({ content: 'page that must still project around a broken sibling', tier: 'fact', type: 'note' });

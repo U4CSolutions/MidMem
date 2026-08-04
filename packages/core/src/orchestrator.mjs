@@ -12,12 +12,15 @@ import { GraphStore } from './graph.mjs';
 import { ClaimStore } from './claims.mjs';
 import { SigmaVerifier } from './verify.mjs';
 import { PolicyEvaluator, governed } from './governance.mjs';
-import { projectVault } from './project.mjs';
+import { projectVault, probeProjection } from './project.mjs';
 import { hybridSearch } from './retrieval.mjs';
 import { checkGrounding, groundingScore } from './grounding.mjs';
 import { makeVectorStore } from './vectorstore.mjs';
 import { handoffBrief as buildHandoffBrief } from './handoff.mjs';
-import { recordWorkEvent, listOpenTasks, consolidateWork, categorizeIngest } from './workmemory.mjs';
+import { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, consolidateWork, categorizeIngest, recordProspective, dueProspective, resolveProspective } from './workmemory.mjs';
+import { verifyTransition, verifyPromotion, auditTransition } from './transitions.mjs';
+import { loadPacks, recordPattern } from './packs.mjs';
+import { exportKnowledge } from './export.mjs';
 import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
 import { genId, sha12, nowISO } from './util.mjs';
 
@@ -33,7 +36,18 @@ export class Orchestrator {
     this.claims = new ClaimStore(this.db);
     this.verifier = new SigmaVerifier(this.db, this.graph, this.cfg);
     this.gov = { evaluator: new PolicyEvaluator(this.cfg), db: this.db };
+    // Capture packs load at construction (data, deterministic): same config → same
+    // type/rule/edge universe. Errors are carried, not thrown — a bad pack file must
+    // not take the orchestrator down.
+    this.packs = loadPacks(this.cfg);
+    this.graph.allowEdgeTypes(this.packs.edgeTypes || []);
   }
+
+  /** Loaded capture packs (name/version/types) + any load errors. */
+  listPacks() { return { packs: this.packs.packs, errors: this.packs.errors }; }
+
+  /** Record a structured domain entry via a pack-registered type (governed storeMemory inside). */
+  async recordPattern(rec = {}) { return recordPattern(this, rec); }
 
   /** Ingest a raw source: extract → store (memory tier) → embed → graph → claims → verify. */
   async ingest({ path, type = 'note', title, metadata = {}, curated = false, scope = this.cfg.agentScope }) {
@@ -59,7 +73,7 @@ export class Orchestrator {
       const { vector, model, mode } = await this.embedder.embed(ex.summary);
       const sourceId = genId('src', path);
       // Deterministic category tag so the store tracks ongoing requests by kind (research/build/...).
-      const category = categorizeIngest({ type, content: ex.summary, title });
+      const category = categorizeIngest({ type, content: ex.summary, title }, this.packs?.rules || []);
       const prov = { originalSource: path, extractedAt: nowISO(), category, grounding, chain: [{ step: 'ingest', source: path }] };
       // Sources row (the dedup hash) commits WITH the entry: a failed ingest must not
       // leave the hash behind, or re-ingests would be skipped as 'unchanged' forever.
@@ -94,10 +108,10 @@ export class Orchestrator {
   }
 
   /** The MCP `remember` op — store a memory directly. */
-  async storeMemory({ content, type = 'insight', tier = 'memory', scope = this.cfg.agentScope, source, concepts, curated = false }) {
+  async storeMemory({ content, type = 'insight', tier = 'memory', scope = this.cfg.agentScope, source, concepts, curated = false, memFunction = null }) {
     const r = await governed(this.gov, 'store', { tier, scope, curated }, async () => {
       const prov = source ? { originalSource: source.path, extractedAt: nowISO(), chain: [{ step: 'remember', source: source.path }] } : null;
-      const stored = this.db.tx(() => this.memory.store({ content, type, tier, scope, provenance: prov, concepts }));
+      const stored = this.db.tx(() => this.memory.store({ content, type, tier, scope, provenance: prov, concepts, memFunction }));
       const { vector, model, mode } = await this.embedder.embed(content);
       await this.memory.upsertVector(stored.id, vector, model, mode);
       if (concepts) for (const c of concepts) this.graph.upsertNode({ type: c.type || 'concept', label: c.name, source: 'remember' });
@@ -183,8 +197,15 @@ export class Orchestrator {
       const swept = this.memory.sweepLifecycle({ distrustBelow: m.distrustBelow ?? 0 });
       const promoted = [];
       for (const c of this.memory.autoPromoteCandidates(m)) {
+        // Write-time grounding is immutable, so a below-floor entry is PERMANENTLY ineligible:
+        // pre-filter here rather than letting promote() deny it — which would (a) misreport it
+        // in `promoted`, and (b) re-deny + re-audit the same entry on every pass forever.
+        if (this.cfg.transitions?.enabled !== false && !verifyPromotion(this.recall(c.id), this.cfg.transitions).pass) continue;
         // Governance still gates each promotion — a veto stands, the rest proceed.
-        try { await this.promote(c.id, c.to, { curated: c.curated }); promoted.push(c); } catch { /* vetoed */ }
+        try {
+          const pr = await this.promote(c.id, c.to, { curated: c.curated });
+          if (pr?.success !== false) promoted.push(c);
+        } catch { /* vetoed */ }
       }
       if (swept.expired.length || swept.distrusted.length) this.#markVaultDirty();
 
@@ -216,7 +237,21 @@ export class Orchestrator {
         // Vault is a projection on possibly-remote storage — its failure must not fail maintenance.
         try { projected = this.project(); } catch (e) { projected = { error: e.message }; }
       }
-      const summary = { swept, promoted, projected, autoIngested, concepts, retention, forced: force };
+      // Projection QA (WiCER): probe the compiled wiki on the heavy pass only (force/daily),
+      // where the concept-embedding work already lives. Report-only; failure must not fail
+      // maintenance — a QA failure is a finding, not an outage.
+      let projectionQA = null;
+      if (force && this.cfg.projectionQA?.enabled !== false) {
+        try {
+          projectionQA = this.probeProjection();
+          if (!projectionQA.pass) this.db.logOp('projection-qa-fail', { missing: projectionQA.missingCount, fidelity: projectionQA.fidelityFailures.length });
+        } catch (e) { projectionQA = { error: e.message }; }
+      }
+      let exported = null;
+      if (force && this.cfg.export?.enabled !== false) {
+        try { exported = this.exportKnowledge(); } catch (e) { exported = { error: e.message }; }
+      }
+      const summary = { swept, promoted, projected, projectionQA, exported, autoIngested, concepts, retention, forced: force };
       this.db.logOp('maintain', summary);
       return summary;
     } finally { this._maintaining = false; }
@@ -234,6 +269,24 @@ export class Orchestrator {
 
   /** Ongoing requests: task nodes not yet marked done. */
   openTasks() { return listOpenTasks(this); }
+
+  /** Bulk-close open task nodes (status → done). Requires a selector; supports dryRun. */
+  closeTasks(opts) { return closeTasks(this, opts); }
+
+  /** Bulk soft-forget entries by selector (content selector required; supports dryRun). */
+  forgetEntries(opts) { return forgetEntries(this, opts); }
+
+  /** Prospective memory: record an intent (date|event trigger). MidMem informs; cron fires. */
+  async recordProspective(opts) { return recordProspective(this, opts); }
+
+  /** Pending intents whose trigger has fired (deterministic; `now`/`event` are caller inputs). */
+  dueProspective(opts) { return dueProspective(this, opts); }
+
+  /** Resolve an intent: completed | cancelled (archives the entry, keeps the history). */
+  resolveProspective(id, outcome) { return resolveProspective(this, id, outcome); }
+
+  /** Deterministic knowledge snapshot (JSONL, stable bytes) for git revision history. */
+  exportKnowledge() { const r = exportKnowledge(this.db, this.cfg); this.db.logOp('export', { rows: r.rows }); return r; }
 
   /** P5: (re)build the concept graph (embed nodes + communities) on demand. */
   async refreshConcepts(opts) { return refreshConceptGraph(this, opts); }
@@ -291,7 +344,17 @@ export class Orchestrator {
       "SELECT id, trust_score, content FROM entries WHERE status='active' AND tier='wisdom' AND trust_score < 0.3",
     ).all().map((r) => ({ id: r.id, trust: r.trust_score, content: r.content.slice(0, 80) }));
     const dupeConcepts = conceptDupeCandidates(this);
-    return { contradictions: conflicts.conflicts, orphans, lowTrustWisdom, dupeConcepts, summary: { nodes: g.nodes.length, edges: g.edges.length, entries: Object.values(this.memory.stats()).reduce((a, b) => a + b, 0) } };
+    // Write-path conflicts (MOSAIC): claims that arrived tagged contradictory and are still live —
+    // the write-time queue of judgment calls, distinct from the pairwise audit above.
+    // Both sides must still be live: a conflict whose neighbor was since superseded/archived is
+    // resolved history, not a pending judgment call — without this filter the queue could never
+    // be cleared for corrected claims.
+    const claimById = new Map(this.claims.getAll().map((c) => [c.id, c]));
+    const writeConflicts = [...claimById.values()]
+      .filter((c) => (c.status === 'active' || c.status === 'verified') && c.metadata?.writeRelation?.relation === 'contradictory')
+      .filter((c) => { const n = claimById.get(c.metadata.writeRelation.neighborId); return n && (n.status === 'active' || n.status === 'verified'); })
+      .map((c) => ({ id: c.id, neighbor: c.metadata.writeRelation.neighborId, content: c.content.slice(0, 120) }));
+    return { contradictions: conflicts.conflicts, writeConflicts, orphans, lowTrustWisdom, dupeConcepts, summary: { nodes: g.nodes.length, edges: g.edges.length, entries: Object.values(this.memory.stats()).reduce((a, b) => a + b, 0) } };
   }
 
   async forget(id, { soft = true, force = false } = {}) {
@@ -301,11 +364,30 @@ export class Orchestrator {
   archive(opts = {}) { const r = this.memory.archive(opts); this.db.logOp('archive', r); if (r.archived) this.#markVaultDirty(); return r; }
 
   async promote(id, toTier, { curated = false } = {}) {
-    return governed(this.gov, 'promote', { toTier, curated }, () => { const r = this.memory.promote(id, toTier); this.db.logOp('promote', { id, toTier }); this.#markVaultDirty(); return r; });
+    return governed(this.gov, 'promote', { toTier, curated }, () => {
+      // Transition check (TRUSTMEM): drifted-at-write content must not climb tiers.
+      if (this.cfg.transitions?.enabled !== false) {
+        const entry = this.recall(id);
+        const verdict = verifyPromotion(entry, this.cfg.transitions);
+        auditTransition(this.db, 'promote', { ...verdict, id, toTier }, { before: entry?.content || '', after: entry?.content || '' });
+        if (!verdict.pass && this.cfg.transitions?.deny !== false) {
+          this.db.logOp('promote-denied', { id, toTier, reason: verdict.reason });
+          return { success: false, denied: 'transition-verifier', ...verdict };
+        }
+      }
+      const r = this.memory.promote(id, toTier); this.db.logOp('promote', { id, toTier }); this.#markVaultDirty(); return r;
+    });
   }
 
-  project() {
-    const r = projectVault(this.db, this.memory, this.graph, this.cfg);
+  /** WiCER-style projection QA: completeness + sampled fidelity probes over the compiled wiki. */
+  probeProjection(opts = {}) {
+    const r = probeProjection(this.db, this.memory, this.cfg, { ...this.cfg.projectionQA, ...opts });
+    this.db.logOp('projection-qa', { pass: r.pass, entries: r.entries, missing: r.missingCount, sampled: r.sampled, fidelityFailures: r.fidelityFailures.length });
+    return r;
+  }
+
+  project({ force = false } = {}) {
+    const r = projectVault(this.db, this.memory, this.graph, this.cfg, { force });
     this.db.logOp('project', r);
     this.db.prepare("INSERT INTO meta(key,value) VALUES('vault_dirty','0') ON CONFLICT(key) DO UPDATE SET value='0'").run();
     return r;
@@ -316,7 +398,23 @@ export class Orchestrator {
   /** P6: the current (freshest, non-superseded/contradicted) claim(s) for a query. */
   currentClaims(q, opts) { return this.claims.current(q, opts); }
   /** P6: supersede a claim with an updated one (knowledge-point update). */
-  supersedeClaim(oldId, next) { const r = this.claims.supersede(oldId, next); this.db.logOp('claim-supersede', { oldId, current: r.current }); if (r.success) this.#markVaultDirty(); return r; }
+  supersedeClaim(oldId, next) {
+    // Transition check (TRUSTMEM): the replacement must stay on-subject (corruption guard),
+    // and when evidence is supplied its content must be supported by old ∪ evidence
+    // (insertion guard). Receipt always written; deny is config-controlled.
+    if (this.cfg.transitions?.enabled !== false) {
+      const old = this.claims.get(oldId);
+      if (old) {
+        const verdict = verifyTransition({ before: old.content, after: next?.content || '', evidence: next?.evidence || '' }, this.cfg.transitions);
+        auditTransition(this.db, 'supersede', { ...verdict, oldId }, { before: old.content, after: next?.content || '' });
+        if (!verdict.pass && this.cfg.transitions?.deny !== false) {
+          this.db.logOp('supersede-denied', { oldId, subjectOverlap: verdict.subjectOverlap, coverage: verdict.coverage });
+          return { success: false, denied: 'transition-verifier', ...verdict };
+        }
+      }
+    }
+    const r = this.claims.supersede(oldId, next); this.db.logOp('claim-supersede', { oldId, current: r.current }); if (r.success) this.#markVaultDirty(); return r;
+  }
   /** P6: deterministic contradiction candidates among live claims. */
   claimContradictions(opts) { return this.claims.findContradictions(opts); }
 
