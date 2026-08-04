@@ -32,7 +32,7 @@
 - Eval-gated changes (already ours: smoke + bench are the gates).
 
 ## Sequencing & status
-1. Transition verifier — core `verifyTransition` + wiring into supersede/promote. ☐
+1. Transition verifier — core `verifyTransition` + wiring into supersede/promote. ☑ (smoke 111→117, bench PASS)
 2. Write-path conflict tagging — `relateClaim` at claims.add + storeMemory claims. ☐
 3. Projection QA — probe pass in forced/daily maintain. ☐
 4. Function axis — `mem_function` column, defaults, retrieval filter, surfaces. ☐

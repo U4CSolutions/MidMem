@@ -304,6 +304,25 @@ try {
   ok(o.recall(j1.id)?.status !== 'active', 'junk entry is soft-deleted');
   ok(o.recall(j2.id)?.status === 'active', 'legitimate dead_end with real content survives the opaque selector');
 
+  // 12e. Transition verifier (TRUSTMEM): on-subject supersede passes; topic-swap supersede is
+  //      denied; evidence-covered supersede passes the coverage gate; ungrounded promote denied.
+  const tvOld = o.claims.add({ content: 'The gateway webhook route listens on port 18789 and is healthy' });
+  const tvSwap = o.supersedeClaim(tvOld.id, { content: 'Bananas ripen faster inside a paper bag entirely' });
+  ok(tvSwap.success === false && tvSwap.denied === 'transition-verifier', 'supersede with a topic swap is denied (corruption guard)');
+  const tvOk = o.supersedeClaim(tvOld.id, { content: 'The gateway webhook route on port 18789 was de-registered and is unhealthy' });
+  ok(tvOk.success === true, 'on-subject supersede passes the verifier');
+  const tvEvOld = o.claims.add({ content: 'The build pipeline deploys from the main branch' });
+  const tvEvBad = o.supersedeClaim(tvEvOld.id, { content: 'The build pipeline deploys from the release branch after quantum blockchain approval', evidence: 'ops note: pipeline still deploys from main' });
+  ok(tvEvBad.success === false, 'evidence-contradicting insertion fails the coverage gate');
+  ok(o.db.prepare("SELECT COUNT(*) c FROM audit WHERE kind='transition:supersede'").get().c >= 3, 'every supersede transition wrote an audit receipt');
+  // promotion floor: a poorly-grounded ingest must not climb tiers
+  const tvEntry = await o.storeMemory({ content: 'well grounded direct write for promotion test', tier: 'fact' });
+  o.db.prepare('UPDATE entries SET provenance=? WHERE id=?').run(JSON.stringify({ grounding: { summaryScore: 0.1 } }), tvEntry.id);
+  const tvProm = await o.promote(tvEntry.id, 'memory');
+  ok(tvProm.success === false && tvProm.denied === 'transition-verifier', 'promotion denied for entry below the write-time grounding floor');
+  o.db.prepare('UPDATE entries SET provenance=? WHERE id=?').run(JSON.stringify({ grounding: { summaryScore: 0.9 } }), tvEntry.id);
+  ok((await o.promote(tvEntry.id, 'memory')).success !== false, 'well-grounded entry promotes normally');
+
   // 13. proactiveRecall self-gates: surfaces a relevant hit, stays silent on noise
   const prHit = await o.proactiveRecall('how do we wire proactive recall', { minScore: 0, force: true });
   ok(prHit.inject && prHit.used.length > 0, 'proactiveRecall surfaces an inject block for a relevant message');

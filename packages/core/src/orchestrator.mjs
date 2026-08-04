@@ -18,6 +18,7 @@ import { checkGrounding, groundingScore } from './grounding.mjs';
 import { makeVectorStore } from './vectorstore.mjs';
 import { handoffBrief as buildHandoffBrief } from './handoff.mjs';
 import { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, consolidateWork, categorizeIngest } from './workmemory.mjs';
+import { verifyTransition, verifyPromotion, auditTransition } from './transitions.mjs';
 import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
 import { genId, sha12, nowISO } from './util.mjs';
 
@@ -307,7 +308,19 @@ export class Orchestrator {
   archive(opts = {}) { const r = this.memory.archive(opts); this.db.logOp('archive', r); if (r.archived) this.#markVaultDirty(); return r; }
 
   async promote(id, toTier, { curated = false } = {}) {
-    return governed(this.gov, 'promote', { toTier, curated }, () => { const r = this.memory.promote(id, toTier); this.db.logOp('promote', { id, toTier }); this.#markVaultDirty(); return r; });
+    return governed(this.gov, 'promote', { toTier, curated }, () => {
+      // Transition check (TRUSTMEM): drifted-at-write content must not climb tiers.
+      if (this.cfg.transitions?.enabled !== false) {
+        const entry = this.recall(id);
+        const verdict = verifyPromotion(entry, this.cfg.transitions);
+        auditTransition(this.db, 'promote', { ...verdict, id, toTier }, { before: entry?.content || '', after: entry?.content || '' });
+        if (!verdict.pass && this.cfg.transitions?.deny !== false) {
+          this.db.logOp('promote-denied', { id, toTier, reason: verdict.reason });
+          return { success: false, denied: 'transition-verifier', ...verdict };
+        }
+      }
+      const r = this.memory.promote(id, toTier); this.db.logOp('promote', { id, toTier }); this.#markVaultDirty(); return r;
+    });
   }
 
   project({ force = false } = {}) {
@@ -322,7 +335,23 @@ export class Orchestrator {
   /** P6: the current (freshest, non-superseded/contradicted) claim(s) for a query. */
   currentClaims(q, opts) { return this.claims.current(q, opts); }
   /** P6: supersede a claim with an updated one (knowledge-point update). */
-  supersedeClaim(oldId, next) { const r = this.claims.supersede(oldId, next); this.db.logOp('claim-supersede', { oldId, current: r.current }); if (r.success) this.#markVaultDirty(); return r; }
+  supersedeClaim(oldId, next) {
+    // Transition check (TRUSTMEM): the replacement must stay on-subject (corruption guard),
+    // and when evidence is supplied its content must be supported by old ∪ evidence
+    // (insertion guard). Receipt always written; deny is config-controlled.
+    if (this.cfg.transitions?.enabled !== false) {
+      const old = this.claims.get(oldId);
+      if (old) {
+        const verdict = verifyTransition({ before: old.content, after: next?.content || '', evidence: next?.evidence || '' }, this.cfg.transitions);
+        auditTransition(this.db, 'supersede', { ...verdict, oldId }, { before: old.content, after: next?.content || '' });
+        if (!verdict.pass && this.cfg.transitions?.deny !== false) {
+          this.db.logOp('supersede-denied', { oldId, subjectOverlap: verdict.subjectOverlap, coverage: verdict.coverage });
+          return { success: false, denied: 'transition-verifier', ...verdict };
+        }
+      }
+    }
+    const r = this.claims.supersede(oldId, next); this.db.logOp('claim-supersede', { oldId, current: r.current }); if (r.success) this.#markVaultDirty(); return r;
+  }
   /** P6: deterministic contradiction candidates among live claims. */
   claimContradictions(opts) { return this.claims.findContradictions(opts); }
 
