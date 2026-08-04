@@ -65,3 +65,8 @@ state.db-*
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Revision-export snapshots hold the FULL knowledge content of a deployment.
+# This repo is public: never commit a live snapshot here. Private forks tracking
+# their own knowledge history should remove this line deliberately.
+snapshots/

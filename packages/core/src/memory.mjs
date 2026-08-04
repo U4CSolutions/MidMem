@@ -3,6 +3,7 @@
  * No parallel markdown store (the vault is a downstream projection).
  */
 import { genId, nowISO, json } from './util.mjs';
+import { functionForType, MEMORY_FUNCTIONS } from './workmemory.mjs';
 
 export class TieredMemory {
   /** @param {import('./db.mjs').StateDB} db @param {object} cfg */
@@ -19,19 +20,21 @@ export class TieredMemory {
    * Store an entry (single transactional write to entries; vector set separately).
    * @returns {{id:string, rowid:number, tier:string}}
    */
-  store({ content, type = 'note', tier = 'memory', scope = 'shared', sourceId = null, provenance = null, concepts = null }) {
+  store({ content, type = 'note', tier = 'memory', scope = 'shared', sourceId = null, provenance = null, concepts = null, memFunction = null }) {
     const tc = this.tier(tier);
     if (!tc) throw new Error(`unknown tier: ${tier}`);
+    const fn = memFunction || functionForType(type);
+    if (!MEMORY_FUNCTIONS.includes(fn)) throw new Error(`unknown memory function: ${fn} (expected: ${MEMORY_FUNCTIONS.join('|')})`);
     const id = genId(tier, content.slice(0, 80) + type + Date.now());
     const ts = nowISO();
     const expiresAt = tc.ttl ? new Date(Date.now() + tc.ttl).toISOString() : null;
     const info = this.db.prepare(`
-      INSERT INTO entries(id,tier,type,content,source_id,provenance,concepts,status,scope,created_at,updated_at,expires_at)
-      VALUES(?,?,?,?,?,?,?, 'active', ?,?,?,?)
+      INSERT INTO entries(id,tier,type,content,source_id,provenance,concepts,status,scope,created_at,updated_at,expires_at,mem_function)
+      VALUES(?,?,?,?,?,?,?, 'active', ?,?,?,?,?)
     `).run(id, tier, type, content, sourceId,
       provenance ? JSON.stringify(provenance) : null,
-      concepts ? JSON.stringify(concepts) : null, scope, ts, ts, expiresAt);
-    return { id, rowid: Number(info.lastInsertRowid), tier, scope };
+      concepts ? JSON.stringify(concepts) : null, scope, ts, ts, expiresAt, fn);
+    return { id, rowid: Number(info.lastInsertRowid), tier, scope, memFunction: fn };
   }
 
   async upsertVector(entryId, embedding, model, mode = 'unknown') {

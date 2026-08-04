@@ -19,11 +19,62 @@ export class ClaimStore {
       confidence: provenance.confidence ?? 0.5,
       chain: provenance.chain || [{ step: 'ingest', source: source.path || 'unknown', timestamp: ts }],
     };
+    // MOSAIC-style write-path relation (arXiv 2607.16211): compare the incoming claim against
+    // live neighbors BEFORE it lands, so conflicts are visible at write time instead of being
+    // discovered by a later audit or a contradictory query answer. Tag only — never mutate the
+    // neighbor: contradictions and supersede candidates are judgment calls, and the flag is
+    // what queues them for one. The relation rides in metadata.writeRelation.
+    const relation = this.relate(content);
+    const meta = relation.relation === 'novel' ? metadata : { ...metadata, writeRelation: relation };
     this.db.prepare(`
       INSERT INTO claims(id,content,type,source,provenance,status,metadata,created_at,updated_at)
       VALUES(?,?,?,?,?, 'active', ?,?,?)
-    `).run(id, content, type, JSON.stringify(source), JSON.stringify(prov), JSON.stringify(metadata), ts, ts);
+    `).run(id, content, type, JSON.stringify(source), JSON.stringify(prov), JSON.stringify(meta), ts, ts);
+    if (relation.relation === 'contradictory') this.db.logOp?.('claim-write-conflict', { id, neighbor: relation.neighborId, shared: relation.shared });
     return this.get(id);
+  }
+
+  /**
+   * Deterministic write-path relation of a candidate claim to its live neighbors.
+   * Neighbor = live claim sharing ≥ minShared significant tokens (the same locality rule
+   * findContradictions uses). Verdicts, checked in order:
+   *  - contradictory: exactly one side negated (same rule as the audit-time finder)
+   *  - corroborating: near-identical token sets (high Jaccard) with same polarity
+   *  - superseding-candidate: strong overlap, same polarity, but materially different content
+   *  - additive: shares locality but low similarity — likely a new fact about known things
+   *  - novel: no neighbor at all
+   * Returns { relation, neighborId?, shared?, similarity? } for the strongest neighbor.
+   */
+  relate(content, { minShared = 3, scanLimit = 500 } = {}) {
+    const NEGW = new Set(['not', 'no', 'never', 'none', 'cannot', 'cant', 'isnt', 'arent', 'wont', 'dont', 'false', 'incorrect', 'deprecated', 'removed', 'without', 'disabled', 'fails', 'failed']);
+    const cand = new Set(tokenize(content));
+    const candNeg = [...cand].some((t) => NEGW.has(t));
+    const candSig = new Set([...cand].filter((t) => !NEGW.has(t)));
+    let best = null;
+    // Bounded, deterministic neighbor scan: the most recent `scanLimit` live claims (stable
+    // created_at DESC, id DESC order — same-millisecond bulk inserts must not flip the winner).
+    // Unbounded getAll() made every claims.add O(N) and bulk ingest O(N^2) (~11ms/1k claims).
+    const neighbors = this.db.prepare(
+      "SELECT * FROM claims WHERE status IN ('active','verified') ORDER BY created_at DESC, id DESC LIMIT ?",
+    ).all(scanLimit).map((r) => this.#h(r));
+    for (const c of neighbors) {
+      const nb = new Set(tokenize(c.content));
+      const nbSig = new Set([...nb].filter((t) => !NEGW.has(t)));
+      let shared = 0; for (const t of candSig) if (nbSig.has(t)) shared++;
+      if (shared < minShared) continue;
+      const union = new Set([...candSig, ...nbSig]).size;
+      const sim = union ? shared / union : 0;
+      if (!best || shared > best.shared) {
+        const nbNeg = [...nb].some((t) => NEGW.has(t));
+        let relation;
+        if (candNeg !== nbNeg) relation = 'contradictory';
+        else if (sim >= 0.8) relation = 'corroborating';
+        else if (sim >= 0.4) relation = 'superseding-candidate';
+        else relation = 'additive';
+        best = { relation, neighborId: c.id, shared, similarity: Number(sim.toFixed(3)) };
+      }
+    }
+    return best || { relation: 'novel' };
   }
 
   get(id) { const r = this.db.prepare('SELECT * FROM claims WHERE id=?').get(id); return r ? this.#h(r) : null; }
@@ -58,9 +109,13 @@ export class ClaimStore {
     const old = this.get(oldId);
     if (!old) return { success: false, message: `not found: ${oldId}` };
     return this.db.tx(() => {
+      // Mark the old claim superseded FIRST so the write-path relate() inside add() no longer
+      // sees it as a live neighbor — otherwise every legitimate negation-style supersede tagged
+      // its own replacement 'contradictory' against the claim it was correcting.
+      this.db.prepare('UPDATE claims SET status=?, updated_at=? WHERE id=?').run('superseded', nowISO(), oldId);
       const created = this.add({ content: next.content, type: next.type || old.type, source: next.source || old.source, provenance: next.provenance || {}, metadata: { ...(next.metadata || {}), supersedes: oldId } });
-      this.db.prepare('UPDATE claims SET status=?, metadata=?, updated_at=? WHERE id=?')
-        .run('superseded', JSON.stringify({ ...old.metadata, superseded_by: created.id }), nowISO(), oldId);
+      this.db.prepare('UPDATE claims SET metadata=?, updated_at=? WHERE id=?')
+        .run(JSON.stringify({ ...old.metadata, superseded_by: created.id }), nowISO(), oldId);
       return { success: true, superseded: oldId, current: created.id };
     });
   }
