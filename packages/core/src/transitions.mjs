@@ -9,15 +9,17 @@
  * Thresholds are env-tunable (config.transitions); deny-on-fail can be disabled but the
  * receipt is always written.
  */
-import { groundingScore } from './grounding.mjs';
-import { tokenize, sha, nowISO } from './util.mjs';
+import { groundingScore, contentWords } from './grounding.mjs';
+import { sha, nowISO } from './util.mjs';
 
 const NEG = new Set(['not', 'no', 'never', 'none', 'cannot', 'cant', 'isnt', 'arent', 'wont', 'dont', 'false', 'incorrect', 'deprecated', 'removed', 'without', 'disabled', 'fails', 'failed']);
 
 /** Shared significant (non-negation) token fraction of the SMALLER side — subject continuity. */
 export function subjectOverlap(a, b) {
-  const A = new Set(tokenize(a).filter((t) => !NEG.has(t)));
-  const B = new Set(tokenize(b).filter((t) => !NEG.has(t)));
+  // Stopword-aware (grounding's contentWords, not raw tokenize): articles and copulas must not
+  // count as shared subject — with them, unrelated prose cleared the floor on "the/and/was" alone.
+  const A = new Set(contentWords(a).filter((t) => !NEG.has(t)));
+  const B = new Set(contentWords(b).filter((t) => !NEG.has(t)));
   if (!A.size || !B.size) return 0;
   let shared = 0;
   for (const t of A) if (B.has(t)) shared++;

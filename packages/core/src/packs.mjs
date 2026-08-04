@@ -13,7 +13,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { WORK_EVENT_NAMES, MEMORY_FUNCTIONS } from './workmemory.mjs';
-import { registerEdgeTypes } from './graph.mjs';
 
 const RESERVED_TYPES = new Set([...WORK_EVENT_NAMES, 'ingest', 'session', 'note', 'insight', 'prospective']);
 
@@ -40,6 +39,7 @@ export function loadPacks(cfg = {}) {
       const loadedTypes = [];
       for (const [t, def] of Object.entries(raw.entryTypes || {})) {
         if (RESERVED_TYPES.has(t)) { errors.push(`${raw.name}: type '${t}' is reserved`); continue; }
+        if (def.edge && !(raw.edgeTypes || []).includes(def.edge)) { errors.push(`${raw.name}: type '${t}' uses edge '${def.edge}' not declared in edgeTypes`); }
         if (types[t]) { errors.push(`${raw.name}: type '${t}' already registered by pack '${types[t].pack}'`); continue; }
         const fn = def.function || 'procedural';
         if (!MEMORY_FUNCTIONS.includes(fn)) { errors.push(`${raw.name}: type '${t}' has unknown function '${fn}'`); continue; }
@@ -49,11 +49,11 @@ export function loadPacks(cfg = {}) {
       for (const [cat, re] of raw.categorizerRules || []) {
         try { rules.push([cat, new RegExp(re, 'i')]); } catch { errors.push(`${raw.name}: bad rule regex for '${cat}'`); }
       }
-      registerEdgeTypes(raw.edgeTypes || []);
       packs.push({ name: raw.name, version: raw.version ?? 1, file, types: loadedTypes, edgeTypes: raw.edgeTypes || [] });
     } catch (e) { errors.push(`${path.basename(file)}: ${e.message}`); }
   }
-  return { packs, types, rules, errors };
+  const edgeTypes = [...new Set(packs.flatMap((p2) => p2.edgeTypes))];
+  return { packs, types, rules, edgeTypes, errors };
 }
 
 /**
@@ -80,7 +80,7 @@ export async function recordPattern(o, { type, title, context, problem, solution
     category: type, recordedAt: new Date().toISOString(), pack: def.pack,
     pattern: { title, context: context ?? null, problem: problem ?? null, solution: solution ?? null, outcome: outcome ?? null, evidence },
   };
-  o.db.prepare('UPDATE entries SET provenance=? WHERE id=?').run(JSON.stringify(prov), res.id);
+  o.db.prepare('UPDATE entries SET provenance=?, updated_at=? WHERE id=?').run(JSON.stringify(prov), new Date().toISOString(), res.id);
 
   const node = o.graph.upsertNode({ type, label: title, source: `pack:${def.pack}` });
   for (const ev of evidence) o.graph.upsertEdge({ from: node, to: o.graph.upsertNode({ type: 'source', label: ev, source: `pack:${def.pack}` }), type: def.edge || 'references', source: `pack:${def.pack}` });

@@ -39,7 +39,7 @@
 5. Capture packs — data-driven loader, recordPattern, coding-patterns pack, pattern-capture skill. ☑ (smoke 130→136, bench PASS)
 6. Prospective memory — intent+trigger entries, deterministic due surface, resolve; cron fires. ☑ (smoke 136→145, bench PASS)
 7. Revision export — stable-byte JSONL snapshot, forced-maintain refresh, CLI/MCP. ☑ (smoke 145→149, bench PASS)
-8. Adversarial review pass (independent subagent) + full-suite verification + push. ☐
+8. Adversarial review pass — 11 findings (1 critical, 4 major), ALL fixed + regression-tested. ☑ (smoke 149→155, bench PASS)
 
 Each step: full smoke suite must pass (no skips), bench must stay PASS, one commit,
 root-changelog entry. Results recorded in this file's status column as steps land.

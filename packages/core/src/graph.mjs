@@ -5,11 +5,6 @@
  */
 import { genId, nowISO, sha12, json, canonicalConceptKey } from './util.mjs';
 
-/** Capture packs may register additional domain edge vocabularies at load (packs.mjs).
- *  Deterministic: packs are data loaded at construction, so the same config always
- *  yields the same edge-type universe. */
-export function registerEdgeTypes(types = []) { for (const t of types) if (t && typeof t === 'string') EDGE_TYPES.add(t); }
-
 const EDGE_TYPES = new Set([
   'references', 'contradicts', 'supports', 'relates',
   // work-memory relations (task → source/artifact/concept/correction)
@@ -45,8 +40,13 @@ export class GraphStore {
     return id;
   }
 
+  /** Capture packs register additional edge vocabularies PER INSTANCE — a module-global set
+   *  would leak one instance's packs into every other orchestrator in the process (tests run
+   *  several) and silently loosen validation for packs-disabled instances. */
+  allowEdgeTypes(types = []) { this.extraEdgeTypes ||= new Set(); for (const t of types) if (t && typeof t === 'string') this.extraEdgeTypes.add(t); }
+
   upsertEdge({ from, to, type, confidence = 1, properties = {}, source = '' }) {
-    if (!EDGE_TYPES.has(type)) type = 'relates';
+    if (!EDGE_TYPES.has(type) && !this.extraEdgeTypes?.has(type)) type = 'relates';
     const id = `edge-${sha12(`${from}:${to}:${type}`)}`;
     this.db.prepare(`
       INSERT INTO edges(id,from_id,to_id,type,confidence,properties,source,created_at)

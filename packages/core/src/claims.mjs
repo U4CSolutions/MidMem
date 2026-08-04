@@ -45,14 +45,19 @@ export class ClaimStore {
    *  - novel: no neighbor at all
    * Returns { relation, neighborId?, shared?, similarity? } for the strongest neighbor.
    */
-  relate(content, { minShared = 3 } = {}) {
+  relate(content, { minShared = 3, scanLimit = 500 } = {}) {
     const NEGW = new Set(['not', 'no', 'never', 'none', 'cannot', 'cant', 'isnt', 'arent', 'wont', 'dont', 'false', 'incorrect', 'deprecated', 'removed', 'without', 'disabled', 'fails', 'failed']);
     const cand = new Set(tokenize(content));
     const candNeg = [...cand].some((t) => NEGW.has(t));
     const candSig = new Set([...cand].filter((t) => !NEGW.has(t)));
     let best = null;
-    for (const c of this.getAll()) {
-      if (c.status !== 'active' && c.status !== 'verified') continue;
+    // Bounded, deterministic neighbor scan: the most recent `scanLimit` live claims (stable
+    // created_at DESC, id DESC order — same-millisecond bulk inserts must not flip the winner).
+    // Unbounded getAll() made every claims.add O(N) and bulk ingest O(N^2) (~11ms/1k claims).
+    const neighbors = this.db.prepare(
+      "SELECT * FROM claims WHERE status IN ('active','verified') ORDER BY created_at DESC, id DESC LIMIT ?",
+    ).all(scanLimit).map((r) => this.#h(r));
+    for (const c of neighbors) {
       const nb = new Set(tokenize(c.content));
       const nbSig = new Set([...nb].filter((t) => !NEGW.has(t)));
       let shared = 0; for (const t of candSig) if (nbSig.has(t)) shared++;
@@ -104,9 +109,13 @@ export class ClaimStore {
     const old = this.get(oldId);
     if (!old) return { success: false, message: `not found: ${oldId}` };
     return this.db.tx(() => {
+      // Mark the old claim superseded FIRST so the write-path relate() inside add() no longer
+      // sees it as a live neighbor — otherwise every legitimate negation-style supersede tagged
+      // its own replacement 'contradictory' against the claim it was correcting.
+      this.db.prepare('UPDATE claims SET status=?, updated_at=? WHERE id=?').run('superseded', nowISO(), oldId);
       const created = this.add({ content: next.content, type: next.type || old.type, source: next.source || old.source, provenance: next.provenance || {}, metadata: { ...(next.metadata || {}), supersedes: oldId } });
-      this.db.prepare('UPDATE claims SET status=?, metadata=?, updated_at=? WHERE id=?')
-        .run('superseded', JSON.stringify({ ...old.metadata, superseded_by: created.id }), nowISO(), oldId);
+      this.db.prepare('UPDATE claims SET metadata=?, updated_at=? WHERE id=?')
+        .run(JSON.stringify({ ...old.metadata, superseded_by: created.id }), nowISO(), oldId);
       return { success: true, superseded: oldId, current: created.id };
     });
   }

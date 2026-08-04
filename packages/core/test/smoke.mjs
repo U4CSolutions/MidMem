@@ -304,6 +304,26 @@ try {
   ok(o.recall(j1.id)?.status !== 'active', 'junk entry is soft-deleted');
   ok(o.recall(j2.id)?.status === 'active', 'legitimate dead_end with real content survives the opaque selector');
 
+  // 12l. Review-pass regressions (2026-08-04 adversarial review findings 1–4):
+  // (1) a pending prospective intent must be lease-exempt — the memory tier's TTL must not
+  //     archive it before a far-future trigger fires.
+  const rvP = await o.recordProspective({ intent: 'far future intent', trigger: { type: 'date', value: '2030-01-01T00:00:00Z' } });
+  ok(o.db.prepare('SELECT expires_at FROM entries WHERE id=?').get(rvP.id).expires_at === null, 'pending intent carries no lease (F1: TTL cannot kill it before its trigger)');
+  // (2) subject gate is stopword-aware: article-only overlap must NOT clear the floor.
+  const rvV = (await import('../src/transitions.mjs')).verifyTransition({ before: 'The gateway webhook route listens on port 18789 and is healthy', after: 'The bananas and the paper bag were ripening on the counter' });
+  ok(rvV.pass === false, `F2: topic swap sharing only stopwords is denied (subjectOverlap=${rvV.subjectOverlap})`);
+  // (3) a legitimate negation-supersede must not leave a permanent write-conflict.
+  const rvC = o.claims.add({ content: 'matrix plugin channel pipeline is configured and enabled on the gateway' });
+  const rvS = o.supersedeClaim(rvC.id, { content: 'matrix plugin channel pipeline is not enabled on the gateway anymore' });
+  ok(rvS.success === true, 'F3: negation-supersede passes the verifier');
+  ok(!o.lint().writeConflicts.some((c) => c.id === rvS.current || c.neighbor === rvC.id), 'F3: supersede leaves no write-conflict against its own superseded claim');
+  // (4) maintain must not report a grounding-denied entry as promoted, nor re-deny forever.
+  const rvE = await o.storeMemory({ content: 'popular but ungrounded probe delta epsilon', tier: 'fact' });
+  o.db.prepare('UPDATE entries SET provenance=?, retrieval_count=99, trust_score=0.9 WHERE id=?').run(JSON.stringify({ grounding: { summaryScore: 0.05 } }), rvE.id);
+  const rvM = await o.maintain({ force: false });
+  ok(!(rvM.promoted || []).some((c) => c.id === rvE.id) && o.recall(rvE.id).tier === 'fact', 'F4: grounding-denied candidate neither promoted nor misreported');
+  ok(o.db.prepare("SELECT COUNT(*) c FROM audit WHERE kind='transition:promote' AND detail LIKE '%' || ? || '%'").get(rvE.id).c === 0, 'F4: pre-filter avoids per-pass audit spam for permanently ineligible entries');
+
   // 12k. Revision export: deterministic bytes on an unchanged store; a knowledge mutation
   //      changes the snapshot; vectors/log/audit stay out of it.
   const expPath = path.join(tmp, 'snapshots', 'export.jsonl');

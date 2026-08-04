@@ -40,6 +40,7 @@ export class Orchestrator {
     // type/rule/edge universe. Errors are carried, not thrown — a bad pack file must
     // not take the orchestrator down.
     this.packs = loadPacks(this.cfg);
+    this.graph.allowEdgeTypes(this.packs.edgeTypes || []);
   }
 
   /** Loaded capture packs (name/version/types) + any load errors. */
@@ -196,8 +197,15 @@ export class Orchestrator {
       const swept = this.memory.sweepLifecycle({ distrustBelow: m.distrustBelow ?? 0 });
       const promoted = [];
       for (const c of this.memory.autoPromoteCandidates(m)) {
+        // Write-time grounding is immutable, so a below-floor entry is PERMANENTLY ineligible:
+        // pre-filter here rather than letting promote() deny it — which would (a) misreport it
+        // in `promoted`, and (b) re-deny + re-audit the same entry on every pass forever.
+        if (this.cfg.transitions?.enabled !== false && !verifyPromotion(this.recall(c.id), this.cfg.transitions).pass) continue;
         // Governance still gates each promotion — a veto stands, the rest proceed.
-        try { await this.promote(c.id, c.to, { curated: c.curated }); promoted.push(c); } catch { /* vetoed */ }
+        try {
+          const pr = await this.promote(c.id, c.to, { curated: c.curated });
+          if (pr?.success !== false) promoted.push(c);
+        } catch { /* vetoed */ }
       }
       if (swept.expired.length || swept.distrusted.length) this.#markVaultDirty();
 
@@ -338,8 +346,13 @@ export class Orchestrator {
     const dupeConcepts = conceptDupeCandidates(this);
     // Write-path conflicts (MOSAIC): claims that arrived tagged contradictory and are still live —
     // the write-time queue of judgment calls, distinct from the pairwise audit above.
-    const writeConflicts = this.claims.getAll()
+    // Both sides must still be live: a conflict whose neighbor was since superseded/archived is
+    // resolved history, not a pending judgment call — without this filter the queue could never
+    // be cleared for corrected claims.
+    const claimById = new Map(this.claims.getAll().map((c) => [c.id, c]));
+    const writeConflicts = [...claimById.values()]
       .filter((c) => (c.status === 'active' || c.status === 'verified') && c.metadata?.writeRelation?.relation === 'contradictory')
+      .filter((c) => { const n = claimById.get(c.metadata.writeRelation.neighborId); return n && (n.status === 'active' || n.status === 'verified'); })
       .map((c) => ({ id: c.id, neighbor: c.metadata.writeRelation.neighborId, content: c.content.slice(0, 120) }));
     return { contradictions: conflicts.conflicts, writeConflicts, orphans, lowTrustWisdom, dupeConcepts, summary: { nodes: g.nodes.length, edges: g.edges.length, entries: Object.values(this.memory.stats()).reduce((a, b) => a + b, 0) } };
   }

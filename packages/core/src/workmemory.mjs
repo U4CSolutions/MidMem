@@ -42,7 +42,7 @@ export const MEMORY_FUNCTIONS = ['working', 'episodic', 'semantic', 'procedural'
 const FUNCTION_OF_TYPE = {
   task_attempt: 'episodic', source_used: 'episodic', artifact: 'episodic', dead_end: 'episodic',
   session: 'episodic',
-  correction: 'procedural', pattern: 'procedural', scaffold: 'procedural', recipe: 'procedural',
+  correction: 'procedural', pattern: 'procedural', scaffold: 'procedural', recipe: 'procedural', 'anti-pattern': 'procedural',
   decision: 'semantic', insight: 'semantic', note: 'semantic', research: 'semantic', report: 'semantic',
   prospective: 'prospective',
 };
@@ -250,7 +250,11 @@ export async function recordProspective(o, { intent, trigger = {}, context, scop
     category: 'prospective', recordedAt: nowISO(),
     prospective: { intent, trigger, status: 'pending', context: context ?? null, expiresWhen },
   };
-  o.db.prepare('UPDATE entries SET provenance=?, updated_at=? WHERE id=?').run(JSON.stringify(prov), nowISO(), res.id);
+  // A pending intent must OUTLIVE the tier lease: the memory tier's 30-day TTL would archive
+  // a far-future intent before its trigger ever fired, and dueProspective (a raw read, not
+  // retrieval) never renews leases — the intent would silently vanish from the due surface.
+  // Pending intents are therefore lease-exempt (expires_at NULL); resolution is the exit.
+  o.db.prepare('UPDATE entries SET provenance=?, expires_at=NULL, updated_at=? WHERE id=?').run(JSON.stringify(prov), nowISO(), res.id);
   o.db.logOp('prospective-add', { id: res.id, trigger: `${trigger.type}=${String(trigger.value).slice(0, 60)}` });
   return { success: true, ...res, prospective: prov.prospective };
 }

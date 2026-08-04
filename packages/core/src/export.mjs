@@ -19,9 +19,16 @@ const TABLES = {
   sources: 'SELECT * FROM sources ORDER BY id',
 };
 
-/** JSON with keys in sorted order — stable bytes for stable content. */
-function stableStringify(obj) {
-  return JSON.stringify(obj, Object.keys(obj).sort());
+/** Usage/lease counters change on every read — they are telemetry, not knowledge, and would
+ *  swamp the snapshot diff with counter bumps. rowid is physical storage detail. */
+const VOLATILE = new Set(['trust_score', 'retrieval_count', 'helpful_count', 'last_accessed_at', 'expires_at', 'rowid']);
+
+/** Recursive sorted-key stringify — replacer-array JSON.stringify would silently DROP nested
+ *  keys absent from the top-level list; this sorts at every level instead. */
+function stableStringify(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+  return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
 }
 
 export function exportKnowledge(db, cfg = {}) {
@@ -33,7 +40,10 @@ export function exportKnowledge(db, cfg = {}) {
   for (const [table, sql] of Object.entries(TABLES)) {
     const rows = db.prepare(sql).all();
     counts[table] = rows.length;
-    for (const r of rows) lines.push(stableStringify({ _table: table, ...r }));
+    for (const r of rows) {
+      for (const k of VOLATILE) delete r[k];
+      lines.push(stableStringify({ _table: table, ...r }));
+    }
   }
   // Single trailing newline; no timestamps in the body — the git commit carries "when".
   fs.writeFileSync(file, lines.join('\n') + '\n');
