@@ -542,6 +542,32 @@ try {
   ok(mres.retention && mres.retention.log >= 1, `retention pruned ${mres.retention?.log} ancient log rows`);
   ok(o.db.prepare('SELECT COUNT(*) c FROM vectors WHERE entry_id=?').get(doomed.id).c === 0, 'retention removed vectors of hard-deleted entries');
 
+  // 24. Node deletion cascades edges; forgetNodes is selector-gated; the orphan-edge sweep
+  //     self-heals deletes that bypassed deleteNode (the July-2026 dangling-edge incident).
+  const nTask = o.graph.upsertNode({ type: 'task', label: 'cascade doomed task' });
+  const nSrc = o.graph.upsertNode({ type: 'source', label: 'notes/cascade.md' });
+  o.graph.upsertEdge({ from: nTask, to: nSrc, type: 'used_source', source: 'work' });
+  let bareRefused = false;
+  try { await o.forgetNodes({}); } catch { bareRefused = true; }
+  ok(bareRefused, 'forgetNodes with no selector is refused');
+  const fnDry = await o.forgetNodes({ ids: [nTask], dryRun: true });
+  ok(fnDry.matched === 1 && fnDry.deleted === 0 && o.graph.node(nTask), 'dryRun previews without deleting');
+  const fnDel = await o.forgetNodes({ ids: [nTask] });
+  ok(fnDel.deleted === 1 && fnDel.edges === 1, `forgetNodes deleted the node and cascaded ${fnDel.edges} edge`);
+  ok(!o.graph.node(nTask) && o.db.prepare('SELECT COUNT(*) c FROM edges WHERE from_id=? OR to_id=?').get(nTask, nTask).c === 0, 'no node row and no dangling edge remain');
+  // opaque selector narrows by type and matches machine-identifier labels only
+  const nHex = o.graph.upsertNode({ type: 'entity', label: 'ae21982db6055d78439efb3ab837efeb' });
+  const opq = await o.forgetNodes({ opaque: true, types: ['entity'] });
+  ok(opq.deleted >= 1 && !o.graph.node(nHex) && o.graph.node(nSrc), 'opaque+types deletes the hex-label entity, spares real nodes');
+  // out-of-band delete (bypassing deleteNode) strands an edge → forced maintain heals it
+  const nGone = o.graph.upsertNode({ type: 'task', label: 'vanishes out of band' });
+  o.graph.upsertEdge({ from: nGone, to: nSrc, type: 'attempted', source: 'work' });
+  o.db.prepare('DELETE FROM nodes WHERE id=?').run(nGone);
+  const heal = await o.maintain({ force: true });
+  ok(heal.retention?.orphanEdges >= 1, `maintain swept ${heal.retention?.orphanEdges} orphaned edge(s)`);
+  ok(o.db.prepare('SELECT COUNT(*) c FROM edges WHERE from_id=?').get(nGone).c === 0, 'stranded edge is gone after the sweep');
+  ok(o.graph.sweepOrphanEdges() === 0, 'sweep is idempotent (second pass removes nothing)');
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;

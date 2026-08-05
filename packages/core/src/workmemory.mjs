@@ -227,6 +227,36 @@ export async function forgetEntries(o, { ids = [], match = null, opaque = false,
 }
 
 /**
+ * Bulk hard-delete graph nodes by selector — the node-level sibling of `forgetEntries`,
+ * born from the July-2026 flood aftermath: opaque task nodes were removed out-of-band
+ * (no sanctioned delete path existed) and left ~2,000 edges dangling. Same safety
+ * contract as its siblings: at least one selector is required (`ids`: exact node ids,
+ * `match`: regex on label, or `opaque`: machine-identifier labels); `types` only
+ * narrows. Edges cascade through graph.deleteNode so a delete can never strand one.
+ * HARD delete (nodes carry no status column) — preview with `dryRun` first.
+ *
+ * @param {import('./orchestrator.mjs').Orchestrator} o
+ * @param {{ids?:string[], match?:string, opaque?:boolean, types?:string[], dryRun?:boolean}} [opts]
+ */
+export function forgetNodes(o, { ids = [], match = null, opaque = false, types = [], dryRun = false } = {}) {
+  const wanted = new Set(ids.map((s) => String(s).trim()).filter(Boolean));
+  if (!wanted.size && !match && !opaque) {
+    throw new Error('forgetNodes requires a selector: ids, match, or opaque (types only narrows)');
+  }
+  const re = match ? new RegExp(match, 'i') : null;
+  const selected = o.graph.allNodes().filter((n) => {
+    if (types.length && !types.includes(n.type)) return false;
+    return wanted.has(n.id) || (re && re.test(n.label)) || (opaque && isOpaqueTaskLabel(n.label));
+  });
+  let deleted = 0, edges = 0;
+  if (!dryRun) {
+    for (const n of selected) { const r = o.graph.deleteNode(n.id); deleted += r.node; edges += r.edges; }
+    o.db.logOp('forget-nodes', { deleted, edges, match: match || null, opaque, types: types.join(',') || null });
+  }
+  return { matched: selected.length, deleted, edges, dryRun, sample: selected.slice(0, 5).map((n) => `${n.type}:${n.label.slice(0, 60)}`) };
+}
+
+/**
  * Prospective memory (PM-Bench, arXiv 2607.12385; roadmap #6) — "what must become
  * actionable later" as its own capability class, separated from historical memory.
  *

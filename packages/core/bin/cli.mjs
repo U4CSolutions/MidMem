@@ -31,6 +31,7 @@ try {
     case 'tasks': out(o.openTasks()); break;
     case 'close-tasks': out(o.closeTasks({ tasks: flags.task ? [flags.task] : pos, match: typeof flags.match === 'string' ? flags.match : null, opaque: !!flags.opaque, olderThanDays: flags.olderThanDays != null ? Number(flags.olderThanDays) : null, dryRun: !!flags.dryRun })); break;
     case 'forget-entries': out(await o.forgetEntries({ ids: pos, match: typeof flags.match === 'string' ? flags.match : null, opaque: !!flags.opaque, scope: typeof flags.scope === 'string' ? flags.scope : null, types: typeof flags.types === 'string' ? flags.types.split(',') : [], olderThanDays: flags.olderThanDays != null ? Number(flags.olderThanDays) : null, dryRun: !!flags.dryRun })); break;
+    case 'forget-nodes': out(await o.forgetNodes({ ids: pos, match: typeof flags.match === 'string' ? flags.match : null, opaque: !!flags.opaque, types: typeof flags.types === 'string' ? flags.types.split(',') : [], dryRun: !!flags.dryRun })); break;
     case 'claims': out(flags.all ? o.searchClaims(pos.join(' '), { limit: Number(flags.limit) || 50 }) : o.currentClaims(pos.join(' '), { limit: Number(flags.limit) || 50 })); break;
     case 'contradictions': out(o.claimContradictions({ minShared: flags.minShared != null ? Number(flags.minShared) : 3 })); break;
     case 'merge-concepts': out(await o.mergeConcepts(pos[0], pos[1], { type: flags.type || 'concept' })); break;
@@ -47,7 +48,7 @@ try {
     }
     case 'pattern': out(await o.recordPattern({ type: flags.type || pos[0], title: flags.title || pos.slice(flags.type ? 0 : 1).join(' '), context: flags.context, problem: flags.problem, solution: flags.solution, outcome: flags.outcome, evidence: typeof flags.evidence === 'string' ? flags.evidence.split(';').filter(Boolean) : [], scope: flags.scope })); break;
     default:
-      out('Usage: ocmw <init|ingest <path>|remember <text>|query <text>|recall <id>|recall-check <message>|work --kind <type>|tasks|close-tasks [labels…]|brief|lint|project|promote <id> <tier>|maintain|bridge|handoff <task>> [--kind task_attempt|source_used|dead_end|correction|artifact|decision --task --outcome --status --source --artifact --related --type --title --tier --tiers --scope --scopes --limit --minScore --maxTokens --graph --curated --force --profile local|frontier]\n  close-tasks selectors (at least one required): [labels…] | --task <label> | --match <regex> | --opaque | --olderThanDays <n>; preview with --dryRun');
+      out('Usage: ocmw <init|ingest <path>|remember <text>|query <text>|recall <id>|recall-check <message>|work --kind <type>|tasks|close-tasks [labels…]|brief|lint|project|promote <id> <tier>|maintain|bridge|handoff <task>> [--kind task_attempt|source_used|dead_end|correction|artifact|decision --task --outcome --status --source --artifact --related --type --title --tier --tiers --scope --scopes --limit --minScore --maxTokens --graph --curated --force --profile local|frontier]\n  close-tasks selectors (at least one required): [labels…] | --task <label> | --match <regex> | --opaque | --olderThanDays <n>; preview with --dryRun\n  forget-nodes (HARD delete, edges cascade) selectors: [node ids…] | --match <label regex> | --opaque; --types narrows; preview with --dryRun');
   }
 } catch (e) { console.error('ERROR:', e.message); process.exitCode = 1; }
 finally { o.close(); }

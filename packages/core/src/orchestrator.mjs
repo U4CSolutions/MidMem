@@ -17,7 +17,7 @@ import { hybridSearch } from './retrieval.mjs';
 import { checkGrounding, groundingScore } from './grounding.mjs';
 import { makeVectorStore } from './vectorstore.mjs';
 import { handoffBrief as buildHandoffBrief } from './handoff.mjs';
-import { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, consolidateWork, categorizeIngest, recordProspective, dueProspective, resolveProspective } from './workmemory.mjs';
+import { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, forgetNodes, consolidateWork, categorizeIngest, recordProspective, dueProspective, resolveProspective } from './workmemory.mjs';
 import { verifyTransition, verifyPromotion, auditTransition } from './transitions.mjs';
 import { loadPacks, recordPattern } from './packs.mjs';
 import { exportKnowledge } from './export.mjs';
@@ -228,6 +228,8 @@ export class Orchestrator {
             orphanVectors: this.db.prepare(
               "DELETE FROM vectors WHERE entry_id IN (SELECT id FROM entries WHERE status='deleted')",
             ).run().changes,
+            // Node deletes that bypassed graph.deleteNode strand their edges — heal here.
+            orphanEdges: this.graph.sweepOrphanEdges(),
           };
         } catch (e) { retention = { error: e.message }; }
       }
@@ -275,6 +277,15 @@ export class Orchestrator {
 
   /** Bulk soft-forget entries by selector (content selector required; supports dryRun). */
   forgetEntries(opts) { return forgetEntries(this, opts); }
+
+  /** Bulk hard-delete graph nodes by selector (edges cascade; selector required; supports dryRun). */
+  async forgetNodes(opts = {}) {
+    return governed(this.gov, 'forget-nodes', { ids: opts.ids, match: opts.match, opaque: !!opts.opaque, types: opts.types, dryRun: !!opts.dryRun }, () => {
+      const r = forgetNodes(this, opts);
+      if (r.deleted) this.#markVaultDirty();
+      return r;
+    });
+  }
 
   /** Prospective memory: record an intent (date|event trigger). MidMem informs; cron fires. */
   async recordProspective(opts) { return recordProspective(this, opts); }
