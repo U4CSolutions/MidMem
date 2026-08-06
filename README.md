@@ -11,7 +11,7 @@ dual-stack, but pure-core and modular — it runs in **4 modes** (standalone cur
 add-on · Hermes add-on · bridge) via exactly three surfaces: CLI, MCP, and the `bin/hook.mjs`
 pre/post-turn seam. See [Integration](#integration) + `docs/INTEGRATION-MODES.md`.
 
-> **Status (2026-07-02):** foundation + cross-agent scope + native→middleware bridge + retrieval
+> **Status (2026-07-02; 2026-08 wave appended 2026-08-06):** foundation + cross-agent scope + native→middleware bridge + retrieval
 > upgrades (trust, trigram, token-budget, graph-boost, dim-guard) + selectable Qdrant vector backend +
 > hand-off memory gate + self-driving lifecycle (decay / usage-earned promotion / auto-projection) +
 > trigger-less `proactiveRecall` + DELEGATE-52 extraction grounding + **work-memory events with
@@ -20,7 +20,16 @@ pre/post-turn seam. See [Integration](#integration) + `docs/INTEGRATION-MODES.md
 > contradiction / current()** + **P7 offline Brain-style benchmark** + **concept canonicalization
 > (case/plural dedupe, curated `merge-concepts`, alias-aware retrieval)** + **vault projection
 > pruning (stale pages removed; case-insensitive-share-safe slugs)** + **realpath ingest guard** +
-> **log/audit/vector retention**. Tested: smoke **90/90** + bench green (`npm run verify`).
+> **log/audit/vector retention**.
+>
+> **2026-08 wave:** **transition verifier** (TRUSTMEM supersede/promote gates) + **write-path claim
+> conflict tagging** (MOSAIC) + **projection QA probes** (WiCER) + **memory-function axis**
+> (episodic/semantic/procedural/prospective) + **capture packs** (domain extensibility as data) +
+> **prospective memory** (intent + trigger; cron fires, MidMem informs) + **revision export**
+> (stable-byte JSONL snapshot) + **bulk hygiene family** (`close-tasks` · `forget-entries` ·
+> `forget-nodes` with cascading edge delete) + **orphan-edge integrity sweep** in retention.
+> Tested: smoke **163/163** + bench green (`npm run verify`); claims-vs-code audit:
+> [`docs/ARCHITECTURE-BASIS.md`](docs/ARCHITECTURE-BASIS.md).
 > Runnable Node ESM, **zero external dependencies** (Node ≥ 22.13 built-ins only: `node:sqlite`,
 > `crypto`, `fetch`). `packages/core/` is the sole package — the active, self-contained foundation
 > (the superseded interim scaffold was removed; it remains in git history if ever needed).
@@ -43,7 +52,7 @@ flowchart TB
     DB -->|"project (LLM-owned)"| vault[["Obsidian vault (projection)"]]
     verify["verify (deterministic, one graph)"] -->|"consistency check"| DB
 
-    DB <-->|"query: FTS5 ⊕ trigram ⊕ vector (RRF) + trust / graph boosts"| mcp{{"MCP server (21 tools) · CLI · hook seam"}}
+    DB <-->|"query: FTS5 ⊕ trigram ⊕ vector (RRF) + trust / graph boosts"| mcp{{"MCP server (30 tools) · CLI · hook seam"}}
 
     mcp <--> oc["OpenClaw<br/>(daily driver)"]
     mcp <--> hz["Hermes Agent<br/>(build workhorse)"]
@@ -216,7 +225,7 @@ Two skills front the store; pick by how you're driving the stack:
 ```bash
 # No install needed (Node ≥ 22.13 built-ins only — node:sqlite is flag-free from 22.13).
 cd packages/core
-node test/smoke.mjs                          # end-to-end self-test (offline) → 90/90
+node test/smoke.mjs                          # end-to-end self-test (offline) → 163/163
 npm run verify                               # smoke + Brain-style regression bench
 
 node bin/cli.mjs init                        # show resolved config
@@ -238,11 +247,13 @@ node bin/cli.mjs refresh-concepts             # rebuild concept embeddings + com
 node bin/cli.mjs maintain --force             # full lifecycle pass (decay/promote/retention/project)
 ```
 
-### MCP tools (21)
+### MCP tools (30)
 `ingest` · `query` · `remember` · `recall` · `brief` · `audit` · `forget` · `archive` ·
 `promote` · `project` · `feedback` (trust) · `handoff_brief` (memory gate) · `maintain` ·
-`proactive_recall` · `record_work` · `list_tasks` · `claims` · `claim_supersede` ·
-`claim_contradictions` · `refresh_concepts` · `concept_merge`
+`proactive_recall` · `record_work` · `list_tasks` · `close_tasks` · `forget_entries` ·
+`forget_nodes` (cascading) · `claims` · `claim_supersede` · `claim_contradictions` ·
+`refresh_concepts` · `concept_merge` · `prospective_add` · `prospective_due` ·
+`prospective_resolve` · `export_knowledge` · `list_packs` · `record_pattern`
 
 **Hand-off memory gate ("firstware"):** `handoff_brief` builds a scoped, token-budgeted memory brief
 to inject into an agent hand-off (e.g. before an ACP spawn, which doesn't share context) so the
@@ -267,7 +278,7 @@ pull-depth). The gate *calls* the store; it doesn't replace it (firstware-on-mid
 | `MIDMEM_GROUNDING_MIN_OVERLAP` | `0.5` | DELEGATE-52 grounding threshold (quarantine below) |
 | `MIDMEM_AUTO_INGEST` | `1` | maintain() auto-bridges agent work/session dirs |
 | `MIDMEM_MAINTENANCE` | `1` | Self-driving lifecycle (decay/promotion/projection) |
-| `MIDMEM_RETENTION_DAYS` | `90` | Forced maintain prunes log/audit rows + orphan vectors older than this (0 = off) |
+| `MIDMEM_RETENTION_DAYS` | `90` | Forced maintain prunes log/audit rows older than this + orphan vectors + orphan edges (0 = off) |
 | `MIDMEM_WORK_MEMORY` | `1` | Work-memory events (`record_work`, task tracking) |
 | `MIDMEM_CONCEPT_ROUTING` | `1` | P5 concept-node routing + canonical dedupe in forced maintain |
 
@@ -299,11 +310,12 @@ packages/core/         # ← active foundation (this README describes it)
                        # verify, governance, project, bridge, handoff, workmemory, concepts,
                        # orchestrator, config
   bin/                 # cli.mjs, mcp-server.mjs, hook.mjs (pre/post-turn seam — the 4-modes caller)
-  test/                # smoke.mjs (90 checks) + bench.mjs (Brain-style regression gate)
+  test/                # smoke.mjs (163 checks) + bench.mjs (Brain-style regression gate)
 config/                # tier-config.json (tunables) + AGENTS.md (agent instructions)
 skills/                # MidMem Skills Library (Claude Code) — see skills/README.md
 integrations/          # packaged reusable per-turn capture code + status — see integrations/README.md
-docs/                  # design notes — INTEGRATION-MODES, STACK-CAPTURE, DEVELOPMENT-GUIDELINES
+docs/                  # design notes — ARCHITECTURE-BASIS (claims verified against code),
+                       #   INTEGRATION-MODES, STACK-CAPTURE, DEVELOPMENT-GUIDELINES
 RESEARCH.md            # research → architecture-decision record (DELEGATE-52, …)
 ```
 
@@ -312,6 +324,9 @@ RESEARCH.md            # research → architecture-decision record (DELEGATE-52,
 - [`skills/README.md`](skills/README.md) — the MidMem Skills Library (`midmem-dev`,
   `midmem-orchestrator`, `midmem-ingest-review`, `midmem-record`) + install.
 - [`docs/README.md`](docs/README.md) — design notes index.
+- [`docs/ARCHITECTURE-BASIS.md`](docs/ARCHITECTURE-BASIS.md) — every architectural claim with its
+  basis in the code and a re-runnable verification (DELEGATE-52 discipline applied to this repo's
+  own documentation).
 - [`RESEARCH.md`](RESEARCH.md) — why the store is built the way it is, grounded in papers.
 
 ## License

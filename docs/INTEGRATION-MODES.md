@@ -6,7 +6,7 @@ hybrid retrieval, tiers/lifecycle, grounding, the concept graph, **work-memory e
 and is reached through three stable surfaces:
 
 - **CLI** — `bin/cli.mjs` (`midmem …`)
-- **MCP server** — `bin/mcp-server.mjs` (stdio JSON-RPC; 21 tools incl. `record_work`, `list_tasks`, `proactive_recall`)
+- **MCP server** — `bin/mcp-server.mjs` (stdio JSON-RPC; 30 tools incl. `record_work`, `list_tasks`, `proactive_recall`, `forget_nodes`, `prospective_*`)
 - **Hook seam** — `bin/hook.mjs` (`pre` / `post` / `tasks`) — the one caller-path touchpoint
 
 Because nothing in the core knows about OpenClaw or Hermes, the same build runs in **four modes**.
