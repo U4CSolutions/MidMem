@@ -11,13 +11,13 @@ const S = (props, required = []) => ({ type: 'object', properties: props, requir
 const TOOLS = {
   ingest: {
     description: 'Compile a source file into the knowledge store (extract → tier-store → embed → graph → verify). Path must be under allowed source roots; wisdom-tier requires curated:true.',
-    schema: S({ path: { type: 'string' }, type: { type: 'string' }, title: { type: 'string' }, scope: { type: 'string' }, curated: { type: 'boolean' } }, ['path']),
-    run: (a) => o.ingest({ path: a.path, type: a.type || 'note', title: a.title, scope: a.scope, curated: !!a.curated }),
+    schema: S({ path: { type: 'string' }, type: { type: 'string' }, title: { type: 'string' }, scope: { type: 'string' }, curated: { type: 'boolean' }, authority: { type: 'string', description: 'origin trust: operator|stack|doc|web (default doc; operator requires curated:true; never raised downstream)' } }, ['path']),
+    run: (a) => o.ingest({ path: a.path, type: a.type || 'note', title: a.title, scope: a.scope, curated: !!a.curated, authority: a.authority }),
   },
   query: {
     description: 'Hybrid (lexical+vector) search of the knowledge store with provenance. Defaults to this agent\'s scope + shared; pass scopes to override.',
-    schema: S({ query: { type: 'string' }, tiers: { type: 'array', items: { type: 'string' } }, scopes: { type: 'array', items: { type: 'string' } }, functions: { type: 'array', items: { type: 'string' }, description: 'memory-function filter: working|episodic|semantic|procedural|prospective' }, limit: { type: 'number' }, maxTokens: { type: 'number' }, includeGraphContext: { type: 'boolean' } }, ['query']),
-    run: (a) => o.query(a.query, { tiers: a.tiers, scopes: a.scopes, functions: a.functions, limit: a.limit ?? 20, maxTokens: a.maxTokens, includeGraphContext: !!a.includeGraphContext }),
+    schema: S({ query: { type: 'string' }, tiers: { type: 'array', items: { type: 'string' } }, scopes: { type: 'array', items: { type: 'string' } }, functions: { type: 'array', items: { type: 'string' }, description: 'memory-function filter: working|episodic|semantic|procedural|prospective' }, limit: { type: 'number' }, maxTokens: { type: 'number' }, includeGraphContext: { type: 'boolean' }, minAuthority: { type: 'string', description: 'action-risk gate: exclude results below this origin authority (operator|stack|doc|web)' } }, ['query']),
+    run: (a) => o.query(a.query, { tiers: a.tiers, scopes: a.scopes, functions: a.functions, limit: a.limit ?? 20, maxTokens: a.maxTokens, includeGraphContext: !!a.includeGraphContext, minAuthority: a.minAuthority }),
   },
   feedback: {
     description: 'Mark a recalled memory entry helpful (or not) — adjusts its trust score over time.',
@@ -31,8 +31,8 @@ const TOOLS = {
   },
   remember: {
     description: 'Store a memory entry (tier default: memory; wisdom requires curated:true). scope defaults to this agent; pass "shared" to publish to the commons.',
-    schema: S({ content: { type: 'string' }, type: { type: 'string' }, tier: { type: 'string' }, scope: { type: 'string' }, curated: { type: 'boolean' }, memFunction: { type: 'string', description: 'memory function axis: working|episodic|semantic|procedural|prospective (default derived from type)' } }, ['content']),
-    run: (a) => o.storeMemory({ content: a.content, type: a.type || 'insight', tier: a.tier || 'memory', scope: a.scope, curated: !!a.curated, memFunction: a.memFunction || null }),
+    schema: S({ content: { type: 'string' }, type: { type: 'string' }, tier: { type: 'string' }, scope: { type: 'string' }, curated: { type: 'boolean' }, memFunction: { type: 'string', description: 'memory function axis: working|episodic|semantic|procedural|prospective (default derived from type)' }, authority: { type: 'string', description: 'origin trust: operator|stack|doc|web (default stack; operator requires curated:true)' } }, ['content']),
+    run: (a) => o.storeMemory({ content: a.content, type: a.type || 'insight', tier: a.tier || 'memory', scope: a.scope, curated: !!a.curated, memFunction: a.memFunction || null, authority: a.authority }),
   },
   recall: { description: 'Retrieve a memory entry by id.', schema: S({ entryId: { type: 'string' } }, ['entryId']), run: (a) => o.recall(a.entryId) },
   brief: { description: 'Summary of knowledge state across tiers.', schema: S({}), run: () => o.brief() },

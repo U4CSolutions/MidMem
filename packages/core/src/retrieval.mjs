@@ -11,6 +11,7 @@
 import { ftsMatchExpr } from './util.mjs';
 import { functionForType } from './workmemory.mjs';
 import { conceptSeedsFromVector } from './concepts.mjs';
+import { authorityRank, AUTHORITY_LEVELS } from './authority.mjs';
 
 /** One FTS lane (token or trigram), scope/tier filtered. Returns ranked entry ids.
  *  Expired leases are filtered here too — decay holds even between maintenance sweeps. */
@@ -90,6 +91,22 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
     cand = cand.filter((c) => want.has(c.entry.mem_function || functionForType(c.entry.type)));
   }
 
+  // --- Source-authority filter + boost (roadmap #10): an action-risky caller passes
+  //     minAuthority to exclude low-trust origins outright; otherwise authority nudges rank
+  //     around the 'doc' baseline (small, additive, same magnitude family as trust/graph).
+  //     Legacy entries without a label rank as 'doc'. ---
+  if (opts.minAuthority && AUTHORITY_LEVELS[opts.minAuthority]) {
+    const floor = AUTHORITY_LEVELS[opts.minAuthority];
+    cand = cand.filter((c) => authorityRank(c.entry.provenance?.authority) >= floor);
+  }
+  if (cfg.authority?.enabled !== false) {
+    const aw = cfg.authority?.boost ?? 0.002;
+    for (const c of cand) {
+      const rank = authorityRank(c.entry.provenance?.authority);
+      if (rank !== AUTHORITY_LEVELS.doc) { c.score += aw * (rank - AUTHORITY_LEVELS.doc); c.ranks.authority = c.entry.provenance?.authority; }
+    }
+  }
+
   // --- Trust boost (usage feedback) ---
   for (const c of cand) c.score += cfg.trustWeight * ((c.entry.trust_score ?? 0.5) - 0.5);
 
@@ -157,6 +174,7 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
     content: preview(c.entry),
     score: Number(c.score.toFixed(6)),
     trust: c.entry.trust_score,
+    authority: c.entry.provenance?.authority ?? null,
     rank: c.ranks,
     provenance: includeProvenance ? c.entry.provenance ?? null : undefined,
   }));

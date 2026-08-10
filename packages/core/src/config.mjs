@@ -164,6 +164,14 @@ export function loadConfig(overrides = {}) {
       minCoverage: Number(env('TRANSITION_MIN_COVERAGE') ?? 0.6),
       promoteMinGrounding: Number(env('PROMOTE_MIN_GROUNDING') ?? 0.3),
     },
+    /** Source authority (roadmap #10, arXiv 2607.29167): origin-assigned trust level
+     *  (operator|stack|doc|web) that propagates through derived entries/claims and can never be
+     *  raised by consolidation ('operator' requires curated:true — governance-gated). Retrieval
+     *  gets a small post-RRF nudge (±rank·boost around 'doc') and a minAuthority filter. */
+    authority: {
+      enabled: env('AUTHORITY') !== '0',
+      boost: Number(env('AUTHORITY_BOOST') ?? 0.002), // × (rank − doc) → operator +0.004 … web −0.002
+    },
     /** TARL deferred ledger (roadmap #9, arXiv 2608.03699): a claim arriving with a write-path
      *  contradiction lands status 'deferred' (pending judgment) instead of 'active' — the third
      *  ledger state between kept and quarantined. Resolution (accept|reject) is always explicit. */

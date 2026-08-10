@@ -22,3 +22,4 @@ export { recordProspective, dueProspective, resolveProspective } from './workmem
 export { exportKnowledge } from './export.mjs';
 export { refreshConceptGraph, conceptSeedsFromVector, dedupeConceptNodes, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
 export { canonicalConceptKey } from './util.mjs';
+export { AUTHORITY_LEVELS, normalizeAuthority, authorityRank, clampAuthority } from './authority.mjs';

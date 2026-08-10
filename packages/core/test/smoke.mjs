@@ -599,6 +599,27 @@ try {
   const sup9 = o.supersedeClaim(base9.id, { content: 'the omega gateway supports resumable websocket streaming uploads via chunked frames' });
   ok(sup9.success && o.claims.get(sup9.current).status === 'active', 'supersede replacement is active, not deferred');
 
+  // 26. Source authority (roadmap #10): origin-assigned, claim-inherited, never raised, gated.
+  const srcWeb = path.join(tmp, 'webscrape.md');
+  fs.writeFileSync(srcWeb, 'The zeta framework caches embeddings in a local quantized vector index file for speed.');
+  const ingWeb = await o.ingest({ path: srcWeb, type: 'note', title: 'scrape', authority: 'web' });
+  ok(o.recall(ingWeb.entry.id).provenance.authority === 'web', 'ingest records origin authority on the entry');
+  const zClaims = o.searchClaims('zeta framework', { limit: 5 });
+  ok(zClaims.length > 0 && zClaims.every((c) => c.provenance.authority === 'web'), 'claims inherit source authority (extraction cannot raise it)');
+  const memStack = await o.storeMemory({ content: 'the zeta framework quantized index needs periodic recompaction', type: 'note' });
+  ok(o.recall(memStack.id).provenance.authority === 'stack', 'direct agent write defaults to stack authority');
+  const memClamped = await o.storeMemory({ content: 'consolidated summary of the zeta framework cache behavior', type: 'note', authority: 'stack', parentAuthority: 'web' });
+  ok(o.recall(memClamped.id).provenance.authority === 'web', 'derived write is CLAMPED to its parent authority (no raise via consolidation)');
+  await denies(() => o.storeMemory({ content: 'laundered into operator trust', type: 'note', authority: 'operator' }), 'authority operator without curated:true blocked');
+  const memOp = await o.storeMemory({ content: 'operator-curated zeta cache policy statement', type: 'note', tier: 'wisdom', curated: true });
+  ok(o.recall(memOp.id).provenance.authority === 'operator', 'curated write carries operator authority');
+  let badAuth = false; try { await o.ingest({ path: srcWeb, type: 'note', authority: 'bogus' }); } catch { badAuth = true; }
+  ok(badAuth, 'unknown authority label rejected');
+  const qAuth = await o.query('zeta framework quantized index', { limit: 8 });
+  ok(qAuth.results.some((r) => r.authority === 'web') && qAuth.results.some((r) => r.authority === 'stack'), 'query results carry authority labels');
+  const qGated = await o.query('zeta framework quantized index', { limit: 8, minAuthority: 'stack' });
+  ok(qGated.results.length > 0 && qGated.results.every((r) => (r.authority ?? 'doc') !== 'web'), 'minAuthority filter excludes web-origin results (action-risk gate)');
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;

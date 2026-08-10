@@ -22,6 +22,7 @@ import { verifyTransition, verifyPromotion, auditTransition } from './transition
 import { loadPacks, recordPattern } from './packs.mjs';
 import { exportKnowledge } from './export.mjs';
 import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
+import { normalizeAuthority, clampAuthority } from './authority.mjs';
 import { genId, sha12, nowISO } from './util.mjs';
 
 export class Orchestrator {
@@ -50,8 +51,12 @@ export class Orchestrator {
   async recordPattern(rec = {}) { return recordPattern(this, rec); }
 
   /** Ingest a raw source: extract → store (memory tier) → embed → graph → claims → verify. */
-  async ingest({ path, type = 'note', title, metadata = {}, curated = false, scope = this.cfg.agentScope }) {
-    const r = await governed(this.gov, 'ingest', { path, type, scope, curated }, async () => {
+  async ingest({ path, type = 'note', title, metadata = {}, curated = false, scope = this.cfg.agentScope, authority }) {
+    // Authority assigned at origin (roadmap #10): explicit label wins; curation implies operator;
+    // otherwise ingested material is 'doc'. Unknown labels are rejected, not silently mapped.
+    if (authority !== undefined && !normalizeAuthority(authority)) throw new Error(`unknown authority: ${authority} (expected operator|stack|doc|web)`);
+    const auth = normalizeAuthority(authority) || (curated ? 'operator' : 'doc');
+    const r = await governed(this.gov, 'ingest', { path, type, scope, curated, authority: auth }, async () => {
       const text = await fs.readFile(path, 'utf8');
       const hash = sha12(text);
       // Hash-dedup: re-ingesting an unchanged file is a no-op (makes the bridge/cron idempotent).
@@ -74,7 +79,7 @@ export class Orchestrator {
       const sourceId = genId('src', path);
       // Deterministic category tag so the store tracks ongoing requests by kind (research/build/...).
       const category = categorizeIngest({ type, content: ex.summary, title }, this.packs?.rules || []);
-      const prov = { originalSource: path, extractedAt: nowISO(), category, grounding, chain: [{ step: 'ingest', source: path }] };
+      const prov = { originalSource: path, extractedAt: nowISO(), category, authority: auth, grounding, chain: [{ step: 'ingest', source: path }] };
       // Sources row (the dedup hash) commits WITH the entry: a failed ingest must not
       // leave the hash behind, or re-ingests would be skipped as 'unchanged' forever.
       // Supersede-on-reingest: a changed file replaces its earlier ingests — archive
@@ -96,7 +101,8 @@ export class Orchestrator {
 
       const nodeIds = gc.grounded.map((c) => this.graph.upsertNode({ type: c.type || 'concept', label: c.name, source: path, properties: { confidence: c.confidence, grounding: c.groundingScore } }));
       for (let i = 1; i < nodeIds.length; i++) this.graph.upsertEdge({ from: nodeIds[0], to: nodeIds[i], type: 'relates', source: path });
-      for (const cl of gcl.grounded) this.claims.add({ content: cl.content, type: 'fact', source: { path, type, title }, provenance: { extractor: ex.mode, confidence: cl.confidence, grounding: cl.groundingScore } });
+      // Claims inherit the source's authority — summarization/extraction must not raise it.
+      for (const cl of gcl.grounded) this.claims.add({ content: cl.content, type: 'fact', source: { path, type, title }, provenance: { extractor: ex.mode, confidence: cl.confidence, grounding: cl.groundingScore, authority: auth } });
 
       const verification = this.verifier.verifyConcepts(gc.grounded);
       this.db.logOp('ingest', { path, entry: stored.id, concepts: gc.grounded.length, claims: gcl.grounded.length, quarantined: gc.ungrounded.length + gcl.ungrounded.length, summaryScore: grounding.summaryScore, mode: ex.mode, conflicts: verification.conflicts.length, superseded: superseded.length });
@@ -108,9 +114,13 @@ export class Orchestrator {
   }
 
   /** The MCP `remember` op — store a memory directly. */
-  async storeMemory({ content, type = 'insight', tier = 'memory', scope = this.cfg.agentScope, source, concepts, curated = false, memFunction = null }) {
-    const r = await governed(this.gov, 'store', { tier, scope, curated }, async () => {
-      const prov = source ? { originalSource: source.path, extractedAt: nowISO(), chain: [{ step: 'remember', source: source.path }] } : null;
+  async storeMemory({ content, type = 'insight', tier = 'memory', scope = this.cfg.agentScope, source, concepts, curated = false, memFunction = null, authority, parentAuthority = null }) {
+    if (authority !== undefined && !normalizeAuthority(authority)) throw new Error(`unknown authority: ${authority} (expected operator|stack|doc|web)`);
+    // Direct agent writes are 'stack' by default; curation implies operator; a derived write
+    // passes parentAuthority and is CLAMPED to it — consolidation can never raise authority.
+    const auth = clampAuthority(normalizeAuthority(authority) || (curated ? 'operator' : 'stack'), parentAuthority);
+    const r = await governed(this.gov, 'store', { tier, scope, curated, authority: auth }, async () => {
+      const prov = { authority: auth, ...(source ? { originalSource: source.path, extractedAt: nowISO(), chain: [{ step: 'remember', source: source.path }] } : {}) };
       const stored = this.db.tx(() => this.memory.store({ content, type, tier, scope, provenance: prov, concepts, memFunction }));
       const { vector, model, mode } = await this.embedder.embed(content);
       await this.memory.upsertVector(stored.id, vector, model, mode);

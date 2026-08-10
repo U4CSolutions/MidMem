@@ -17,6 +17,10 @@ export class ClaimStore {
       extractedAt: provenance.extractedAt || ts,
       extractor: provenance.extractor || 'unknown',
       confidence: provenance.confidence ?? 0.5,
+      // Origin authority survives extraction (roadmap #10) — dropping it here would BE the
+      // provenance-laundering the field exists to prevent.
+      ...(provenance.authority ? { authority: provenance.authority } : {}),
+      ...(provenance.grounding != null ? { grounding: provenance.grounding } : {}),
       chain: provenance.chain || [{ step: 'ingest', source: source.path || 'unknown', timestamp: ts }],
     };
     // MOSAIC-style write-path relation (arXiv 2607.16211): compare the incoming claim against

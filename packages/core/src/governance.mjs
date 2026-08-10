@@ -67,6 +67,15 @@ export function defaultPolicies(cfg) {
       },
     },
     {
+      // Provenance-laundering guard (roadmap #10): 'operator' is the one authority level that
+      // cannot be claimed by an ordinary write — it must arrive through explicit curation.
+      name: 'operator-authority-curated',
+      applies: (op) => op === 'store' || op === 'ingest',
+      check: (_op, ctx) => (ctx.authority === 'operator' && ctx.curated !== true)
+        ? { allow: false, reason: "authority 'operator' requires curated:true" }
+        : { allow: true },
+    },
+    {
       name: 'hard-delete-guard',
       applies: (op) => op === 'forget',
       check: (_op, ctx) => (ctx.soft === false && ctx.force !== true)
