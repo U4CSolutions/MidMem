@@ -39,6 +39,7 @@ try {
     case 'claim-resolve': out(await o.resolveDeferredClaim(pos[0], flags.reject ? 'reject' : 'accept')); break;
     case 'stale-clear': out(await o.clearStaleFlags({ ids: pos })); break;
     case 'claim-validity': out(o.claimValidity(pos[0])); break;
+    case 'query-probes': out(await o.probeExpectedQueries({ sampleSize: flags.sample != null ? Number(flags.sample) : undefined, topK: flags.topK != null ? Number(flags.topK) : undefined })); break;
     case 'consistency': out(o.checkConsistency({ minShared: flags.minShared != null ? Number(flags.minShared) : undefined, deferAgeDays: flags.deferAgeDays != null ? Number(flags.deferAgeDays) : undefined })); break;
     case 'merge-concepts': out(await o.mergeConcepts(pos[0], pos[1], { type: flags.type || 'concept' })); break;
     case 'refresh-concepts': out(await o.refreshConcepts({ maxEmbedPerPass: flags.max != null ? Number(flags.max) : undefined })); break;

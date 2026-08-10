@@ -693,6 +693,17 @@ try {
   ok(val14.contradictedBy.includes(v14c.id), 'contradicting claim recorded as evidence against the neighbor');
   ok(val14.currentlyValid === false && val14.status === 'active', 'contradicted claim flagged not-currently-valid WITHOUT status mutation');
 
+  // 31. PMMC expected-query probes (roadmap #15): probes compile from entries, persist in meta,
+  //     and verify their evidence path via lexical retrieval; maintain carries the verdict.
+  await o.storeMemory({ content: 'The chi compactor rewrites fragmented segments during the nightly quiesce window.', type: 'note' });
+  const qp15 = await o.probeExpectedQueries({ sampleSize: 10, topK: 5 });
+  ok(qp15.sampled > 0 && typeof qp15.hits === 'number', `query probes compiled + run (${qp15.hits}/${qp15.sampled} hit)`);
+  ok(qp15.hits > 0, 'at least one probe finds its compiling entry (evidence path verified)');
+  const probeMeta = JSON.parse(o.db.prepare("SELECT value FROM meta WHERE key='expected_query_probes'").get().value);
+  ok(Array.isArray(probeMeta.probes) && probeMeta.probes.length === qp15.sampled && probeMeta.compiledAt, 'probe set persisted as precompiled evaluation memory');
+  const m15 = await o.maintain({ force: true });
+  ok(m15.queryProbes && typeof m15.queryProbes.sampled === 'number', 'forced maintain runs the expected-query probes');
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;

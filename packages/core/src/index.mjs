@@ -24,3 +24,4 @@ export { refreshConceptGraph, conceptSeedsFromVector, dedupeConceptNodes, mergeC
 export { canonicalConceptKey } from './util.mjs';
 export { AUTHORITY_LEVELS, normalizeAuthority, authorityRank, clampAuthority } from './authority.mjs';
 export { checkConsistency } from './consistency.mjs';
+export { runExpectedQueryProbes, probeQueryFor } from './evalprobes.mjs';

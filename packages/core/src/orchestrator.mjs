@@ -24,6 +24,7 @@ import { exportKnowledge } from './export.mjs';
 import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
 import { normalizeAuthority, clampAuthority } from './authority.mjs';
 import { checkConsistency } from './consistency.mjs';
+import { runExpectedQueryProbes } from './evalprobes.mjs';
 import { genId, sha12, nowISO } from './util.mjs';
 
 export class Orchestrator {
@@ -266,6 +267,15 @@ export class Orchestrator {
       if (force && this.cfg.export?.enabled !== false) {
         try { exported = this.exportKnowledge(); } catch (e) { exported = { error: e.message }; }
       }
+      // Expected-query probes (roadmap #15): compile likely future queries at consolidation
+      // time and verify their evidence paths now — beside the WiCER probes they extend.
+      let queryProbes = null;
+      if (force && this.cfg.projectionQA?.queryProbes !== false) {
+        try {
+          queryProbes = await this.probeExpectedQueries();
+          if (!queryProbes.pass) this.db.logOp('query-probe-miss', { sampled: queryProbes.sampled, misses: queryProbes.misses.length });
+        } catch (e) { queryProbes = { error: e.message }; }
+      }
       // Global consistency pass (roadmap #13): verify the resulting memory STATE on the heavy
       // pass. Report-only — findings are logged for judgment, never auto-fixed.
       let consistency = null;
@@ -275,7 +285,7 @@ export class Orchestrator {
           if (!consistency.pass) this.db.logOp('consistency-findings', { findings: consistency.findings, contradictions: consistency.contradictions.length, danglingChains: consistency.danglingChains.length, deferredAging: consistency.deferredAging.length });
         } catch (e) { consistency = { error: e.message }; }
       }
-      const summary = { swept, promoted, projected, projectionQA, exported, autoIngested, concepts, retention, consistency, forced: force };
+      const summary = { swept, promoted, projected, projectionQA, queryProbes, exported, autoIngested, concepts, retention, consistency, forced: force };
       this.db.logOp('maintain', summary);
       return summary;
     } finally { this._maintaining = false; }
@@ -499,6 +509,14 @@ export class Orchestrator {
   }
   /** P6: deterministic contradiction candidates among live claims. */
   claimContradictions(opts) { return this.claims.findContradictions(opts); }
+
+  /** PMMC (roadmap #15): compile expected-query probes + verify their evidence paths. */
+  async probeExpectedQueries(opts = {}) {
+    const pc = this.cfg.projectionQA || {};
+    const r = await runExpectedQueryProbes(this, { sampleSize: opts.sampleSize ?? pc.queryProbeSample ?? 12, topK: opts.topK ?? pc.queryProbeTopK ?? 5 });
+    this.db.logOp('query-probes', { pass: r.pass, sampled: r.sampled, hits: r.hits });
+    return r;
+  }
 
   /** PGMem (roadmap #14): a claim's validity window (first/last observed, support,
    *  contradicting evidence, currently-valid verdict). */

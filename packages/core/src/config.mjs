@@ -153,6 +153,10 @@ export function loadConfig(overrides = {}) {
       enabled: env('PROJECTION_QA') !== '0',
       sampleSize: Number(env('PROJECTION_QA_SAMPLE') ?? 20),
       minFidelity: Number(env('PROJECTION_QA_MIN_FIDELITY') ?? 0.9),
+      /** PMMC expected-query probes (roadmap #15): compiled + verified on forced/daily maintain. */
+      queryProbes: env('QUERY_PROBES') !== '0',
+      queryProbeSample: Number(env('QUERY_PROBE_SAMPLE') ?? 12),
+      queryProbeTopK: Number(env('QUERY_PROBE_TOPK') ?? 5),
     },
     /** Transition verifier (TRUSTMEM-style, arXiv 2606.25161): deterministic checks on memory
      *  TRANSITIONS — supersede stays on-subject + evidence-covered; promotion requires the
