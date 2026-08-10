@@ -13,7 +13,7 @@ import { ClaimStore } from './claims.mjs';
 import { SigmaVerifier } from './verify.mjs';
 import { PolicyEvaluator, governed } from './governance.mjs';
 import { projectVault, probeProjection } from './project.mjs';
-import { hybridSearch } from './retrieval.mjs';
+import { hybridSearch, progressiveSearch } from './retrieval.mjs';
 import { checkGrounding, groundingScore } from './grounding.mjs';
 import { makeVectorStore } from './vectorstore.mjs';
 import { handoffBrief as buildHandoffBrief } from './handoff.mjs';
@@ -135,11 +135,13 @@ export class Orchestrator {
 
   async query(question, opts = {}) {
     const scopes = opts.scopes || this.#defaultScopes();
-    const results = await hybridSearch(this.db, this.memory, this.embedder, question, { ...opts, scopes });
+    // Progressive by default (roadmap #11): lexical-first with a sufficiency gate; deep:true
+    // (or progressive.enabled=false) runs the full hybrid pipeline unconditionally.
+    const { results, sufficiency } = await progressiveSearch(this.db, this.memory, this.embedder, question, { ...opts, scopes });
     this.memory.recordRetrieval(results.map((r) => r.id)); // usage signal feeds trust/decay (+ lease renewal)
     const graphContext = opts.includeGraphContext ? this.#graphContext(question) : null;
     await this.#maybeMaintain();
-    return { query: question, results, scopes, graphContext, tiers: opts.tiers || this.memory.tierNames, timestamp: nowISO() };
+    return { query: question, results, sufficiency, scopes, graphContext, tiers: opts.tiers || this.memory.tierNames, timestamp: nowISO() };
   }
 
   /**

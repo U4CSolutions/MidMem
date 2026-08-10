@@ -16,8 +16,8 @@ const TOOLS = {
   },
   query: {
     description: 'Hybrid (lexical+vector) search of the knowledge store with provenance. Defaults to this agent\'s scope + shared; pass scopes to override.',
-    schema: S({ query: { type: 'string' }, tiers: { type: 'array', items: { type: 'string' } }, scopes: { type: 'array', items: { type: 'string' } }, functions: { type: 'array', items: { type: 'string' }, description: 'memory-function filter: working|episodic|semantic|procedural|prospective' }, limit: { type: 'number' }, maxTokens: { type: 'number' }, includeGraphContext: { type: 'boolean' }, minAuthority: { type: 'string', description: 'action-risk gate: exclude results below this origin authority (operator|stack|doc|web)' } }, ['query']),
-    run: (a) => o.query(a.query, { tiers: a.tiers, scopes: a.scopes, functions: a.functions, limit: a.limit ?? 20, maxTokens: a.maxTokens, includeGraphContext: !!a.includeGraphContext, minAuthority: a.minAuthority }),
+    schema: S({ query: { type: 'string' }, tiers: { type: 'array', items: { type: 'string' } }, scopes: { type: 'array', items: { type: 'string' } }, functions: { type: 'array', items: { type: 'string' }, description: 'memory-function filter: working|episodic|semantic|procedural|prospective' }, limit: { type: 'number' }, maxTokens: { type: 'number' }, includeGraphContext: { type: 'boolean' }, minAuthority: { type: 'string', description: 'action-risk gate: exclude results below this origin authority (operator|stack|doc|web)' }, deep: { type: 'boolean', description: 'force the full hybrid pipeline (skip the progressive lexical-first sufficiency gate)' } }, ['query']),
+    run: (a) => o.query(a.query, { tiers: a.tiers, scopes: a.scopes, functions: a.functions, limit: a.limit ?? 20, maxTokens: a.maxTokens, includeGraphContext: !!a.includeGraphContext, minAuthority: a.minAuthority, deep: !!a.deep }),
   },
   feedback: {
     description: 'Mark a recalled memory entry helpful (or not) — adjusts its trust score over time.',

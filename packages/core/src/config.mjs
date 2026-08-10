@@ -164,6 +164,14 @@ export function loadConfig(overrides = {}) {
       minCoverage: Number(env('TRANSITION_MIN_COVERAGE') ?? 0.6),
       promoteMinGrounding: Number(env('PROMOTE_MIN_GROUNDING') ?? 0.3),
     },
+    /** Progressive retrieval (roadmap #11, arXiv 2608.01285): cheap lexical-only pass first,
+     *  expand to full hybrid (embed + vector + concept routing) only when the deterministic
+     *  sufficiency gate fails. deep:true on a query always forces the full pipeline. */
+    progressive: {
+      enabled: env('PROGRESSIVE') !== '0',
+      minHits: Number(env('PROGRESSIVE_MIN_HITS') || 1),
+      minCoverage: Number(env('PROGRESSIVE_MIN_COVERAGE') ?? 0.6),
+    },
     /** Source authority (roadmap #10, arXiv 2607.29167): origin-assigned trust level
      *  (operator|stack|doc|web) that propagates through derived entries/claims and can never be
      *  raised by consolidation ('operator' requires curated:true — governance-gated). Retrieval

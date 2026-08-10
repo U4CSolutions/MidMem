@@ -620,6 +620,22 @@ try {
   const qGated = await o.query('zeta framework quantized index', { limit: 8, minAuthority: 'stack' });
   ok(qGated.results.length > 0 && qGated.results.every((r) => (r.authority ?? 'doc') !== 'web'), 'minAuthority filter excludes web-origin results (action-risk gate)');
 
+  // 27. Progressive retrieval (roadmap #11): lexical stage answers exact-term queries; the
+  //     gate expands to the full pipeline when lexical evidence is insufficient; deep forces full.
+  await o.storeMemory({ content: 'The kappa scheduler drains its queue with exponential backoff between retries.', type: 'note' });
+  const qLex = await o.query('kappa scheduler exponential backoff', { limit: 5 });
+  ok(qLex.sufficiency?.stage === 'lexical' && qLex.sufficiency.sufficient === true, `exact-term query answered by the lexical stage (coverage ${qLex.sufficiency?.coverage})`);
+  ok(qLex.results.length > 0 && /kappa scheduler/i.test(qLex.results[0].content), 'lexical-stage result is the right entry');
+  ok(qLex.results[0].rank.vector == null && !qLex.results[0].rank.concept, 'lexical stage paid no vector/concept cost');
+  const qFull = await o.query('zzqy borple flumtar nonsense', { limit: 5 });
+  ok(qFull.sufficiency?.stage === 'full' && qFull.sufficiency.expandedBecause, 'insufficient lexical evidence expands to the full pipeline');
+  const qDeep = await o.query('kappa scheduler exponential backoff', { limit: 5, deep: true });
+  ok(qDeep.sufficiency?.stage === 'full' && qDeep.sufficiency.reason === 'deep-requested', 'deep:true forces the full pipeline');
+  o.cfg.progressive.enabled = false;
+  const qOff = await o.query('kappa scheduler exponential backoff', { limit: 5 });
+  ok(qOff.sufficiency?.stage === 'full' && qOff.sufficiency.reason === 'progressive-disabled', 'progressive.enabled=false always runs full hybrid');
+  o.cfg.progressive.enabled = true;
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;

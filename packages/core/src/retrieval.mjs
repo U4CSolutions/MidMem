@@ -8,7 +8,7 @@
  *
  * (Ideas adapted from memory-os: trust scoring, two-pass ref-chain boost, token budget.)
  */
-import { ftsMatchExpr } from './util.mjs';
+import { ftsMatchExpr, tokenize } from './util.mjs';
 import { functionForType } from './workmemory.mjs';
 import { conceptSeedsFromVector } from './concepts.mjs';
 import { authorityRank, AUTHORITY_LEVELS } from './authority.mjs';
@@ -51,15 +51,22 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
   const expr = ftsMatchExpr(query);
 
   // --- Lanes ---
+  // lexicalOnly (roadmap #11): the cheap first pass of progressive retrieval skips the embed
+  // call, the vector lane and concept routing entirely — FTS lanes + the deterministic boosts
+  // are all it pays for. Everything downstream (filters, boosts, budget) behaves identically.
+  const lexicalOnly = opts.lexicalOnly === true;
   const lanes = {
     fts: ftsLane(db, 'entries_fts', expr, tiers, scoped),
     trigram: ftsLane(db, 'entries_fts_trigram', expr, tiers, scoped),
     vector: [],
   };
-  const { vector: qv } = await embedder.embed(query);
-  const vraw = await memory.vectorStore.search(qv, 400); // backend-ranked candidates (id+score)
-  const vAllowed = filterActiveIds(db, vraw.map((r) => r.id), tiers, scoped);
-  lanes.vector = vraw.filter((r) => vAllowed.has(r.id)).slice(0, 200).map((r) => r.id);
+  let qv = null;
+  if (!lexicalOnly) {
+    ({ vector: qv } = await embedder.embed(query));
+    const vraw = await memory.vectorStore.search(qv, 400); // backend-ranked candidates (id+score)
+    const vAllowed = filterActiveIds(db, vraw.map((r) => r.id), tiers, scoped);
+    lanes.vector = vraw.filter((r) => vAllowed.has(r.id)).slice(0, 200).map((r) => r.id);
+  }
 
   // --- Reciprocal Rank Fusion ---
   const fused = new Map();
@@ -75,7 +82,7 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
   //     communities into the candidate pool, so global/relational hits surface even without a direct
   //     lexical/vector match. Reuses the query vector qv (no extra embed, no per-query LLM). ---
   let conceptSeeds = new Set();
-  if (cfg.conceptRouting?.enabled !== false) {
+  if (cfg.conceptRouting?.enabled !== false && !lexicalOnly) {
     try { conceptSeeds = conceptSeedsFromVector(db, qv, cfg); } catch { conceptSeeds = new Set(); }
     for (const id of conceptSeeds) if (!fused.has(id)) fused.set(id, { score: 0, ranks: { concept: true } });
   }
@@ -178,4 +185,41 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
     rank: c.ranks,
     provenance: includeProvenance ? c.entry.provenance ?? null : undefined,
   }));
+}
+
+/** Deterministic evidence-sufficiency check (roadmap #11): the top hits must cover enough of the
+ *  query's significant tokens. Coverage is measured over the best single result (a scattered
+ *  half-match across many results is NOT sufficiency). */
+export function evidenceSufficient(query, results, { minHits = 1, minCoverage = 0.6 } = {}) {
+  const toks = [...new Set(tokenize(query))];
+  if (!toks.length) return { sufficient: false, coverage: 0, hits: results.length, reason: 'no-significant-tokens' };
+  if (results.length < minHits) return { sufficient: false, coverage: 0, hits: results.length, reason: 'too-few-hits' };
+  let best = 0;
+  for (const r of results.slice(0, 3)) {
+    const hay = String(r.content || '').toLowerCase();
+    const covered = toks.filter((t) => hay.includes(t)).length / toks.length;
+    if (covered > best) best = covered;
+  }
+  const coverage = Number(best.toFixed(3));
+  return { sufficient: coverage >= minCoverage, coverage, hits: results.length };
+}
+
+/**
+ * Router-Mem progressive retrieval (roadmap #11, arXiv 2608.01285): a cheap lexical-only pass
+ * first; expand to the full hybrid pipeline (embed + vector + concept routing) ONLY when the
+ * deterministic sufficiency gate says the lexical evidence is not enough. opts.deep forces the
+ * full pipeline. Every result set carries a `sufficiency` descriptor so callers can see which
+ * stage answered and why.
+ */
+export async function progressiveSearch(db, memory, embedder, query, opts = {}) {
+  const pc = memory.cfg.progressive || {};
+  if (pc.enabled === false || opts.deep) {
+    const results = await hybridSearch(db, memory, embedder, query, opts);
+    return { results, sufficiency: { stage: 'full', gated: false, reason: opts.deep ? 'deep-requested' : 'progressive-disabled' } };
+  }
+  const lexical = await hybridSearch(db, memory, embedder, query, { ...opts, lexicalOnly: true });
+  const verdict = evidenceSufficient(query, lexical, { minHits: pc.minHits ?? 1, minCoverage: pc.minCoverage ?? 0.6 });
+  if (verdict.sufficient) return { results: lexical, sufficiency: { stage: 'lexical', gated: true, ...verdict } };
+  const results = await hybridSearch(db, memory, embedder, query, opts);
+  return { results, sufficiency: { stage: 'full', gated: true, expandedBecause: verdict } };
 }
