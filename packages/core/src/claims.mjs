@@ -37,13 +37,49 @@ export class ClaimStore {
     // resolveDeferred; nothing here auto-resolves.
     const deferIt = defer || (relation.relation === 'contradictory' && this.cfg?.claims?.deferContradictory !== false);
     const status = deferIt ? 'deferred' : 'active';
-    const meta2 = deferIt ? { ...meta, deferredAt: ts, deferReason: defer ? 'explicit' : 'write-contradiction' } : meta;
+    // PGMem validity window (roadmap #14): every claim records when it was first observed;
+    // corroboration/contradiction updates the window below.
+    const meta2 = { ...(deferIt ? { ...meta, deferredAt: ts, deferReason: defer ? 'explicit' : 'write-contradiction' } : meta), firstObserved: ts, lastObserved: ts };
     this.db.prepare(`
       INSERT INTO claims(id,content,type,source,provenance,status,metadata,created_at,updated_at)
       VALUES(?,?,?,?,?, ?, ?,?,?)
     `).run(id, content, type, JSON.stringify(source), JSON.stringify(prov), status, JSON.stringify(meta2), ts, ts);
     if (relation.relation === 'contradictory') this.db.logOp?.('claim-write-conflict', { id, neighbor: relation.neighborId, shared: relation.shared, deferred: deferIt });
+    // PGMem evidence edges on the NEIGHBOR — pure observation bookkeeping, never a judgment:
+    // corroboration extends the neighbor's validity window (lastObserved + supportCount);
+    // contradiction records the challenger's id (bounded). Status is never touched here —
+    // the "never mutate the neighbor" rule applies to relations/status, not to counters.
+    if (relation.neighborId) {
+      const nb = this.get(relation.neighborId);
+      if (nb) {
+        if (relation.relation === 'corroborating') {
+          this.db.prepare('UPDATE claims SET metadata=? WHERE id=?').run(JSON.stringify({
+            ...nb.metadata, lastObserved: ts, supportCount: (nb.metadata.supportCount || 0) + 1,
+          }), nb.id);
+        } else if (relation.relation === 'contradictory') {
+          const refs = [...new Set([...(nb.metadata.contradictedBy || []), id])].slice(-5);
+          this.db.prepare('UPDATE claims SET metadata=? WHERE id=?').run(JSON.stringify({
+            ...nb.metadata, contradictedBy: refs,
+          }), nb.id);
+        }
+      }
+    }
     return this.get(id);
+  }
+
+  /** PGMem (roadmap #14): a claim's validity window, derived from its own metadata. */
+  validity(id) {
+    const c = this.get(id);
+    if (!c) return null;
+    return {
+      id: c.id,
+      status: c.status,
+      firstObserved: c.metadata.firstObserved || c.created_at,
+      lastObserved: c.metadata.lastObserved || c.updated_at,
+      supportCount: c.metadata.supportCount || 0,
+      contradictedBy: c.metadata.contradictedBy || [],
+      currentlyValid: (c.status === 'active' || c.status === 'verified') && !(c.metadata.contradictedBy || []).length,
+    };
   }
 
   /** TARL: park a live claim pending judgment (status → deferred). */

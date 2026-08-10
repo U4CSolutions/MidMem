@@ -500,6 +500,10 @@ export class Orchestrator {
   /** P6: deterministic contradiction candidates among live claims. */
   claimContradictions(opts) { return this.claims.findContradictions(opts); }
 
+  /** PGMem (roadmap #14): a claim's validity window (first/last observed, support,
+   *  contradicting evidence, currently-valid verdict). */
+  claimValidity(id) { return this.claims.validity(id); }
+
   /** Global consistency check (roadmap #13): verify the memory STATE — cross-claim
    *  contradictions, dangling supersede chains, deferred-ledger aging. Report-only. */
   checkConsistency(opts = {}) { const r = checkConsistency(this, opts); this.db.logOp('consistency', { pass: r.pass, findings: r.findings }); return r; }

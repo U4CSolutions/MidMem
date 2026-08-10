@@ -677,6 +677,22 @@ try {
   const m13 = await o.maintain({ force: true });
   ok(m13.consistency && typeof m13.consistency.findings === 'number', 'forced maintain includes the consistency verdict');
 
+  // 30. PGMem validity windows (roadmap #14): corroboration extends the window; contradiction
+  //     records evidence refs; validity() derives a currently-valid verdict.
+  const v14 = o.claims.add({ content: 'the upsilon cache invalidates entries after fourteen minutes of idle residence' });
+  ok(v14.metadata.firstObserved && v14.metadata.lastObserved, 'new claim records its observation window');
+  o.claims.add({ content: 'the upsilon cache invalidates entries after fourteen minutes of idle residence time' });
+  const v14b = o.claims.get(v14.id);
+  ok(v14b.metadata.supportCount === 1 && v14b.metadata.lastObserved >= v14b.metadata.firstObserved, 'corroborating write bumps neighbor supportCount + lastObserved');
+  ok(o.claimValidity(v14.id).currentlyValid === true, 'corroborated claim is currentlyValid');
+  // Contradiction evidence uses its own single-neighbor token family (best-neighbor is by
+  // max shared tokens, so the corroborated pair above would be an ambiguous target).
+  const v14x = o.claims.add({ content: 'the phi replicator ships snapshots to the offsite mirror every six hours' });
+  const v14c = o.claims.add({ content: 'the phi replicator does not ship snapshots to the offsite mirror every six hours' });
+  const val14 = o.claimValidity(v14x.id);
+  ok(val14.contradictedBy.includes(v14c.id), 'contradicting claim recorded as evidence against the neighbor');
+  ok(val14.currentlyValid === false && val14.status === 'active', 'contradicted claim flagged not-currently-valid WITHOUT status mutation');
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;
