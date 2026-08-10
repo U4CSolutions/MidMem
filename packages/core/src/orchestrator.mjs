@@ -33,7 +33,7 @@ export class Orchestrator {
     this.embedder = new Embedder(this.cfg);
     this.extractor = new Extractor(this.cfg);
     this.graph = new GraphStore(this.db);
-    this.claims = new ClaimStore(this.db);
+    this.claims = new ClaimStore(this.db, this.cfg);
     this.verifier = new SigmaVerifier(this.db, this.graph, this.cfg);
     this.gov = { evaluator: new PolicyEvaluator(this.cfg), db: this.db };
     // Capture packs load at construction (data, deterministic): same config → same
@@ -365,7 +365,9 @@ export class Orchestrator {
       .filter((c) => (c.status === 'active' || c.status === 'verified') && c.metadata?.writeRelation?.relation === 'contradictory')
       .filter((c) => { const n = claimById.get(c.metadata.writeRelation.neighborId); return n && (n.status === 'active' || n.status === 'verified'); })
       .map((c) => ({ id: c.id, neighbor: c.metadata.writeRelation.neighborId, content: c.content.slice(0, 120) }));
-    return { contradictions: conflicts.conflicts, writeConflicts, orphans, lowTrustWisdom, dupeConcepts, summary: { nodes: g.nodes.length, edges: g.edges.length, entries: Object.values(this.memory.stats()).reduce((a, b) => a + b, 0) } };
+    // TARL pending ledger: deferred claims are a review queue, not a hidden state — always surfaced.
+    const deferredClaims = this.claims.deferred().map((c) => ({ id: c.id, since: c.metadata?.deferredAt, reason: c.metadata?.deferReason, content: c.content.slice(0, 120) }));
+    return { contradictions: conflicts.conflicts, writeConflicts, deferredClaims, orphans, lowTrustWisdom, dupeConcepts, summary: { nodes: g.nodes.length, edges: g.edges.length, entries: Object.values(this.memory.stats()).reduce((a, b) => a + b, 0) } };
   }
 
   async forget(id, { soft = true, force = false } = {}) {
@@ -428,6 +430,28 @@ export class Orchestrator {
   }
   /** P6: deterministic contradiction candidates among live claims. */
   claimContradictions(opts) { return this.claims.findContradictions(opts); }
+
+  /** TARL (roadmap #9): the pending ledger — deferred claims awaiting judgment, oldest first. */
+  deferredClaims() { return this.claims.deferred(); }
+
+  /** TARL: park a live claim as deferred (judgment op, governed like other claim mutations). */
+  async deferClaim(id, reason) {
+    return governed(this.gov, 'claim-defer', { id }, () => {
+      const r = this.claims.defer(id, reason);
+      this.db.logOp('claim-defer', { id, success: r.success });
+      return r;
+    });
+  }
+
+  /** TARL: resolve a deferred claim — accept (→ active) or reject (→ archived). */
+  async resolveDeferredClaim(id, action) {
+    return governed(this.gov, 'claim-resolve', { id, action }, () => {
+      const r = this.claims.resolveDeferred(id, action);
+      this.db.logOp('claim-resolve', { id, action, success: r.success });
+      if (r.success) this.#markVaultDirty();
+      return r;
+    });
+  }
 
   #graphContext(q) {
     const nodes = this.graph.findByText(q);

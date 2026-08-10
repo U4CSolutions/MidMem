@@ -164,6 +164,14 @@ export function loadConfig(overrides = {}) {
       minCoverage: Number(env('TRANSITION_MIN_COVERAGE') ?? 0.6),
       promoteMinGrounding: Number(env('PROMOTE_MIN_GROUNDING') ?? 0.3),
     },
+    /** TARL deferred ledger (roadmap #9, arXiv 2608.03699): a claim arriving with a write-path
+     *  contradiction lands status 'deferred' (pending judgment) instead of 'active' — the third
+     *  ledger state between kept and quarantined. Resolution (accept|reject) is always explicit. */
+    claims: {
+      deferContradictory: env('DEFER_CONTRADICTORY') !== '0',
+      /** Consistency pass (roadmap #13) flags deferred claims older than this. */
+      deferAgeDays: Number(env('DEFER_AGE_DAYS') || 14),
+    },
     workMemory: {
       enabled: env('WORK_MEMORY') !== '0',
       /** Skip minting a task node when the label is a bare machine identifier (session UUID,

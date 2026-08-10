@@ -5,12 +5,12 @@
  */
 import { genId, nowISO, json, tokenize } from './util.mjs';
 
-const STATUSES = new Set(['active', 'verified', 'contradicted', 'superseded', 'archived']);
+const STATUSES = new Set(['active', 'verified', 'contradicted', 'superseded', 'archived', 'deferred']);
 
 export class ClaimStore {
-  constructor(db) { this.db = db; }
+  constructor(db, cfg = {}) { this.db = db; this.cfg = cfg; }
 
-  add({ content, type = 'fact', source = {}, provenance = {}, metadata = {} }) {
+  add({ content, type = 'fact', source = {}, provenance = {}, metadata = {}, defer = false }) {
     const id = genId('claim', content.slice(0, 50) + (source.path || ''));
     const ts = nowISO();
     const prov = {
@@ -26,12 +26,49 @@ export class ClaimStore {
     // what queues them for one. The relation rides in metadata.writeRelation.
     const relation = this.relate(content);
     const meta = relation.relation === 'novel' ? metadata : { ...metadata, writeRelation: relation };
+    // TARL deferred ledger (arXiv 2608.03699): a claim that contradicts a live neighbor is not
+    // forced into keep-or-quarantine — it lands `deferred` (pending judgment) instead of `active`.
+    // Deferred claims are invisible to current()/relate() neighbors until resolved, so uncertain
+    // evidence is preserved without being promoted into durable truth. Judgment resolves via
+    // resolveDeferred; nothing here auto-resolves.
+    const deferIt = defer || (relation.relation === 'contradictory' && this.cfg?.claims?.deferContradictory !== false);
+    const status = deferIt ? 'deferred' : 'active';
+    const meta2 = deferIt ? { ...meta, deferredAt: ts, deferReason: defer ? 'explicit' : 'write-contradiction' } : meta;
     this.db.prepare(`
       INSERT INTO claims(id,content,type,source,provenance,status,metadata,created_at,updated_at)
-      VALUES(?,?,?,?,?, 'active', ?,?,?)
-    `).run(id, content, type, JSON.stringify(source), JSON.stringify(prov), JSON.stringify(meta), ts, ts);
-    if (relation.relation === 'contradictory') this.db.logOp?.('claim-write-conflict', { id, neighbor: relation.neighborId, shared: relation.shared });
+      VALUES(?,?,?,?,?, ?, ?,?,?)
+    `).run(id, content, type, JSON.stringify(source), JSON.stringify(prov), status, JSON.stringify(meta2), ts, ts);
+    if (relation.relation === 'contradictory') this.db.logOp?.('claim-write-conflict', { id, neighbor: relation.neighborId, shared: relation.shared, deferred: deferIt });
     return this.get(id);
+  }
+
+  /** TARL: park a live claim pending judgment (status → deferred). */
+  defer(id, reason = 'manual') {
+    const c = this.get(id);
+    if (!c) return { success: false, message: `not found: ${id}` };
+    if (c.status !== 'active' && c.status !== 'verified') return { success: false, message: `cannot defer from status '${c.status}'` };
+    this.db.prepare('UPDATE claims SET status=?, metadata=?, updated_at=? WHERE id=?')
+      .run('deferred', JSON.stringify({ ...c.metadata, deferredAt: nowISO(), deferReason: reason }), nowISO(), id);
+    return { success: true, id, status: 'deferred' };
+  }
+
+  /** TARL: resolve a deferred claim by judgment — accept (→ active) or reject (→ archived).
+   *  The resolution is recorded in metadata; the claim row is never deleted (ledger history). */
+  resolveDeferred(id, action) {
+    if (action !== 'accept' && action !== 'reject') return { success: false, message: `action must be accept|reject, got '${action}'` };
+    const c = this.get(id);
+    if (!c) return { success: false, message: `not found: ${id}` };
+    if (c.status !== 'deferred') return { success: false, message: `not deferred: '${c.status}'` };
+    const status = action === 'accept' ? 'active' : 'archived';
+    this.db.prepare('UPDATE claims SET status=?, metadata=?, updated_at=? WHERE id=?')
+      .run(status, JSON.stringify({ ...c.metadata, deferredResolution: { action, at: nowISO() } }), nowISO(), id);
+    return { success: true, id, status };
+  }
+
+  /** The pending ledger: deferred claims, oldest first (review queue order). */
+  deferred() {
+    return this.db.prepare("SELECT * FROM claims WHERE status='deferred' ORDER BY updated_at ASC, id ASC")
+      .all().map((r) => this.#h(r));
   }
 
   /**

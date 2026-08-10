@@ -422,6 +422,8 @@ try {
 
   // 12f. Write-path conflict tagging (MOSAIC): incoming claims are related to live neighbors
   //      at write time — contradictory/corroborating/superseding-candidate/additive/novel.
+  //      (deferContradictory off here: this section tests TAGGING; the deferred ledger has its own §25.)
+  o.cfg.claims.deferContradictory = false;
   const wr1 = o.claims.add({ content: 'The staging database runs postgres fourteen on the blue cluster' });
   ok(!wr1.metadata.writeRelation, 'first claim in a locality is novel (no tag)');
   const wr2 = o.claims.add({ content: 'The staging database does not run postgres fourteen on the blue cluster' });
@@ -454,6 +456,7 @@ try {
   o.claims.add({ content: 'the matrix plugin is not enabled, it was disabled' });
   const contra = o.claimContradictions({ minShared: 2 });
   ok(contra.some((p) => /matrix plugin/i.test(p.contentA) && /matrix plugin/i.test(p.contentB)), 'P6: deterministic contradiction finder flags the negated pair');
+  o.cfg.claims.deferContradictory = true; // restore the default for later sections
 
   // 16. P5 concept routing: build the graph (embed nodes + communities), retrieval stays fail-soft.
   const cg = await o.refreshConcepts();
@@ -567,6 +570,34 @@ try {
   ok(heal.retention?.orphanEdges >= 1, `maintain swept ${heal.retention?.orphanEdges} orphaned edge(s)`);
   ok(o.db.prepare('SELECT COUNT(*) c FROM edges WHERE from_id=?').get(nGone).c === 0, 'stranded edge is gone after the sweep');
   ok(o.graph.sweepOrphanEdges() === 0, 'sweep is idempotent (second pass removes nothing)');
+
+  // 25. TARL deferred-claim ledger (roadmap #9): a write-path contradiction lands 'deferred',
+  //     not 'active'; the pending ledger surfaces it; resolution is explicit accept/reject.
+  const base9 = o.claims.add({ content: 'the omega gateway supports resumable websocket streaming uploads', source: { path: 'notes/omega.md' } });
+  ok(base9.status === 'active', 'novel claim lands active');
+  const contra9 = o.claims.add({ content: 'the omega gateway does not support resumable websocket streaming uploads', source: { path: 'notes/omega2.md' } });
+  ok(contra9.status === 'deferred', 'contradictory claim is DEFERRED, not active');
+  ok(contra9.metadata.writeRelation?.relation === 'contradictory' && contra9.metadata.deferReason === 'write-contradiction', 'deferred claim carries relation + reason');
+  ok(o.deferredClaims().some((c) => c.id === contra9.id), 'pending ledger lists the deferred claim');
+  ok(!o.currentClaims('omega gateway websocket streaming').some((c) => c.id === contra9.id), 'deferred claim invisible to current-claim retrieval');
+  ok(o.lint().deferredClaims.some((d) => d.id === contra9.id), 'lint surfaces the deferred queue');
+  const acc9 = await o.resolveDeferredClaim(contra9.id, 'accept');
+  ok(acc9.success && o.claims.get(contra9.id).status === 'active', 'accept resolves deferred → active');
+  const back9 = await o.deferClaim(contra9.id, 'second thoughts');
+  ok(back9.success && o.claims.get(contra9.id).status === 'deferred', 'explicit defer parks a live claim');
+  const rej9 = await o.resolveDeferredClaim(contra9.id, 'reject');
+  ok(rej9.success && o.claims.get(contra9.id).status === 'archived', 'reject resolves deferred → archived (history kept)');
+  ok((await o.resolveDeferredClaim(contra9.id, 'accept')).success === false, 'resolving a non-deferred claim is refused');
+  // config off → legacy behavior (active + tagged)
+  o.cfg.claims.deferContradictory = false;
+  const legacy9 = o.claims.add({ content: 'the omega gateway does not support resumable websocket streaming uploads at all', source: { path: 'notes/omega3.md' } });
+  ok(legacy9.status === 'active' && legacy9.metadata.writeRelation?.relation === 'contradictory', 'deferContradictory=false keeps legacy active+tagged behavior');
+  o.cfg.claims.deferContradictory = true;
+  // supersede still lands its replacement active (old claim is marked superseded before add) —
+  // archive the legacy negated claim first so it isn't a live contradictory neighbor.
+  o.claims.updateStatus(legacy9.id, 'archived');
+  const sup9 = o.supersedeClaim(base9.id, { content: 'the omega gateway supports resumable websocket streaming uploads via chunked frames' });
+  ok(sup9.success && o.claims.get(sup9.current).status === 'active', 'supersede replacement is active, not deferred');
 
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
