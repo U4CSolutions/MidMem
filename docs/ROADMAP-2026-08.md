@@ -61,3 +61,30 @@ operator digest for the full already/partial/gap sort). Priority order:
 
 Same discipline as increments 1-8: deterministic-first, pure-core, smoke-gated, one commit each,
 no LLM in verifier paths, no auto-mutation on conflict.
+
+### Sequencing & status (wave 2 — built 2026-08-10)
+9. Deferred-claim ledger — 'deferred' status + explicit defer/resolve, pending queue in lint,
+   deferContradictory default-on. ☑ (smoke 163→175, bench PASS, `a3a05ac`)
+10. Source-authority propagation — operator>stack>doc>web at origin, claim inheritance,
+    parentAuthority clamp, governance gate on operator, minAuthority filter + post-RRF nudge.
+    ☑ (smoke 175→184, bench PASS, `f9d6a32`)
+11. Sufficiency-gated retrieval — lexicalOnly first pass + deterministic coverage gate,
+    deep:true escape hatch, sufficiency descriptor on every query. ☑ (smoke 184→190, bench
+    PASS, `e5d7ce9`)
+12. Hierarchical graph + path rewrite — community parent nodes + member_of edges (idempotent),
+    supersede flags the dependency path (report-only), stale_paths_clear by explicit ids.
+    ☑ (smoke 190→198, bench PASS, `64b802d`)
+13. Global consistency pass — state-level contradictions + dangling supersede chains +
+    deferred aging, report-only, on forced maintain + on demand. ☑ (smoke 198→204, bench
+    PASS, `e4cbd90`)
+14. Claim validity windows — firstObserved/lastObserved/supportCount/contradictedBy +
+    currentlyValid verdict; observation bookkeeping never mutates status. ☑ (smoke 204→209,
+    bench PASS, `0d0ef62`)
+15. Expected-query probes — per-entry probe compilation persisted in meta + lexical
+    evidence-path verification on forced maintain. ☑ (smoke 209→213, bench PASS, `d1fd414`)
+
+Live-store QA after landing (state.db, 665 live claims): MCP serves **37 tools** (was 30) incl.
+all 7 new; consistency chain-integrity clean (0 dangling, 0 deferred-aging); pairwise
+contradiction pairs at default minShared=3 are noisy at this scale (1295) — **operational
+review range is minShared 5–7 (124 → 39 pairs)**; default left unchanged (smoke exercises the
+tight-locality behavior).
