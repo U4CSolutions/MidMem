@@ -379,7 +379,10 @@ export class Orchestrator {
       .map((c) => ({ id: c.id, neighbor: c.metadata.writeRelation.neighborId, content: c.content.slice(0, 120) }));
     // TARL pending ledger: deferred claims are a review queue, not a hidden state — always surfaced.
     const deferredClaims = this.claims.deferred().map((c) => ({ id: c.id, since: c.metadata?.deferredAt, reason: c.metadata?.deferReason, content: c.content.slice(0, 120) }));
-    return { contradictions: conflicts.conflicts, writeConflicts, deferredClaims, orphans, lowTrustWisdom, dupeConcepts, summary: { nodes: g.nodes.length, edges: g.edges.length, entries: Object.values(this.memory.stats()).reduce((a, b) => a + b, 0) } };
+    // HiGram stale paths: dependency paths flagged by a supersede, awaiting review (report-only).
+    const stalePaths = this.graph.allNodes().filter((n) => n.properties?.staleReview)
+      .map((n) => ({ id: n.id, type: n.type, label: n.label, ...n.properties.staleReview }));
+    return { contradictions: conflicts.conflicts, writeConflicts, deferredClaims, stalePaths, orphans, lowTrustWisdom, dupeConcepts, summary: { nodes: g.nodes.length, edges: g.edges.length, entries: Object.values(this.memory.stats()).reduce((a, b) => a + b, 0) } };
   }
 
   async forget(id, { soft = true, force = false } = {}) {
@@ -438,7 +441,51 @@ export class Orchestrator {
         }
       }
     }
-    const r = this.claims.supersede(oldId, next); this.db.logOp('claim-supersede', { oldId, current: r.current }); if (r.success) this.#markVaultDirty(); return r;
+    const old = this.claims.get(oldId);
+    const r = this.claims.supersede(oldId, next); this.db.logOp('claim-supersede', { oldId, current: r.current }); if (r.success) this.#markVaultDirty();
+    // HiGram path rewrite (roadmap #12), report-only: when a claim is superseded, flag the
+    // concept nodes its content touches — and their community parents — as the affected
+    // dependency path needing review. Judgment clears the flags (clearStaleFlags); nothing
+    // here mutates knowledge.
+    if (r.success && old) {
+      const flagged = [];
+      const ts = nowISO();
+      for (const n of this.graph.findByText(old.content)) {
+        if (n.type === 'community') continue;
+        this.db.prepare('UPDATE nodes SET properties=? WHERE id=?')
+          .run(JSON.stringify({ ...n.properties, staleReview: { claim: oldId, at: ts } }), n.id);
+        flagged.push(n.id);
+        for (const e of this.graph.neighbors(n.id)) {
+          if (e.type !== 'member_of') continue;
+          const parent = this.graph.node(e.to);
+          if (parent && !parent.properties.staleReview) {
+            this.db.prepare('UPDATE nodes SET properties=? WHERE id=?')
+              .run(JSON.stringify({ ...parent.properties, staleReview: { claim: oldId, at: ts, via: n.id } }), parent.id);
+            flagged.push(parent.id);
+          }
+        }
+      }
+      if (flagged.length) this.db.logOp('stale-path', { claim: oldId, flagged: flagged.length });
+      r.stalePath = flagged;
+    }
+    return r;
+  }
+
+  /** HiGram (roadmap #12): clear reviewed stale-path flags (judgment op; ids required). */
+  async clearStaleFlags({ ids = [] } = {}) {
+    return governed(this.gov, 'stale-clear', { ids }, () => {
+      if (!ids.length) throw new Error('ids required (judgment op — no bulk blind clear)');
+      let cleared = 0;
+      for (const id of ids) {
+        const n = this.graph.node(id);
+        if (!n || !n.properties.staleReview) continue;
+        const { staleReview, ...rest } = n.properties;
+        this.db.prepare('UPDATE nodes SET properties=? WHERE id=?').run(JSON.stringify(rest), id);
+        cleared++;
+      }
+      this.db.logOp('stale-clear', { ids, cleared });
+      return { success: true, cleared };
+    });
   }
   /** P6: deterministic contradiction candidates among live claims. */
   claimContradictions(opts) { return this.claims.findContradictions(opts); }

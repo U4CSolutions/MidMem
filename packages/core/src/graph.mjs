@@ -11,6 +11,8 @@ const EDGE_TYPES = new Set([
   'attempted', 'used_source', 'avoided', 'corrected_by', 'produced', 'decided', 'about',
   // concept canonicalization: a merged-away variant points at its canonical node
   'alias_of',
+  // HiGram hierarchy (roadmap #12): concept → its community parent node
+  'member_of',
 ]);
 
 /** Node types whose labels are concepts (canonicalized identity). Identifier-like types

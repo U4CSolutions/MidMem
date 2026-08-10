@@ -636,6 +636,28 @@ try {
   ok(qOff.sufficiency?.stage === 'full' && qOff.sufficiency.reason === 'progressive-disabled', 'progressive.enabled=false always runs full hybrid');
   o.cfg.progressive.enabled = true;
 
+  // 28. HiGram hierarchy + path rewrite (roadmap #12): communities materialize as parent nodes
+  //     with member_of edges; superseding a claim flags its dependency path for review.
+  const cg12 = await o.refreshConcepts();
+  const commNodes = o.graph.byType('community');
+  ok(commNodes.length >= 1, `community parents materialized (${commNodes.length})`);
+  const memEdges = o.db.prepare("SELECT COUNT(*) c FROM edges WHERE type='member_of'").get().c;
+  ok(memEdges >= 2, `member_of hierarchy edges exist (${memEdges})`);
+  ok(commNodes.every((n) => (n.properties.size ?? 0) >= 2), 'community parents only for multi-member communities');
+  const cg12b = await o.refreshConcepts();
+  ok(o.graph.byType('community').length === commNodes.length, 'community materialization is idempotent across passes');
+  // path rewrite: a claim about a known concept, superseded → concept + parent flagged
+  const nodeLabel = o.graph.allNodes().find((n) => n.type !== 'community' && /retrieval|vector|hybrid/i.test(n.label))?.label || 'hybrid retrieval';
+  const c12 = o.claims.add({ content: `the ${nodeLabel} implementation batches lookups nightly for efficiency reasons` });
+  const sup12 = o.supersedeClaim(c12.id, { content: `the ${nodeLabel} implementation now streams lookups continuously for efficiency reasons` });
+  ok(sup12.success && Array.isArray(sup12.stalePath) && sup12.stalePath.length > 0, `supersede flagged ${sup12.stalePath?.length} node(s) on the dependency path`);
+  const lint12 = o.lint();
+  ok(lint12.stalePaths.length >= sup12.stalePath.length, 'lint surfaces the stale dependency path');
+  let bareClear = false; try { await o.clearStaleFlags({}); } catch { bareClear = true; }
+  ok(bareClear, 'blind stale-clear without ids is refused');
+  const cleared12 = await o.clearStaleFlags({ ids: sup12.stalePath });
+  ok(cleared12.cleared === sup12.stalePath.length && o.lint().stalePaths.length === lint12.stalePaths.length - cleared12.cleared, 'reviewed flags clear by explicit ids');
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;

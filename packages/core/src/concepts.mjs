@@ -23,7 +23,9 @@ function nodeDigest(db, node, maxEntries = 3) {
 /** Deterministic label propagation: each node adopts the most common community among neighbors,
  *  ties broken by smallest community id, nodes processed in sorted id order. Persists to properties. */
 function detectCommunities(o, rounds = 5) {
-  const nodes = o.graph.allNodes().sort((a, b) => a.id.localeCompare(b.id));
+  // Community (hierarchy) nodes are OUTPUT of this pass, never input — including them in
+  // propagation would feed the previous round's hierarchy back into itself.
+  const nodes = o.graph.allNodes().filter((n) => n.type !== 'community').sort((a, b) => a.id.localeCompare(b.id));
   const comm = new Map(nodes.map((n) => [n.id, n.id]));
   const adj = new Map(nodes.map((n) => [n.id, []]));
   for (const e of o.db.prepare('SELECT from_id,to_id FROM edges').all()) {
@@ -43,7 +45,27 @@ function detectCommunities(o, rounds = 5) {
   }
   for (const n of nodes) o.db.prepare('UPDATE nodes SET properties=? WHERE id=?')
     .run(JSON.stringify({ ...n.properties, community: comm.get(n.id) }), n.id);
-  return { count: new Set(comm.values()).size };
+
+  // HiGram hierarchy (roadmap #12): materialize each multi-member community as a parent node
+  // with `member_of` edges from its members — coarse-to-fine structure over the flat concept
+  // graph. Deterministic: the community id IS a member node id (label propagation converges to
+  // ids), so the parent is named after that root member. Stale parents from earlier passes are
+  // pruned (their edges cascade), keeping repeated passes idempotent.
+  const byComm = new Map();
+  for (const [nid, c] of comm) { if (!byComm.has(c)) byComm.set(c, []); byComm.get(c).push(nid); }
+  const labelOf = new Map(nodes.map((n) => [n.id, n.label]));
+  const wanted = new Set();
+  let parents = 0;
+  for (const [c, members] of [...byComm.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (members.length < 2) continue;
+    const rootLabel = labelOf.get(c) || c;
+    const pid = o.graph.upsertNode({ type: 'community', label: `community:${rootLabel}`, source: 'community-detect', properties: { root: c, size: members.length } });
+    wanted.add(pid);
+    parents++;
+    for (const m of members.sort()) o.graph.upsertEdge({ from: m, to: pid, type: 'member_of', source: 'community-detect' });
+  }
+  for (const stale of o.graph.byType('community')) if (!wanted.has(stale.id)) o.graph.deleteNode(stale.id);
+  return { count: new Set(comm.values()).size, parents };
 }
 
 /**
@@ -138,7 +160,7 @@ export async function refreshConceptGraph(o, { maxEmbedPerPass } = {}) {
   // Canonicalization first, so embedding/community effort isn't spent on doomed duplicates.
   const deduped = dedupeConceptNodes(o);
   const cap = maxEmbedPerPass ?? rc.maxEmbedPerPass ?? 60;
-  const nodes = o.graph.allNodes();
+  const nodes = o.graph.allNodes().filter((n) => n.type !== 'community'); // hierarchy nodes aren't embedded
   let embedded = 0;
   for (const n of nodes) {
     if (embedded >= cap) break;
@@ -151,7 +173,7 @@ export async function refreshConceptGraph(o, { maxEmbedPerPass } = {}) {
     embedded++;
   }
   const communities = detectCommunities(o);
-  return { nodes: nodes.length, embedded, communities: communities.count, deduped: deduped.merged };
+  return { nodes: nodes.length, embedded, communities: communities.count, communityParents: communities.parents, deduped: deduped.merged };
 }
 
 /**
