@@ -164,6 +164,10 @@ export function loadConfig(overrides = {}) {
       minCoverage: Number(env('TRANSITION_MIN_COVERAGE') ?? 0.6),
       promoteMinGrounding: Number(env('PROMOTE_MIN_GROUNDING') ?? 0.3),
     },
+    /** Global consistency pass (roadmap #13, arXiv 2608.03137): state-level verification on the
+     *  forced/daily maintain — cross-claim contradictions, dangling supersede chains, deferred
+     *  aging. Report-only; findings logged, never auto-fixed. */
+    consistency: { enabled: env('CONSISTENCY') !== '0' },
     /** Progressive retrieval (roadmap #11, arXiv 2608.01285): cheap lexical-only pass first,
      *  expand to full hybrid (embed + vector + concept routing) only when the deterministic
      *  sufficiency gate fails. deep:true on a query always forces the full pipeline. */

@@ -658,6 +658,25 @@ try {
   const cleared12 = await o.clearStaleFlags({ ids: sup12.stalePath });
   ok(cleared12.cleared === sup12.stalePath.length && o.lint().stalePaths.length === lint12.stalePaths.length - cleared12.cleared, 'reviewed flags clear by explicit ids');
 
+  // 29. Global consistency pass (roadmap #13): state-level findings, report-only.
+  const dang13 = o.claims.add({ content: 'the sigma exporter writes parquet shards to the cold tier volume' });
+  o.db.prepare('UPDATE claims SET metadata=?, updated_at=? WHERE id=?')
+    .run(JSON.stringify({ ...dang13.metadata, superseded_by: 'claim-nonexistent-xyz' }), new Date().toISOString(), dang13.id);
+  const orphan13 = o.claims.add({ content: 'the sigma importer reads avro shards from the warm tier volume nightly' });
+  o.db.prepare("UPDATE claims SET status='superseded', updated_at=? WHERE id=?").run(new Date().toISOString(), orphan13.id);
+  const oldDefer13 = o.claims.add({ content: 'the tau reranker prefers longer passages during evening indexing runs', defer: true });
+  const backdate = new Date(Date.now() - 30 * 864e5).toISOString();
+  o.db.prepare('UPDATE claims SET metadata=? WHERE id=?')
+    .run(JSON.stringify({ ...o.claims.get(oldDefer13.id).metadata, deferredAt: backdate }), oldDefer13.id);
+  const cons13 = o.checkConsistency();
+  ok(cons13.pass === false && cons13.findings >= 3, `consistency pass found ${cons13.findings} state-level findings`);
+  ok(cons13.danglingChains.some((d) => d.id === dang13.id && d.problem === 'superseded_by-missing'), 'dangling superseded_by pointer detected');
+  ok(cons13.danglingChains.some((d) => d.id === orphan13.id && d.problem === 'superseded-without-pointer'), 'superseded-without-pointer detected');
+  ok(cons13.deferredAging.some((d) => d.id === oldDefer13.id), 'deferred claim aging past review window detected');
+  ok(o.claims.get(dang13.id).status === 'active' && o.claims.get(oldDefer13.id).status === 'deferred', 'consistency pass is report-only (no status mutated)');
+  const m13 = await o.maintain({ force: true });
+  ok(m13.consistency && typeof m13.consistency.findings === 'number', 'forced maintain includes the consistency verdict');
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;

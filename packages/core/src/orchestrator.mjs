@@ -23,6 +23,7 @@ import { loadPacks, recordPattern } from './packs.mjs';
 import { exportKnowledge } from './export.mjs';
 import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
 import { normalizeAuthority, clampAuthority } from './authority.mjs';
+import { checkConsistency } from './consistency.mjs';
 import { genId, sha12, nowISO } from './util.mjs';
 
 export class Orchestrator {
@@ -265,7 +266,16 @@ export class Orchestrator {
       if (force && this.cfg.export?.enabled !== false) {
         try { exported = this.exportKnowledge(); } catch (e) { exported = { error: e.message }; }
       }
-      const summary = { swept, promoted, projected, projectionQA, exported, autoIngested, concepts, retention, forced: force };
+      // Global consistency pass (roadmap #13): verify the resulting memory STATE on the heavy
+      // pass. Report-only — findings are logged for judgment, never auto-fixed.
+      let consistency = null;
+      if (force && this.cfg.consistency?.enabled !== false) {
+        try {
+          consistency = this.checkConsistency();
+          if (!consistency.pass) this.db.logOp('consistency-findings', { findings: consistency.findings, contradictions: consistency.contradictions.length, danglingChains: consistency.danglingChains.length, deferredAging: consistency.deferredAging.length });
+        } catch (e) { consistency = { error: e.message }; }
+      }
+      const summary = { swept, promoted, projected, projectionQA, exported, autoIngested, concepts, retention, consistency, forced: force };
       this.db.logOp('maintain', summary);
       return summary;
     } finally { this._maintaining = false; }
@@ -489,6 +499,10 @@ export class Orchestrator {
   }
   /** P6: deterministic contradiction candidates among live claims. */
   claimContradictions(opts) { return this.claims.findContradictions(opts); }
+
+  /** Global consistency check (roadmap #13): verify the memory STATE — cross-claim
+   *  contradictions, dangling supersede chains, deferred-ledger aging. Report-only. */
+  checkConsistency(opts = {}) { const r = checkConsistency(this, opts); this.db.logOp('consistency', { pass: r.pass, findings: r.findings }); return r; }
 
   /** TARL (roadmap #9): the pending ledger — deferred claims awaiting judgment, oldest first. */
   deferredClaims() { return this.claims.deferred(); }
