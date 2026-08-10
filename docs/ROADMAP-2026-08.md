@@ -43,3 +43,21 @@
 
 Each step: full smoke suite must pass (no skips), bench must stay PASS, one commit,
 root-changelog entry. Results recorded in this file's status column as steps land.
+
+## 2026-08-10 additions (next wave — pending, from the 2026-08-10 weekly review)
+
+Grounded against `packages/core/src` before listing (already-have items excluded — see the
+operator digest for the full already/partial/gap sort). Priority order:
+
+| # | Increment | Research driver | Principle |
+|---|-----------|-----------------|-----------|
+| 9 | **Deferred-claim ledger** | TARL (2608.03699) | Third claim state between kept and quarantined: `deferred` + review queue. Uncertain/conflicting candidates stop being forced into keep-or-reject; surfaced for judgment, never auto-resolved. |
+| 10 | **Source-authority propagation** | Provenance Laundering (2607.29167) | Formal `source_authority` at ingest, propagated through every derived entry/claim/summary; consolidation must never raise authority. Action-risk-gated recall for low-authority material. Security boundary, not a ranking tweak. |
+| 11 | **Sufficiency-gated retrieval** | Router-Mem (2608.01285) | Cheap lane first, deterministic sufficiency check, expand (graph/episodic/source) only on insufficiency. Extends the existing lanes; pairs with the deferred gbrain "gap analysis as retrieval output" idea. |
+| 12 | **Hierarchical graph + path rewrite** | HiGram (2608.05095) | Parent/child structure over communities; when a claim supersedes, rewrite the affected dependency path, not one node. Builds on forget_nodes/orphan-sweep. |
+| 13 | **Global consistency pass** | Verifiable Memory (2608.03137) | Increment 1 verified transitions; this verifies the resulting state: maintain-time sweep for cross-claim contradictions and dangling supersede chains. Report-only (non-goal: no auto-mutation). Respect maintain re-entrancy guard. |
+| 14 | **Claim validity windows** | PGMem (2608.01708) | first-observed / last-observed / contradicting-evidence fields on durable preference-type claims; extends conflict tagging (#2). |
+| 15 | **Expected-query probes** | PMMC (2608.00962) | Projection QA (#3) extension: per-page likely-query probes precompiled at consolidation, verified like WiCER probes. Lowest urgency. |
+
+Same discipline as increments 1-8: deterministic-first, pure-core, smoke-gated, one commit each,
+no LLM in verifier paths, no auto-mutation on conflict.

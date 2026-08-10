@@ -10,6 +10,9 @@ exposes — no extra dependencies.
 | **`midmem-orchestrator`** | Orchestrate knowledge-curation pipelines (bulk ingest, re-ground, dedup, vault verify) with the frontier-plans / Hermes-builds / frontier-QA loop. A MidMem-specialized repurpose of `hermes-build-orchestrator`. |
 | **`midmem-ingest-review`** | Ingest LLM Wiki knowledge **and** review/audit its quality + the two stacks' understanding — cross-checks OpenClaw vs Hermes scope to catch confabulation, drift, contradictions, scope leakage, and divergent assumptions. The QA gate for `midmem-orchestrator`. |
 | **`midmem-record`** | Record a change/decision/lesson **durably into MidMem** — distilled lesson → wisdom tier, clean commit, optional changelog — plus the harness-guaranteed `Stop`-hook recording pattern so a recordable change can't be left unrecorded. |
+| **`midmem-ingest`** | Verified knowledge intake: stage into an allowed root, ingest, read the deterministic grounding numbers, recall-check, record. Never blind-ingest. |
+| **`midmem-pattern-capture`** | Capture a reusable coding/workflow pattern into the store via capture packs (`recordPattern`), so it becomes recallable procedure memory. |
+| **`midmem-research-digest`** | Digest a recurring research report end-to-end: `midmem-ingest` intake → grounded gap-analysis of every recommendation **against the actual core source** → operator digest → roadmap deltas in `docs/ROADMAP-*.md`. Reports grade nothing by themselves. |
 
 They compose across the lifecycle: **`midmem-dev`** changes the core → **`midmem-orchestrator`** runs
 bulk curation with **`midmem-ingest-review`** as its per-card QA gate → **`midmem-record`** makes the
@@ -21,7 +24,7 @@ faithful?"
 Claude Code discovers skills in `~/.claude/skills/`. Symlink the library skills in (keeps the
 canonical files here in the repo):
 ```bash
-for s in midmem-dev midmem-orchestrator midmem-ingest-review midmem-record; do
+for s in midmem-dev midmem-orchestrator midmem-ingest-review midmem-record midmem-ingest midmem-pattern-capture midmem-research-digest; do
   ln -sfn "$(pwd)/skills/$s" "$HOME/.claude/skills/$s"
 done
 ```
