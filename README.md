@@ -5,6 +5,10 @@ A self-contained **LLM Wiki middleware layer**: a single source-of-truth knowled
 provenance, **fail-closed governance**, and an Obsidian projection — exposed to LLM agents over
 the **Model Context Protocol (MCP)**, a CLI, and a programmatic API.
 
+> **New here?** [Getting started](docs/GETTING-STARTED.md) (5 minutes, offline-capable) ·
+> [Concepts](docs/CONCEPTS.md) · [Wire your agent](docs/INTEGRATION-MODES.md) ·
+> [Operations](docs/OPERATIONS.md) · generated [tool/CLI/config reference](docs/README.md#reference-generated--node-scriptsgen-docsmjs-drift-checked-in-ci)
+
 It is the broker between AI agents and their knowledge: agents `ingest`, `query`, and `remember`
 through the router; the knowledge store sits *behind* it. Built for the OpenClaw + Hermes
 dual-stack, but pure-core and modular — it runs in **4 modes** (standalone curation · OpenClaw

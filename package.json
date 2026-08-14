@@ -10,7 +10,7 @@
   ],
   "scripts": {
     "test": "npm --prefix packages/core test",
-    "verify": "npm --prefix packages/core run verify",
+    "verify": "npm --prefix packages/core run verify && node scripts/gen-docs.mjs --check",
     "mcp:server": "node packages/core/bin/mcp-server.mjs",
     "cli": "node packages/core/bin/cli.mjs"
   },
