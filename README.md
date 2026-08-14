@@ -52,7 +52,7 @@ flowchart TB
     DB -->|"project (LLM-owned)"| vault[["Obsidian vault (projection)"]]
     verify["verify (deterministic, one graph)"] -->|"consistency check"| DB
 
-    DB <-->|"query: FTS5 ⊕ trigram ⊕ vector (RRF) + trust / graph boosts"| mcp{{"MCP server (30 tools) · CLI · hook seam"}}
+    DB <-->|"query: FTS5 ⊕ trigram ⊕ vector (RRF) + trust / graph boosts"| mcp{{"MCP server (37 tools) · CLI · hook seam"}}
 
     mcp <--> oc["OpenClaw<br/>(daily driver)"]
     mcp <--> hz["Hermes Agent<br/>(build workhorse)"]
@@ -116,6 +116,16 @@ The middleware speaks MCP, so any MCP-capable agent can use it. Three supported 
 > code + honest deployment status is in **[`integrations/`](integrations/)** (Hermes core capture is
 > LIVE; the OpenClaw plugin is retired/reference). Engineering + grounding rules:
 > **[`docs/DEVELOPMENT-GUIDELINES.md`](docs/DEVELOPMENT-GUIDELINES.md)**.
+
+### Claude Code (composes with any option below)
+Two files and you're wired — a project-root `.mcp.json` pointing at a thin `midmem-mcp` wrapper,
+approved once via `"enabledMcpjsonServers": ["midmem"]` in `~/.claude/settings.json`. The wrapper
+sources the same shared env file as your `midmem` CLI wrapper (single source of truth — never
+duplicate env), sets `MIDMEM_AUTO_INGEST=0` (auto-ingest keeps exactly one owner), and execs
+`bin/mcp-server.mjs`. All 37 tools then load natively in every session. Full recipe + the three
+guardrails (env drift, ingest ownership, long-lived-process vs core development):
+**[`docs/INTEGRATION-MODES.md` §5](docs/INTEGRATION-MODES.md)**. The in-repo
+[skills library](skills/) equips the sessions themselves.
 
 ### Option A — OpenClaw only (1:1)
 Register the MCP server in OpenClaw; it's the sole consumer. A single agent needs no scope
@@ -247,13 +257,16 @@ node bin/cli.mjs refresh-concepts             # rebuild concept embeddings + com
 node bin/cli.mjs maintain --force             # full lifecycle pass (decay/promote/retention/project)
 ```
 
-### MCP tools (30)
+### MCP tools (37)
 `ingest` · `query` · `remember` · `recall` · `brief` · `audit` · `forget` · `archive` ·
 `promote` · `project` · `feedback` (trust) · `handoff_brief` (memory gate) · `maintain` ·
 `proactive_recall` · `record_work` · `list_tasks` · `close_tasks` · `forget_entries` ·
 `forget_nodes` (cascading) · `claims` · `claim_supersede` · `claim_contradictions` ·
 `refresh_concepts` · `concept_merge` · `prospective_add` · `prospective_due` ·
-`prospective_resolve` · `export_knowledge` · `list_packs` · `record_pattern`
+`prospective_resolve` · `export_knowledge` · `list_packs` · `record_pattern` ·
+`claims_deferred` / `claim_defer` / `claim_resolve` (TARL pending ledger) ·
+`claim_validity` (PGMem windows) · `consistency_check` (state-level, report-only) ·
+`stale_paths_clear` (HiGram path review) · `query_probes` (PMMC evidence paths)
 
 **Hand-off memory gate ("firstware"):** `handoff_brief` builds a scoped, token-budgeted memory brief
 to inject into an agent hand-off (e.g. before an ACP spawn, which doesn't share context) so the

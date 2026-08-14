@@ -6,7 +6,7 @@ hybrid retrieval, tiers/lifecycle, grounding, the concept graph, **work-memory e
 and is reached through three stable surfaces:
 
 - **CLI** — `bin/cli.mjs` (`midmem …`)
-- **MCP server** — `bin/mcp-server.mjs` (stdio JSON-RPC; 30 tools incl. `record_work`, `list_tasks`, `proactive_recall`, `forget_nodes`, `prospective_*`)
+- **MCP server** — `bin/mcp-server.mjs` (stdio JSON-RPC; 37 tools incl. `record_work`, `list_tasks`, `proactive_recall`, `forget_nodes`, `prospective_*`)
 - **Hook seam** — `bin/hook.mjs` (`pre` / `post` / `tasks`) — the one caller-path touchpoint
 
 Because nothing in the core knows about OpenClaw or Hermes, the same build runs in **four modes**.
@@ -72,8 +72,32 @@ Claude Code is the **frontier orchestrator**: it plans MidMem work, dispatches t
 **Hermes** over kanban / ACP, QAs each result, and records durably. Claude Code decides and verifies;
 Hermes builds; both read/write the one shared `state.db`.
 
-- **Wiring:** register the MCP server for Claude Code as a consumer (`MIDMEM_AGENT_SCOPE=shared`, or a
-  dedicated scope in a multi-stack deployment), or drive the `midmem` CLI directly.
+- **Wiring (copy-paste):** drop a `.mcp.json` at your project root and approve it once:
+
+  ```json
+  // <project>/.mcp.json
+  { "mcpServers": { "midmem": { "type": "stdio", "command": "/path/to/bin/midmem-mcp" } } }
+  ```
+  ```json
+  // ~/.claude/settings.json (approve the project server)
+  { "enabledMcpjsonServers": ["midmem"] }
+  ```
+  ```bash
+  #!/usr/bin/env bash
+  # /path/to/bin/midmem-mcp — thin wrapper; ALL env lives in one shared file
+  source /path/to/bin/midmem-env.sh     # same file your midmem CLI wrapper sources
+  export MIDMEM_AUTO_INGEST=0           # bridge/auto-ingest stays single-owner elsewhere
+  export MIDMEM_AGENT_SCOPE="${MIDMEM_AGENT_SCOPE:-shared}"
+  exec node /path/to/midmem-kb-store/packages/core/bin/mcp-server.mjs
+  ```
+  `midmem-env.sh` holds `MIDMEM_DB_PATH`, `OBSIDIAN_VAULT_PATH`, `MIDMEM_LLM_ENDPOINT`, model +
+  timeout knobs — **one file sourced by every wrapper**; duplicated env blocks are how deployments
+  drift. Verify before first use:
+  `printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' | /path/to/bin/midmem-mcp`
+- **Guardrails that make the wiring safe:** (1) exactly one process owns auto-ingest — every other
+  registered instance sets `MIDMEM_AUTO_INGEST=0`; (2) the MCP process is long-lived, so
+  core-development sessions verify via the CLI and reconnect (`/mcp`) after changes; (3) treat
+  wiring impact as part of every core change (checklist in the `midmem-dev` skill).
 - **Skills:** the [MidMem Skills Library](../skills/) (ships in-repo) equips it — `midmem-dev` (change
   the core), `midmem-orchestrator` + `midmem-ingest-review` (curate + QA), `midmem-record` (durable
   capture). These are portable, Claude-Code-only adaptations of the skills a live deployment runs.
