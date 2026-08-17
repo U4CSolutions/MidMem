@@ -31,8 +31,13 @@ we do *not* yet have, ranked by evidence strength:
 | Episode/project grouping — recall bounded to an ongoing body of work, not just scope/tier | LeanMem event memory (2608.03463) + Filesystem-Memory (2607.26637) | partial (work-memory task nodes exist; no project boundary) |
 | Evaluation memory as trend, not snapshot — probe outcomes tracked over time for regression detection | Horizon Gap (2608.06663) + WiCER lineage | partial (probes run; results not persisted as series) |
 | Multi-agent memory coordination beyond scopes (which agent knew what, when) | emerging; expect coverage in coming weeklies | watch |
+| Serving-cost observability — per-op latency / LLM+embed calls / fallback share; a store can look healthy while recall silently degrades (2026-08-17: 54 fallback-hash vectors written while the embedder was down, no re-embed path) | Total Recall at What Cost? (2608.11879) | not started — operationally urgent |
+| Typed unresolved-conflict states rendered in the wiki (context-partitioned / source-disputed / temporally-separated / unresolved), not one `deferred` bucket | TANGLE (2608.13921) | partial (deferred ledger #9 + validity windows #14 exist; no class, no projection) |
+| Multi-hop associative expansion over event edges before declaring insufficiency | RippleMem (2608.13334) | partial (one-hop ref-chain boost + concept routing) |
+| Snapshot restore/rollback with index rebuild | ChronoMem (2607.27773) | partial (export #8 only) |
+| Procedure-candidate detection (episode → procedure candidate → skill, deterministic) | Externalization (2604.08224), AMD (2608.07169) | not started — low |
 
-## Increment candidates (16–22) — sequenced, same discipline as 1–15
+## Increment candidates (16–27) — sequenced, same discipline as 1–15
 
 | # | Increment | Driver | Principle served |
 |---|---|---|---|
@@ -42,10 +47,17 @@ we do *not* yet have, ranked by evidence strength:
 | 19 | **Insufficient-evidence verdict** — when the full pipeline still fails sufficiency, `query` says so explicitly (gap statement + what was searched) instead of returning weak top-k as if confident | Router-Mem, gbrain | #1 — honest recall |
 | 20 | **Probe-outcome series** — persist projection-QA + expected-query + consistency verdicts per forced maintain as a time series; `brief` trends them (memory-health regression detection) | Horizon Gap | #1 — verified memory over time |
 | 21 | **Authority-aware handoff briefs** — `handoff_brief` composes with #10: profile-configurable authority floor, and briefs label each line's origin authority | Provenance Laundering (2607.29167) | #1, #3 — trust survives hand-off |
-| 22 | **Pack authoring guide + example second pack** — document the capture-pack contract for external users; ship a second reference pack proving domain extension without core changes | principle #2 directly | #2, #3 |
+| 22 | **Pack authoring guide + example second pack** — document the capture-pack contract for external users; ship a second reference pack proving domain extension without core changes. Packs declare a `version`; a pack change logs a migration op (MindMemOS 2608.12428 — ontology evolution as data, never LLM-driven) | principle #2 directly | #2, #3 |
+| 23 | **Serving-cost ledger + fallback re-embed** — `log` detail gains `durationMs` / `llmCalls` / `embedMode`; `audit`+`brief` surface fallback-vector share and per-op cost trend; `maintain --reembed` re-embeds fallback vectors when the embedder is reachable (hash-dedup otherwise blocks a repair re-ingest) | Total Recall at What Cost? (2608.11879); 2026-08-17 incident | #1 — recall that is honestly measured |
+| 24 | **Typed conflict states + unresolved-conflict wiki rendering** — deterministic class on deferred pairs (`temporally-separated` from #14, `source-disputed` from #10 authority delta, `context-partitioned` from scope-disjoint provenance, else `unresolved`); projection renders current / alternative / context / sources / open uncertainty | TANGLE (2608.13921) | #1 — conflict survives consolidation |
+| 25 | **Multi-hop associative expansion behind the gate** — when the full pass still fails `evidenceSufficient()`, walk work-memory edges ≤2 hops from the anchors, re-check, then emit the #19 verdict if still short | RippleMem (2608.13334) | #1 — distributed evidence recovered |
+| 26 | **Snapshot restore + index rebuild** — `import_knowledge` from the #8 JSONL snapshot, rebuild FTS + vectors, refuse on schema-version mismatch; NL rollback explicitly out | ChronoMem (2607.27773) | #1, #3 — reversible memory |
+| 27 | **Procedure-candidate detection** — N successful `task_attempt` events sharing task label + tool signature → suggested `record_pattern`; promotion to a skill artifact stays consumer-side | Externalization (2604.08224), AMD (2608.07169) | #2 — procedures leave memory |
+
+Sequencing note (2026-08-17 digest): #23 first (small, operational), then #17/#19 with #25 folded in, #24, #26; #27 last.
 
 Non-goals carry over unchanged from wave 1–2: no LLM in verifier/tagger paths, no auto-mutation
-on conflict, no external deps, wiki stays a projection, no trigger execution in MidMem.
+on conflict, no external deps, wiki stays a projection, no trigger execution in MidMem, no LLM-driven schema evolution or natural-language rollback, no subject-predicate-value triple claims (grounded text stays).
 
 ## Readiness evaluation: multi-agent CLI management system (next consumer, ~1 week out)
 

@@ -33,7 +33,7 @@ cannot drift, verified by `npm run verify`), and **design** (architecture + rese
 - [`STACK-CAPTURE.md`](STACK-CAPTURE.md) — how knowledge is captured per consumer stack;
   reliable vs best-effort paths.
 - [`ROADMAP-2026-09.md`](ROADMAP-2026-09.md) — **current**: product principles, research
-  re-evaluation, increment candidates 16–22, next-consumer readiness.
+  re-evaluation, increment candidates 16–27, next-consumer readiness.
   [`ROADMAP-2026-08.md`](ROADMAP-2026-08.md) — shipped wave 1–2 (increments 1–15, status ☑).
 - [`midmem-knowledge-routing-design.md`](midmem-knowledge-routing-design.md) ·
   [`hermes-vs-opencode-harness-comparison.md`](hermes-vs-opencode-harness-comparison.md) —
