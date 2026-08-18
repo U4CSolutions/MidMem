@@ -37,7 +37,7 @@ we do *not* yet have, ranked by evidence strength:
 | Snapshot restore/rollback with index rebuild | ChronoMem (2607.27773) | partial (export #8 only) |
 | Procedure-candidate detection (episode → procedure candidate → skill, deterministic) | Externalization (2604.08224), AMD (2608.07169) | not started — low |
 
-## Increment candidates (16–27) — sequenced, same discipline as 1–15
+## Increment candidates (16–28) — sequenced, same discipline as 1–15
 
 | # | Increment | Driver | Principle served |
 |---|---|---|---|
@@ -53,8 +53,9 @@ we do *not* yet have, ranked by evidence strength:
 | 25 | **Multi-hop associative expansion behind the gate** — when the full pass still fails `evidenceSufficient()`, walk work-memory edges ≤2 hops from the anchors, re-check, then emit the #19 verdict if still short | RippleMem (2608.13334) | #1 — distributed evidence recovered |
 | 26 | **Snapshot restore + index rebuild** — `import_knowledge` from the #8 JSONL snapshot, rebuild FTS + vectors, refuse on schema-version mismatch; NL rollback explicitly out | ChronoMem (2607.27773) | #1, #3 — reversible memory |
 | 27 | **Procedure-candidate detection** — N successful `task_attempt` events sharing task label + tool signature → suggested `record_pattern`; promotion to a skill artifact stays consumer-side | Externalization (2604.08224), AMD (2608.07169) | #2 — procedures leave memory |
+| 28 | **Idempotent `prospective_add`** — a pending intent with the same (scope, intent, trigger, context) is returned, not duplicated; `prospective_due` groups by intent. Driver: 2026-08-18 incident — a consumer with per-DB dedupe re-added the same intent 44× and the operator got a "20 overdue" report | Agent Console incident 2026-08-18 | #1, #2 — a memory layer must be safe against naive consumers |
 
-Sequencing note (2026-08-17 digest): #23 first (small, operational), then #17/#19 with #25 folded in, #24, #26; #27 last.
+Sequencing note (2026-08-17 digest, amended 08-18): #23 and #28 first (small, operational), then #17/#19 with #25 folded in, #24, #26; #27 last.
 
 Non-goals carry over unchanged from wave 1–2: no LLM in verifier/tagger paths, no auto-mutation
 on conflict, no external deps, wiki stays a projection, no trigger execution in MidMem, no LLM-driven schema evolution or natural-language rollback, no subject-predicate-value triple claims (grounded text stays).
