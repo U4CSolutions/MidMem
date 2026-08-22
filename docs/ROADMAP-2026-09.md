@@ -37,7 +37,7 @@ we do *not* yet have, ranked by evidence strength:
 | Snapshot restore/rollback with index rebuild | ChronoMem (2607.27773) | partial (export #8 only) |
 | Procedure-candidate detection (episode → procedure candidate → skill, deterministic) | Externalization (2604.08224), AMD (2608.07169) | not started — low |
 
-## Increment candidates (16–28) — sequenced, same discipline as 1–15
+## Increment candidates (16–31) — sequenced, same discipline as 1–15
 
 | # | Increment | Driver | Principle served |
 |---|---|---|---|
@@ -54,8 +54,13 @@ we do *not* yet have, ranked by evidence strength:
 | 26 | **Snapshot restore + index rebuild** — `import_knowledge` from the #8 JSONL snapshot, rebuild FTS + vectors, refuse on schema-version mismatch; NL rollback explicitly out | ChronoMem (2607.27773) | #1, #3 — reversible memory |
 | 27 | **Procedure-candidate detection** — N successful `task_attempt` events sharing task label + tool signature → suggested `record_pattern`; promotion to a skill artifact stays consumer-side | Externalization (2604.08224), AMD (2608.07169) | #2 — procedures leave memory |
 | 28 | **Idempotent `prospective_add`** — a pending intent with the same (scope, intent, trigger, context) is returned, not duplicated; `prospective_due` groups by intent. Driver: 2026-08-18 incident — a consumer with per-DB dedupe re-added the same intent 44× and the operator got a "20 overdue" report | Agent Console incident 2026-08-18 | #1, #2 — a memory layer must be safe against naive consumers |
+| 29 | **Compact claims projection** — `claims` list results return content+status+id, not full provenance/metadata blobs, and/or a lower default limit. Driver: 2026-08-21 sweep overflow — six bare ~36KB `claims` calls (681 active claims, default limit 50) overflowed a 120K-context consumer twice | research-sweep incident 2026-08-21 | #1, #2 — a memory layer must be safe against naive consumers |
+| 30 | **Phase-aware retrieval profiles** — consumer passes a task phase (`explore`/`refine`); deterministic lane + `mem_function` weighting shifts: semantic/reference material early, episodic outcomes + dead-ends + procedural lessons during refinement. Builds on #4 (function axis), composes with #17 | AVO (2603.24517) §3.2 phase-shifted consultation, empirically confirmed across its 7-day trajectory (v1–20 structural from KB refs, v21–40 feedback-driven tuning) | #1 — recall matched to the phase of the work |
+| 31 | **Structured outcome metrics on work events** — optional deterministic `metrics` object ({name→number}) on `record_work`, persisted in `provenance.work`, with a per-task/project trend query; today `outcome` is prose-only (verified in `workmemory.mjs`, 2026-08-22) | AVO score-vector `f` — a scored attempt lineage is what made its unattended 7-day run steerable; no LLM anywhere in the path | #1, #2 — outcomes as data, consumer-agnostic |
 
-Sequencing note (2026-08-17 digest, amended 08-18): #23 and #28 first (small, operational), then #17/#19 with #25 folded in, #24, #26; #27 last.
+Sequencing note (2026-08-17 digest, amended 08-18): #23 and #28 first (small, operational), then #17/#19 with #25 folded in, #24, #26; #27 last. Amended 08-22: #29 joins the small-operational pair; #30/#31 rank immediately after #17/#19 (same surfaces).
+
+2026-08-22 deep-research addition (AVO, arXiv:2603.24517 + NVIDIA dev blog 2026-08-21): #30–31 added above. AVO also independently **strengthens the drivers for #17** (its lineage consultation = known failures + procedures assembled at decision time) **and #18** (its `P_t` is exactly a per-project attempt lineage). Beyond the increments, AVO validates the shipped design: curated KB + deterministic grounding-before-persist + usage-earned promotion is the knowledge leg of its winning pattern, and its committed-lineage vs internal-trajectory split mirrors the tier/function design. Its supervisor stays a *harness* concern (non-goal here: no trigger execution in MidMem). Full record: vault `OpenClaw/research/2026-08-22-avo-deep-research.md`.
 
 Non-goals carry over unchanged from wave 1–2: no LLM in verifier/tagger paths, no auto-mutation
 on conflict, no external deps, wiki stays a projection, no trigger execution in MidMem, no LLM-driven schema evolution or natural-language rollback, no subject-predicate-value triple claims (grounded text stays).
