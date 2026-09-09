@@ -333,6 +333,37 @@ export class Orchestrator {
   /** Resolve an intent: completed | cancelled (archives the entry, keeps the history). */
   resolveProspective(id, outcome) { return resolveProspective(this, id, outcome); }
 
+  /**
+   * Fallback re-embed (roadmap 2026-09 #23, re-embed half). While the embedder is down, every
+   * write silently stores a deterministic hash vector (`model = fallback-hash-<dim>`) — the entry
+   * is stored and lexically searchable, but the vector lane is blind to it. Re-ingest cannot
+   * repair that (hash-dedup skips the unchanged file; work events have no file), so this swaps
+   * the placeholder vectors for real ones in place, oldest first, bounded by `limit`.
+   * Self-gating: the first embed is a probe — if the embedder is still offline nothing is
+   * touched; if it drops mid-run the pass stops at that entry (never writes a fallback over a
+   * fallback and calls it repaired). `since` narrows to vectors created at/after an ISO time.
+   */
+  async reembedFallback({ limit = 200, since = null, dryRun = false } = {}) {
+    const conds = ["v.model LIKE 'fallback%'", "e.status = 'active'"];
+    const params = [];
+    if (since) { conds.push('v.created_at >= ?'); params.push(since); }
+    const rows = this.db.prepare(`SELECT v.entry_id id, e.content, v.created_at FROM vectors v JOIN entries e ON e.id = v.entry_id
+      WHERE ${conds.join(' AND ')} ORDER BY v.created_at LIMIT ?`).all(...params, Math.max(1, limit));
+    const total = this.db.prepare(`SELECT COUNT(*) c FROM vectors v JOIN entries e ON e.id = v.entry_id WHERE ${conds.join(' AND ')}`).get(...params).c;
+    if (dryRun || !rows.length) return { success: true, dryRun, candidates: total, batch: rows.length, reembedded: 0 };
+    let reembedded = 0, stoppedAt = null, model = null;
+    for (const r of rows) {
+      const { vector, model: m, mode } = await this.embedder.embed(r.content);
+      if (mode !== 'lmstudio') { stoppedAt = r.id; break; } // probe on the first row; box-down mid-run on later ones
+      await this.memory.upsertVector(r.id, vector, m, mode); // dim guard still applies
+      model = m; reembedded++;
+    }
+    const success = reembedded > 0 || !stoppedAt;
+    const out = { success, candidates: total, batch: rows.length, reembedded, remaining: total - reembedded, model, stoppedAt, reason: stoppedAt && !reembedded ? 'embedder-offline' : stoppedAt ? 'embedder-dropped-mid-run' : null };
+    this.db.logOp('reembed', out);
+    return out;
+  }
+
   /** Deterministic knowledge snapshot (JSONL, stable bytes) for git revision history. */
   exportKnowledge() { const r = exportKnowledge(this.db, this.cfg); this.db.logOp('export', { rows: r.rows }); return r; }
 

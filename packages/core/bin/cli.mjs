@@ -49,6 +49,7 @@ try {
     case 'refresh-concepts': out(await o.refreshConcepts({ maxEmbedPerPass: flags.max != null ? Number(flags.max) : undefined })); break;
     case 'packs': out(o.listPacks()); break;
     case 'export': out(o.exportKnowledge()); break;
+    case 'reembed': out(await o.reembedFallback({ limit: Number(flags.limit) || 200, since: typeof flags.since === 'string' ? flags.since : null, dryRun: !!flags.dryRun })); break;
     case 'prospective': {
       const sub = pos[0];
       if (sub === 'add') out(await o.recordProspective({ intent: flags.intent || pos.slice(1).join(' '), trigger: { type: flags.on ? 'date' : 'event', value: flags.on || flags.event }, context: flags.context, scope: flags.scope, ...wproj() }));
@@ -59,7 +60,7 @@ try {
     }
     case 'pattern': out(await o.recordPattern({ type: flags.type || pos[0], title: flags.title || pos.slice(flags.type ? 0 : 1).join(' '), context: flags.context, problem: flags.problem, solution: flags.solution, outcome: flags.outcome, evidence: typeof flags.evidence === 'string' ? flags.evidence.split(';').filter(Boolean) : [], scope: flags.scope, ...wproj() })); break;
     default:
-      out('Usage: ocmw <init|ingest <path>|remember <text>|query <text>|recall <id>|recall-check <message>|work --kind <type>|tasks|close-tasks [labels…]|brief|lint|project|promote <id> <tier>|maintain|bridge|handoff <task>> [--kind task_attempt|source_used|dead_end|correction|artifact|decision --task --outcome --status --source --artifact --related --type --title --tier --tiers --scope --scopes --limit --minScore --maxTokens --graph --curated --force --profile local|frontier --project <slug> --projects a,b --all-projects]\n  project axis: --project tags writes (default MIDMEM_PROJECT) and filters reads to project + global; --projects a,b filters on several; --all-projects lifts the default\n  close-tasks selectors (at least one required): [labels…] | --task <label> | --match <regex> | --opaque | --olderThanDays <n>; preview with --dryRun\n  forget-nodes (HARD delete, edges cascade) selectors: [node ids…] | --match <label regex> | --opaque; --types narrows; preview with --dryRun');
+      out('Usage: ocmw <init|ingest <path>|remember <text>|query <text>|recall <id>|recall-check <message>|work --kind <type>|tasks|close-tasks [labels…]|brief|lint|project|promote <id> <tier>|maintain|bridge|reembed [--since <ISO> --limit <n> --dryRun]|handoff <task>> [--kind task_attempt|source_used|dead_end|correction|artifact|decision --task --outcome --status --source --artifact --related --type --title --tier --tiers --scope --scopes --limit --minScore --maxTokens --graph --curated --force --profile local|frontier --project <slug> --projects a,b --all-projects]\n  project axis: --project tags writes (default MIDMEM_PROJECT) and filters reads to project + global; --projects a,b filters on several; --all-projects lifts the default\n  close-tasks selectors (at least one required): [labels…] | --task <label> | --match <regex> | --opaque | --olderThanDays <n>; preview with --dryRun\n  forget-nodes (HARD delete, edges cascade) selectors: [node ids…] | --match <label regex> | --opaque; --types narrows; preview with --dryRun');
   }
 } catch (e) { console.error('ERROR:', e.message); process.exitCode = 1; }
 finally { o.close(); }

@@ -794,6 +794,29 @@ try {
     ok(c.bridgeRecursive === false && c.project === 'envproj', 'MIDMEM_BRIDGE_RECURSIVE=0 + MIDMEM_PROJECT honored');
   } finally { delete process.env.MIDMEM_BRIDGE_SOURCES; delete process.env.MIDMEM_BRIDGE_RECURSIVE; delete process.env.MIDMEM_PROJECT; }
 
+  // 34. Fallback re-embed (roadmap 2026-09 #23, re-embed half): offline → self-gates, touches
+  //     nothing; with a live embedder (stubbed) → fallback vectors are replaced in place, bounded.
+  const fbBefore = (await o.memory.vectorHealth()).fallbackVectors;
+  const dr = await o.reembedFallback({ dryRun: true });
+  ok(dr.dryRun && dr.candidates > 0 && dr.reembedded === 0, `reembed dryRun counts ${dr.candidates} fallback candidates`);
+  const off = await o.reembedFallback({ limit: 5 });
+  ok(off.success === false && off.reason === 'embedder-offline' && off.reembedded === 0, 'offline embedder → nothing touched, reason embedder-offline');
+  ok((await o.memory.vectorHealth()).fallbackVectors === fbBefore, 'fallback count unchanged after offline attempt');
+  const realEmbed = o.embedder.embed.bind(o.embedder);
+  let calls = 0;
+  o.embedder.embed = async (t) => { calls++; return { vector: new Array(1024).fill(0).map((_, i) => (i === calls % 1024 ? 1 : 0)), model: 'stub-embed', mode: 'lmstudio' }; };
+  try {
+    const on = await o.reembedFallback({ limit: 3 });
+    ok(on.success && on.reembedded === 3 && on.model === 'stub-embed' && on.remaining === dr.candidates - 3, `live embedder → ${on.reembedded} re-embedded in place, ${on.remaining} remaining`);
+    ok((await o.memory.vectorHealth()).fallbackVectors === fbBefore - 3, 'fallback count dropped by the batch size');
+    ok(o.db.prepare("SELECT COUNT(*) c FROM vectors WHERE model='stub-embed'").get().c === 3, 'vectors rows carry the real model name');
+    // Drop mid-run: first row embeds, second falls back → stops, reports partial.
+    let n = 0;
+    o.embedder.embed = async (t) => (++n === 1 ? { vector: new Array(1024).fill(0.1), model: 'stub-embed', mode: 'lmstudio' } : realEmbed(t));
+    const mid = await o.reembedFallback({ limit: 4 });
+    ok(mid.reembedded === 1 && mid.reason === 'embedder-dropped-mid-run' && mid.stoppedAt, 'embedder dropping mid-run stops the pass and reports where');
+  } finally { o.embedder.embed = realEmbed; }
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;
