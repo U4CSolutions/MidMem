@@ -215,6 +215,7 @@ Two skills front the store; pick by how you're driving the stack:
 | **`midmem-orchestrator`** | **this repo** (`skills/`) | same loop, MidMem-specialized | bulk knowledge curation: batch ingest, re-ground, dedup, vault verify |
 | **`midmem-ingest-review`** | **this repo** (`skills/`) | a frontier model | ingest + audit knowledge quality and **cross-check OpenClaw vs Hermes understanding** (confabulation/drift/contradiction/scope) |
 | **`midmem-record`** | **this repo** (`skills/`) | a frontier model (Claude Code) | durable capture: distilled lesson → wisdom tier + commit + the `Stop`-hook harness-guaranteed recording pattern |
+| **`midmem-research-tracker`** | **this repo** (`skills/`) | a frontier model (Claude Code) | keep [`RESEARCH.md`](RESEARCH.md) current from weekly research ingestions: paper → finding → feasibility verdict (adopt now / backlog / validation / not adopting) tied to the roadmap |
 
 - **OpenClaw only (Option A):** use **`midmem-ops`** — the OpenClaw agent operates memory itself
   (recall/store/ingest); no Hermes needed.

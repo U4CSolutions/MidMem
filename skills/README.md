@@ -13,6 +13,7 @@ exposes — no extra dependencies.
 | **`midmem-ingest`** | Verified knowledge intake: stage into an allowed root, ingest, read the deterministic grounding numbers, recall-check, record. Never blind-ingest. |
 | **`midmem-pattern-capture`** | Capture a reusable coding/workflow pattern into the store via capture packs (`recordPattern`), so it becomes recallable procedure memory. |
 | **`midmem-research-digest`** | Digest a recurring research report end-to-end: `midmem-ingest` intake → grounded gap-analysis of every recommendation **against the actual core source** → operator digest → roadmap deltas in `docs/ROADMAP-*.md`. Reports grade nothing by themselves. |
+| **`midmem-research-tracker`** | Keep `RESEARCH.md` current from the research ingestions already in the store: per paper — Paper (cite + link) · Finding · feasibility rubric → **ADOPT NOW / BACKLOG (roadmap #) / VALIDATION / NOT ADOPTING**. Intake is deterministic (`scripts/research-sources.mjs` + the ledger's `evaluated-through` marker). Runs after each `midmem-research-digest`. |
 
 They compose across the lifecycle: **`midmem-dev`** changes the core → **`midmem-orchestrator`** runs
 bulk curation with **`midmem-ingest-review`** as its per-card QA gate → **`midmem-record`** makes the
@@ -24,7 +25,7 @@ faithful?"
 Claude Code discovers skills in `~/.claude/skills/`. Symlink the library skills in (keeps the
 canonical files here in the repo):
 ```bash
-for s in midmem-dev midmem-orchestrator midmem-ingest-review midmem-record midmem-ingest midmem-pattern-capture midmem-research-digest; do
+for s in midmem-dev midmem-orchestrator midmem-ingest-review midmem-record midmem-ingest midmem-pattern-capture midmem-research-digest midmem-research-tracker; do
   ln -sfn "$(pwd)/skills/$s" "$HOME/.claude/skills/$s"
 done
 ```
