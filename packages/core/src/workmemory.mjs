@@ -97,7 +97,7 @@ export function categorizeIngest({ type, content = '', title = '' } = {}, extraR
  * @param {import('./orchestrator.mjs').Orchestrator} o
  * @param {{kind:string, task?:string, content?:string, outcome?:string, status?:string,
  *          source?:string, artifact?:string, profile?:string, related?:string,
- *          concepts?:Array<{name:string,type?:string}>, scope?:string}} ev
+ *          concepts?:Array<{name:string,type?:string}>, scope?:string, project?:string|null}} ev
  */
 export async function recordWorkEvent(o, ev = {}) {
   const spec = WORK_EVENT_TYPES[ev.kind];
@@ -114,7 +114,8 @@ export async function recordWorkEvent(o, ev = {}) {
   const content = parts.join(' — ');
 
   // Stored through the governed storeMemory path: it embeds + logs + maintains like any entry.
-  const res = await o.storeMemory({ content, type: ev.kind, tier: spec.tier, scope, concepts: ev.concepts });
+  // `project` undefined → storeMemory's env default (MIDMEM_PROJECT); explicit null → global.
+  const res = await o.storeMemory({ content, type: ev.kind, tier: spec.tier, scope, concepts: ev.concepts, ...(ev.project !== undefined ? { project: ev.project } : {}) });
   // Tag provenance with the category + structured work fields (storeMemory leaves provenance null
   // when no source; we write the full object — no reliance on SQLite JSON1).
   const prov = {
@@ -198,10 +199,10 @@ export function listOpenTasks(o) {
  * governance, logging and vault-dirty behave exactly like a single forget.
  *
  * @param {import('./orchestrator.mjs').Orchestrator} o
- * @param {{ids?:string[], match?:string, opaque?:boolean, scope?:string, types?:string[],
+ * @param {{ids?:string[], match?:string, opaque?:boolean, scope?:string, project?:string, types?:string[],
  *          olderThanDays?:number, dryRun?:boolean}} [opts]
  */
-export async function forgetEntries(o, { ids = [], match = null, opaque = false, scope = null, types = [], olderThanDays = null, dryRun = false } = {}) {
+export async function forgetEntries(o, { ids = [], match = null, opaque = false, scope = null, project = null, types = [], olderThanDays = null, dryRun = false } = {}) {
   const wanted = new Set(ids.map((s) => String(s).trim()).filter(Boolean));
   if (!wanted.size && !match && !opaque) {
     throw new Error('forgetEntries requires a content selector: ids, match, or opaque (scope/types/olderThanDays only narrow)');
@@ -210,9 +211,10 @@ export async function forgetEntries(o, { ids = [], match = null, opaque = false,
   const cutoff = olderThanDays == null ? null : Date.now() - olderThanDays * 864e5;
   const OPAQUE_CONTENT = /^\[(?:task_attempt|source_used|dead_end|correction|artifact|decision)\]\s+(?:\S+\s+—\s+\[IMPORTANT: You are running as|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b|\d{8}[_-]\d{6})/i;
 
-  const rows = o.db.prepare("SELECT id, scope, type, content, created_at FROM entries WHERE status='active'").all();
+  const rows = o.db.prepare("SELECT id, scope, project, type, content, created_at FROM entries WHERE status='active'").all();
   const selected = rows.filter((r) => {
     if (scope && r.scope !== scope) return false;
+    if (project && r.project !== project) return false; // narrows only, like scope
     if (types.length && !types.includes(r.type)) return false;
     if (cutoff != null && Date.parse(r.created_at) >= cutoff) return false;
     return wanted.has(r.id) || (re && re.test(r.content || '')) || (opaque && OPAQUE_CONTENT.test(r.content || ''));
@@ -221,7 +223,7 @@ export async function forgetEntries(o, { ids = [], match = null, opaque = false,
   let forgotten = 0;
   if (!dryRun) {
     for (const r of selected) { const res = await o.forget(r.id, { soft: true }); if (res.success) forgotten++; }
-    o.db.logOp('forget-entries', { forgotten, match: match || null, opaque, scope, types: types.join(',') || null });
+    o.db.logOp('forget-entries', { forgotten, match: match || null, opaque, scope, project, types: types.join(',') || null });
   }
   return { matched: selected.length, forgotten, dryRun, sample: selected.slice(0, 5).map((r) => r.id) };
 }
@@ -266,7 +268,7 @@ export function forgetNodes(o, { ids = [], match = null, opaque = false, types =
  * record for "when" must stay outside the memory layer. `dueProspective` is a
  * deterministic read surface a scheduler/hook polls; nothing here acts.
  */
-export async function recordProspective(o, { intent, trigger = {}, context, scope, expiresWhen = ['completed', 'cancelled'] } = {}) {
+export async function recordProspective(o, { intent, trigger = {}, context, scope, project, expiresWhen = ['completed', 'cancelled'] } = {}) {
   if (!intent) throw new Error('recordProspective requires an intent');
   if (trigger.type === 'date') {
     if (Number.isNaN(Date.parse(trigger.value))) throw new Error(`bad date trigger: ${trigger.value}`);
@@ -275,7 +277,7 @@ export async function recordProspective(o, { intent, trigger = {}, context, scop
   } else throw new Error(`unknown trigger type: ${trigger.type} (expected date|event)`);
 
   const content = `[prospective] ${intent} — trigger: ${trigger.type}=${trigger.value}${context ? ` — ${context}` : ''}`;
-  const res = await o.storeMemory({ content, type: 'prospective', tier: 'memory', scope });
+  const res = await o.storeMemory({ content, type: 'prospective', tier: 'memory', scope, ...(project !== undefined ? { project } : {}) });
   const prov = {
     category: 'prospective', recordedAt: nowISO(),
     prospective: { intent, trigger, status: 'pending', context: context ?? null, expiresWhen },
@@ -293,7 +295,7 @@ export async function recordProspective(o, { intent, trigger = {}, context, scop
  *  `event` when one is passed. Deterministic — `now` is a parameter, never Date.now() implicitly
  *  hidden from the caller's control. */
 export function dueProspective(o, { now = nowISO(), event = null } = {}) {
-  const rows = o.db.prepare("SELECT id, provenance, scope, created_at FROM entries WHERE type='prospective' AND status='active'").all();
+  const rows = o.db.prepare("SELECT id, provenance, scope, project, created_at FROM entries WHERE type='prospective' AND status='active'").all();
   const due = [];
   for (const r of rows) {
     let p; try { p = JSON.parse(r.provenance || '{}').prospective; } catch { continue; }
@@ -301,7 +303,7 @@ export function dueProspective(o, { now = nowISO(), event = null } = {}) {
     const t = p.trigger || {};
     const fired = (t.type === 'date' && Date.parse(t.value) <= Date.parse(now))
       || (t.type === 'event' && event != null && t.value === event);
-    if (fired) due.push({ id: r.id, intent: p.intent, trigger: t, context: p.context, scope: r.scope, created_at: r.created_at });
+    if (fired) due.push({ id: r.id, intent: p.intent, trigger: t, context: p.context, scope: r.scope, project: r.project ?? null, created_at: r.created_at });
   }
   return due.sort((a, b) => (a.trigger.value || '').localeCompare(b.trigger.value || ''));
 }

@@ -11,7 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 5;
 
 export class StateDB {
   /** @param {string} dbPath */
@@ -135,6 +135,10 @@ export class StateDB {
     // arXiv 2607.25380): mem_function (working|episodic|semantic|procedural|prospective) is
     // orthogonal to the persistence tier. Nullable: legacy rows resolve via functionForType.
     this.#ensureColumn('entries', 'mem_function', 'TEXT');
+    // v5 (roadmap 2026-09 #18): project axis — which body of work an entry belongs to, orthogonal
+    // to scope (access). NULL = global. Reads return project + global (see projectaxis.mjs).
+    this.#ensureColumn('entries', 'project', 'TEXT');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_entries_project ON entries(project)');
     // v3: backfill the trigram index once for pre-existing rows (triggers cover new rows).
     if (!this.db.prepare("SELECT 1 FROM meta WHERE key='trigram_built'").get()) {
       if (this.db.prepare('SELECT COUNT(*) c FROM entries').get().c > 0)

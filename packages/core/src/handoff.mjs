@@ -26,12 +26,14 @@ const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim();
 
 /**
  * @param {import('./orchestrator.mjs').Orchestrator} orchestrator
- * @param {{task:string, profile?:'local'|'frontier', scopes?:string[]|null, tiers?:string[]|null}} opts
+ * @param {{task:string, profile?:'local'|'frontier', scopes?:string[]|null, tiers?:string[]|null, projects?:string[]|null, project?:string}} opts
  * @returns {Promise<{profile:string, task:string, count:number, tokensEstimate:number, brief:string}>}
  */
-export async function handoffBrief(orchestrator, { task, profile = 'local', scopes = ['openclaw', 'hermes', 'shared'], tiers = null } = {}) {
+export async function handoffBrief(orchestrator, { task, profile = 'local', scopes = ['openclaw', 'hermes', 'shared'], tiers = null, projects, project } = {}) {
   const p = HANDOFF_PROFILES[profile] || HANDOFF_PROFILES.local;
-  const r = await orchestrator.query(task, { scopes, tiers, limit: p.limit, maxTokens: p.maxTokens });
+  // Project axis (#18): explicit projects/project pass through; omitted → the query's own default.
+  const pf = projects !== undefined ? { projects } : project !== undefined ? { project } : {};
+  const r = await orchestrator.query(task, { scopes, tiers, limit: p.limit, maxTokens: p.maxTokens, ...pf });
   const brief = format(p, task, r.results);
   return { profile: HANDOFF_PROFILES[profile] ? profile : 'local', task, count: r.results.length, tokensEstimate: Math.ceil(brief.length / 4), brief };
 }

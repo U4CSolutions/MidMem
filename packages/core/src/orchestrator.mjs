@@ -26,6 +26,7 @@ import { normalizeAuthority, clampAuthority } from './authority.mjs';
 import { checkConsistency } from './consistency.mjs';
 import { runExpectedQueryProbes } from './evalprobes.mjs';
 import { genId, sha12, nowISO } from './util.mjs';
+import { normalizeProject, resolveProjects } from './projectaxis.mjs';
 
 export class Orchestrator {
   constructor(overrides = {}) {
@@ -53,12 +54,13 @@ export class Orchestrator {
   async recordPattern(rec = {}) { return recordPattern(this, rec); }
 
   /** Ingest a raw source: extract → store (memory tier) → embed → graph → claims → verify. */
-  async ingest({ path, type = 'note', title, metadata = {}, curated = false, scope = this.cfg.agentScope, authority }) {
+  async ingest({ path, type = 'note', title, metadata = {}, curated = false, scope = this.cfg.agentScope, authority, project = this.cfg.project }) {
     // Authority assigned at origin (roadmap #10): explicit label wins; curation implies operator;
     // otherwise ingested material is 'doc'. Unknown labels are rejected, not silently mapped.
     if (authority !== undefined && !normalizeAuthority(authority)) throw new Error(`unknown authority: ${authority} (expected operator|stack|doc|web)`);
     const auth = normalizeAuthority(authority) || (curated ? 'operator' : 'doc');
-    const r = await governed(this.gov, 'ingest', { path, type, scope, curated, authority: auth }, async () => {
+    const proj = normalizeProject(project); // project axis (#18): null = global
+    const r = await governed(this.gov, 'ingest', { path, type, scope, curated, authority: auth, project: proj }, async () => {
       const text = await fs.readFile(path, 'utf8');
       const hash = sha12(text);
       // Hash-dedup: re-ingesting an unchanged file is a no-op (makes the bridge/cron idempotent).
@@ -97,7 +99,7 @@ export class Orchestrator {
         for (const id of superseded) sup.run(nowISO(), id);
         this.db.prepare('INSERT INTO sources(id,path,type,title,hash,ingested_at,metadata) VALUES(?,?,?,?,?,?,?)')
           .run(sourceId, path, type, title || null, hash, nowISO(), JSON.stringify(metadata));
-        return this.memory.store({ content: ex.summary, type: 'ingest', tier: 'memory', scope, sourceId, provenance: prov, concepts: gc.grounded });
+        return this.memory.store({ content: ex.summary, type: 'ingest', tier: 'memory', scope, sourceId, provenance: prov, concepts: gc.grounded, project: proj });
       });
       await this.memory.upsertVector(stored.id, vector, model, mode);
 
@@ -116,14 +118,15 @@ export class Orchestrator {
   }
 
   /** The MCP `remember` op — store a memory directly. */
-  async storeMemory({ content, type = 'insight', tier = 'memory', scope = this.cfg.agentScope, source, concepts, curated = false, memFunction = null, authority, parentAuthority = null }) {
+  async storeMemory({ content, type = 'insight', tier = 'memory', scope = this.cfg.agentScope, source, concepts, curated = false, memFunction = null, authority, parentAuthority = null, project = this.cfg.project }) {
     if (authority !== undefined && !normalizeAuthority(authority)) throw new Error(`unknown authority: ${authority} (expected operator|stack|doc|web)`);
     // Direct agent writes are 'stack' by default; curation implies operator; a derived write
     // passes parentAuthority and is CLAMPED to it — consolidation can never raise authority.
     const auth = clampAuthority(normalizeAuthority(authority) || (curated ? 'operator' : 'stack'), parentAuthority);
-    const r = await governed(this.gov, 'store', { tier, scope, curated, authority: auth }, async () => {
+    const proj = normalizeProject(project); // project axis (#18): null = global
+    const r = await governed(this.gov, 'store', { tier, scope, curated, authority: auth, project: proj }, async () => {
       const prov = { authority: auth, ...(source ? { originalSource: source.path, extractedAt: nowISO(), chain: [{ step: 'remember', source: source.path }] } : {}) };
-      const stored = this.db.tx(() => this.memory.store({ content, type, tier, scope, provenance: prov, concepts, memFunction }));
+      const stored = this.db.tx(() => this.memory.store({ content, type, tier, scope, provenance: prov, concepts, memFunction, project: proj }));
       const { vector, model, mode } = await this.embedder.embed(content);
       await this.memory.upsertVector(stored.id, vector, model, mode);
       if (concepts) for (const c of concepts) this.graph.upsertNode({ type: c.type || 'concept', label: c.name, source: 'remember' });
@@ -137,13 +140,14 @@ export class Orchestrator {
 
   async query(question, opts = {}) {
     const scopes = opts.scopes || this.#defaultScopes();
+    const projects = resolveProjects(opts, this.#defaultProjects()); // project + global; null = all
     // Progressive by default (roadmap #11): lexical-first with a sufficiency gate; deep:true
     // (or progressive.enabled=false) runs the full hybrid pipeline unconditionally.
-    const { results, sufficiency } = await progressiveSearch(this.db, this.memory, this.embedder, question, { ...opts, scopes });
+    const { results, sufficiency } = await progressiveSearch(this.db, this.memory, this.embedder, question, { ...opts, scopes, projects });
     this.memory.recordRetrieval(results.map((r) => r.id)); // usage signal feeds trust/decay (+ lease renewal)
     const graphContext = opts.includeGraphContext ? this.#graphContext(question) : null;
     await this.#maybeMaintain();
-    return { query: question, results, sufficiency, scopes, graphContext, tiers: opts.tiers || this.memory.tierNames, timestamp: nowISO() };
+    return { query: question, results, sufficiency, scopes, projects, graphContext, tiers: opts.tiers || this.memory.tierNames, timestamp: nowISO() };
   }
 
   /**
@@ -162,7 +166,8 @@ export class Orchestrator {
     const maxTokens = opts.maxTokens ?? c.maxTokens ?? 600;
     const maxItems = opts.maxItems ?? c.maxItems ?? 4;
     const scopes = opts.scopes || this.#defaultScopes();
-    const results = await hybridSearch(this.db, this.memory, this.embedder, message, { scopes, maxTokens, limit: maxItems });
+    const projects = resolveProjects(opts, this.#defaultProjects());
+    const results = await hybridSearch(this.db, this.memory, this.embedder, message, { scopes, projects, maxTokens, limit: maxItems });
     const passing = results.filter((r) => r.score >= minScore);
     const topScore = results[0]?.score ?? null;
     if (!passing.length) { this.db.logOp('proactive-recall', { injected: 0, topScore }); return { inject: null, used: [], topScore }; }
@@ -363,12 +368,16 @@ export class Orchestrator {
   /** Reads default to this agent's own scope plus the shared commons. */
   #defaultScopes() { return [...new Set([this.cfg.agentScope, 'shared'])]; }
 
+  /** Reads default to this process's project plus global (null = no project set → everything). */
+  #defaultProjects() { return this.cfg.project ? [this.cfg.project] : null; }
+
   recall(id) { return this.memory.get(id); }
 
   async brief() {
     const g = this.graph.getGraph();
     return {
       tiers: this.memory.stats(),
+      projects: this.memory.projectStats(),
       claims: this.claims.stats(),
       graph: { nodes: g.nodes.length, edges: g.edges.length },
       vectors: await this.memory.vectorHealth(),

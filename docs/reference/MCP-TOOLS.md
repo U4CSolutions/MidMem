@@ -16,16 +16,18 @@ Compile a source file into the knowledge store (extract → tier-store → embed
 | `scope` | string |  |  |
 | `curated` | boolean |  |  |
 | `authority` | string |  | origin trust: operator\|stack\|doc\|web (default doc; operator requires curated:true; never raised downstream) |
+| `project` | string |  | project slug this entry belongs to (default: this process's MIDMEM_PROJECT; omit/empty = global) |
 
 ## `query`
 
-Hybrid (lexical+vector) search of the knowledge store with provenance. Defaults to this agent's scope + shared; pass scopes to override.
+Hybrid (lexical+vector) search of the knowledge store with provenance. Defaults to this agent's scope + shared (and this process's project + global); pass scopes/projects to override.
 
 | arg | type | required | notes |
 |---|---|---|---|
 | `query` | string | yes |  |
 | `tiers` | array<string> |  |  |
 | `scopes` | array<string> |  |  |
+| `projects` | array<string> |  | project filter: results from these projects PLUS global entries (default: this process's MIDMEM_PROJECT + global; pass [] for all projects) |
 | `functions` | array<string> |  | memory-function filter: working\|episodic\|semantic\|procedural\|prospective |
 | `limit` | number |  |  |
 | `maxTokens` | number |  |  |
@@ -52,10 +54,11 @@ Build a memory brief to inject into an agent hand-off (e.g. before spawning Herm
 | `profile` | string |  |  |
 | `scopes` | array<string> |  |  |
 | `tiers` | array<string> |  |  |
+| `projects` | array<string> |  | project filter: results from these projects PLUS global entries (default: this process's MIDMEM_PROJECT + global; pass [] for all projects) |
 
 ## `remember`
 
-Store a memory entry (tier default: memory; wisdom requires curated:true). scope defaults to this agent; pass "shared" to publish to the commons.
+Store a memory entry (tier default: memory; wisdom requires curated:true). scope defaults to this agent; pass "shared" to publish to the commons. project tags the body of work (default MIDMEM_PROJECT; wisdom promotion lifts it to global).
 
 | arg | type | required | notes |
 |---|---|---|---|
@@ -63,6 +66,7 @@ Store a memory entry (tier default: memory; wisdom requires curated:true). scope
 | `type` | string |  |  |
 | `tier` | string |  |  |
 | `scope` | string |  |  |
+| `project` | string |  | project slug this entry belongs to (default: this process's MIDMEM_PROJECT; omit/empty = global) |
 | `curated` | boolean |  |  |
 | `memFunction` | string |  | memory function axis: working\|episodic\|semantic\|procedural\|prospective (default derived from type) |
 | `authority` | string |  | origin trust: operator\|stack\|doc\|web (default stack; operator requires curated:true) |
@@ -107,6 +111,7 @@ Record a prospective-memory intent — something that must become actionable lat
 | `trigger` | object | yes |  |
 | `context` | string |  |  |
 | `scope` | string |  |  |
+| `project` | string |  | project slug this entry belongs to (default: this process's MIDMEM_PROJECT; omit/empty = global) |
 
 ## `prospective_due`
 
@@ -153,6 +158,7 @@ Record a structured domain entry via a capture-pack type (e.g. coding-patterns: 
 | `evidence` | array<string> |  |  |
 | `concepts` | array<object> |  |  |
 | `scope` | string |  |  |
+| `project` | string |  | project slug this entry belongs to (default: this process's MIDMEM_PROJECT; omit/empty = global) |
 
 ## `forget_entries`
 
@@ -164,6 +170,7 @@ Bulk soft-forget entries by selector. A CONTENT selector is REQUIRED (ids: exact
 | `match` | string |  |  |
 | `opaque` | boolean |  |  |
 | `scope` | string |  |  |
+| `project` | string |  | narrow to one project (cannot select alone) |
 | `types` | array<string> |  |  |
 | `olderThanDays` | number |  |  |
 | `dryRun` | boolean |  |  |
@@ -225,6 +232,7 @@ Trigger-less pre-turn recall: run the budgeted hybrid search on a raw user messa
 | `minScore` | number |  |  |
 | `maxTokens` | number |  |  |
 | `scopes` | array<string> |  |  |
+| `projects` | array<string> |  | project filter: results from these projects PLUS global entries (default: this process's MIDMEM_PROJECT + global; pass [] for all projects) |
 
 ## `record_work`
 
@@ -242,6 +250,7 @@ Record a work-memory event (Brain-style "memory about work"): kind = task_attemp
 | `profile` | string |  |  |
 | `related` | string |  |  |
 | `scope` | string |  |  |
+| `project` | string |  | project slug this entry belongs to (default: this process's MIDMEM_PROJECT; omit/empty = global) |
 
 ## `list_tasks`
 

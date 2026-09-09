@@ -57,6 +57,22 @@ An agent writes to its own scope or `shared`; reads default to *own + shared*. `
 admin/bridge context. Governance blocks cross-private writes. Adding a new agent requires **zero
 code** — set `MIDMEM_AGENT_SCOPE` in its registration.
 
+## Project axis — per-project memory, global lessons
+
+Orthogonal to scope: **scope** says who may read/write an entry (access), **project** says which
+body of work it belongs to (partition). `entries.project` is nullable — `NULL` means global.
+`MIDMEM_PROJECT` is a process's default: writes (`remember`, `ingest`, `record_work`,
+`prospective_add`, `record_pattern`) tag it, and reads (`query`, `proactive_recall`,
+`handoff_brief`) return *project + global* — the same shape as scope's own-plus-shared rule. A
+process with no project writes global and reads everything (the admin/bridge analog); `projects`
+on a read overrides the default, `[]`/`null` lifts it. Any scope may tag any project — access
+stays scope's job, so no governance policy changed.
+
+**Lessons climb.** Promotion into the curated-only `wisdom` tier lifts a project entry to global
+(`project → NULL`, lineage kept in `provenance.liftedFrom`): a dead end or decision that earns
+wisdom through use in one project becomes available to every project without being written twice.
+`MIDMEM_PROJECT_LIFT=0` keeps the tag on promotion.
+
 ## Source authority — trust that can't be laundered
 
 Every record carries an origin **authority**: `operator > stack > doc > web`. Claims inherit it

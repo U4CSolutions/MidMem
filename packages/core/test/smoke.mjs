@@ -704,6 +704,96 @@ try {
   const m15 = await o.maintain({ force: true });
   ok(m15.queryProbes && typeof m15.queryProbes.sampled === 'number', 'forced maintain runs the expected-query probes');
 
+  // 32. Project axis (roadmap 2026-09 #18): orthogonal to scope; reads = project + global;
+  //     env/config default tags writes; promotion into wisdom lifts the entry to global.
+  const pa = await o.storeMemory({ content: 'PROJAX kestrel beacon for alpha project', type: 'note', project: 'alpha' });
+  const pb = await o.storeMemory({ content: 'PROJAX kestrel beacon for beta project', type: 'note', project: 'beta' });
+  const pg = await o.storeMemory({ content: 'PROJAX kestrel beacon global lesson', type: 'note' });
+  ok(pa.project === 'alpha' && pb.project === 'beta' && pg.project === null, 'store returns the project tag (null = global)');
+  ok(o.recall(pa.id).project === 'alpha', 'entries.project column persisted');
+  const qAll = await o.query('PROJAX kestrel beacon', { limit: 10 });
+  ok(qAll.projects === null && ['alpha', 'beta', null].every((x) => qAll.results.some((r) => r.project === x)), 'no project set → unfiltered read returns alpha, beta and global');
+  const qA = await o.query('PROJAX kestrel beacon', { projects: ['alpha'], limit: 10 });
+  ok(qA.results.some((r) => r.id === pa.id) && qA.results.some((r) => r.id === pg.id) && !qA.results.some((r) => r.id === pb.id), 'projects:[alpha] returns alpha + global, excludes beta');
+  const qA2 = await o.query('PROJAX kestrel beacon', { project: 'alpha', limit: 10, deep: true });
+  ok(!qA2.results.some((r) => r.id === pb.id) && qA2.results.some((r) => r.id === pa.id), 'single `project` selector filters the full (vector) pipeline too');
+  const qAB = await o.query('PROJAX kestrel beacon', { projects: ['alpha', 'beta'], limit: 10 });
+  ok(qAB.results.some((r) => r.id === pb.id) && qAB.results.some((r) => r.id === pa.id), 'multi-project filter admits both');
+  let badSlug = false; try { await o.storeMemory({ content: 'x', project: 'has space' }); } catch (e) { badSlug = /bad project slug/.test(e.message); }
+  ok(badSlug, 'invalid project slug rejected');
+  const prx = await o.proactiveRecall('PROJAX kestrel beacon', { projects: ['beta'], force: true, minScore: 0 });
+  ok(prx.used.includes(pb.id) && !prx.used.includes(pa.id), 'proactiveRecall honors the project filter');
+  const wk = await o.recordWork({ kind: 'dead_end', task: 'projax-task', content: 'PROJAX trying the kestrel path failed', project: 'alpha' });
+  ok(o.recall(wk.id).project === 'alpha', 'record_work tags the project');
+  const hb = await o.handoffBrief({ task: 'PROJAX kestrel beacon', profile: 'frontier', projects: ['beta'], scopes: ['shared'] });
+  ok(/beta project/.test(hb.brief) && !/alpha project/.test(hb.brief), 'handoff brief passes the project filter through');
+  const fe = await o.forgetEntries({ match: 'PROJAX kestrel', project: 'beta', dryRun: true });
+  ok(fe.matched === 1 && fe.sample[0] === pb.id, 'forgetEntries narrows by project');
+  const b32 = await o.brief();
+  ok(Array.isArray(b32.projects) && b32.projects.some((x) => x.project === 'alpha' && x.entries >= 2), 'brief lists per-project entry counts');
+  // Promotion lift: a project entry earning wisdom becomes global with lineage.
+  const lift = await o.promote(pa.id, 'wisdom', { curated: true });
+  const lifted = o.recall(pa.id);
+  ok(lift.success && lift.liftedFrom === 'alpha' && lifted.project === null && lifted.tier === 'wisdom', 'promotion into wisdom lifts project → global');
+  ok(lifted.provenance?.liftedFrom?.project === 'alpha', 'lift keeps lineage in provenance.liftedFrom');
+  const noLift = await o.promote(pb.id, 'memory', { curated: false });
+  ok(noLift.success && o.recall(pb.id).project === 'beta', 'promotion into a non-curated tier keeps the project tag');
+  // Config default: a process with `project` set tags writes and reads project + global.
+  const op = new Orchestrator({ dbPath: path.join(tmp, 'state.db'), vaultPath: path.join(tmp, 'vault'), llmEnabled: false, sourceRoots: [tmp], autoIngest: { enabled: false, onMaintain: false }, project: 'alpha' });
+  try {
+    const pdx = await op.storeMemory({ content: 'PROJAX kestrel beacon default-tagged', type: 'note' });
+    ok(pdx.project === 'alpha', 'cfg.project (MIDMEM_PROJECT) is the write default');
+    const qd = await op.query('PROJAX kestrel beacon', { limit: 10 });
+    ok(JSON.stringify(qd.projects) === '["alpha"]' && !qd.results.some((r) => r.id === pb.id) && qd.results.some((r) => r.id === pg.id), 'cfg.project is the read default (project + global)');
+    const qd2 = await op.query('PROJAX kestrel beacon', { projects: null, limit: 10 });
+    ok(qd2.projects === null && qd2.results.some((r) => r.id === pb.id), 'projects:null lifts the default (all projects)');
+    const pxNull = await op.storeMemory({ content: 'PROJAX explicit global write', type: 'note', project: null });
+    ok(pxNull.project === null, 'explicit project:null writes global despite the default');
+    const ingP = path.join(tmp, 'projax.md');
+    fs.writeFileSync(ingP, 'The PROJAX kestrel ingest document describes the alpha build pipeline in detail.');
+    const ingR = await op.ingest({ path: ingP, type: 'note' });
+    ok(op.recall(ingR.entry.id).project === 'alpha', 'ingest tags the default project');
+  } finally { op.close(); }
+
+  // 33. Configurable, recursive bridge roots (roadmap 2026-09 #38): sources from env, nested
+  //     files reached, per-source project tag, flat walk still available.
+  const bdir = path.join(tmp, 'bridge-root');
+  fs.mkdirSync(path.join(bdir, 'reports', 'deep'), { recursive: true });
+  fs.mkdirSync(path.join(bdir, '.hidden'), { recursive: true });
+  fs.writeFileSync(path.join(bdir, 'top.md'), 'BRIDGEWALK top-level note about the osprey relay.');
+  fs.writeFileSync(path.join(bdir, 'reports', 'mid.md'), 'BRIDGEWALK nested report about the osprey relay throughput.');
+  fs.writeFileSync(path.join(bdir, 'reports', 'deep', 'leaf.md'), 'BRIDGEWALK deeply nested leaf about the osprey relay retries.');
+  fs.writeFileSync(path.join(bdir, '.hidden', 'skip.md'), 'BRIDGEWALK hidden file that must be skipped.');
+  const { walkMarkdown, parseBridgeSources } = await import('../src/index.mjs');
+  ok(JSON.stringify(walkMarkdown(bdir)) === JSON.stringify(['reports/deep/leaf.md', 'reports/mid.md', 'top.md']), 'walkMarkdown recurses, skips dot-dirs, sorted');
+  ok(JSON.stringify(walkMarkdown(bdir, { recursive: false })) === JSON.stringify(['top.md']), 'walkMarkdown flat mode = top level only');
+  const br = await bridgeMemory(o, { sources: [{ dir: bdir, scope: 'shared', type: 'note', project: 'osprey' }], project: false });
+  ok(br.ingested === 3 && br.perSource[0].recursive === true, `recursive bridge ingested ${br.ingested} files (3 expected)`);
+  const leaf = o.db.prepare("SELECT e.project, s.title FROM entries e JOIN sources s ON s.id = e.source_id WHERE s.path = ?").get(path.join(bdir, 'reports', 'deep', 'leaf.md'));
+  ok(leaf?.project === 'osprey' && leaf?.title === 'reports/deep/leaf.md', 'nested file carries the source project tag + relative-path title');
+  const br2 = await bridgeMemory(o, { sources: [{ dir: bdir, scope: 'shared', type: 'note', project: 'osprey' }], project: false });
+  ok(br2.ingested === 0 && br2.skipped === 3, 'second recursive pass is idempotent (hash-dedup)');
+  const bflat = path.join(tmp, 'bridge-flat');
+  fs.mkdirSync(path.join(bflat, 'sub'), { recursive: true });
+  fs.writeFileSync(path.join(bflat, 'a.md'), 'BRIDGEWALK flat root file about the heron.');
+  fs.writeFileSync(path.join(bflat, 'sub', 'b.md'), 'BRIDGEWALK flat-mode nested file about the heron that must not be bridged.');
+  const br3 = await bridgeMemory(o, { sources: [{ dir: bflat, scope: 'shared', recursive: false }], project: false });
+  ok(br3.ingested === 1 && br3.perSource[0].recursive === false, 'per-source recursive:false keeps the flat walk');
+  const parsed = parseBridgeSources(`${bdir}|openclaw|note|osprey; ~/notes|hermes ;${bflat}|shared|session||0`);
+  ok(parsed.length === 3 && parsed[0].project === 'osprey' && parsed[0].type === 'note' && parsed[1].dir === path.join(os.homedir(), 'notes') && parsed[1].type === 'note' && parsed[1].project === undefined && parsed[2].recursive === false, 'parseBridgeSources: dir|scope|type|project|recursive with ~ expansion + defaults');
+  ok(parseBridgeSources('') === null && parseBridgeSources(undefined) === null, 'unset MIDMEM_BRIDGE_SOURCES → built-in defaults');
+  let badSrc = false; try { parseBridgeSources('/only/dir'); } catch (e) { badSrc = /bad MIDMEM_BRIDGE_SOURCES/.test(e.message); }
+  ok(badSrc, 'malformed bridge source entry is loud');
+  process.env.MIDMEM_BRIDGE_SOURCES = `${bdir}|shared|note|osprey`;
+  process.env.MIDMEM_BRIDGE_RECURSIVE = '0';
+  process.env.MIDMEM_PROJECT = 'envproj';
+  try {
+    const { loadConfig } = await import('../src/config.mjs');
+    const c = loadConfig();
+    ok(c.bridgeSources.length === 1 && c.bridgeSources[0].dir === bdir && c.bridgeSources[0].project === 'osprey', 'MIDMEM_BRIDGE_SOURCES replaces the default roots');
+    ok(c.bridgeRecursive === false && c.project === 'envproj', 'MIDMEM_BRIDGE_RECURSIVE=0 + MIDMEM_PROJECT honored');
+  } finally { delete process.env.MIDMEM_BRIDGE_SOURCES; delete process.env.MIDMEM_BRIDGE_RECURSIVE; delete process.env.MIDMEM_PROJECT; }
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;

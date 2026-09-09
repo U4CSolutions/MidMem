@@ -8,6 +8,7 @@
 
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { normalizeProject } from './projectaxis.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..');
@@ -48,14 +49,20 @@ export function loadConfig(overrides = {}) {
     sourceRoots: (env('SOURCE_ROOTS') ||
       [REPO, `${HOME}/.openclaw/workspace`, `${HOME}/.hermes/memories`, `${HOME}/changelog`, path.join(VAULT, 'OpenClaw'), path.join(VAULT, 'Hermes')].join(';')
     ).split(';').filter(Boolean),
-    /** Native→middleware bridge: dirs scanned by `bridgeMemory`, each tagged with a scope.
-     *  Pulls each stack's flat memory into the shared, tiered, searchable store. */
-    bridgeSources: [
+    /** Native→middleware bridge: dirs scanned by `bridgeMemory`, each tagged with a scope (+ an
+     *  optional project). Pulls each stack's memory into the shared, tiered, searchable store.
+     *  Configurable (roadmap 2026-09 #38): MIDMEM_BRIDGE_SOURCES = `dir|scope|type|project;…`
+     *  (type/project optional) REPLACES the default list, so a third harness's memory dir or a
+     *  console's report folders register without a core change. */
+    bridgeSources: parseBridgeSources(env('BRIDGE_SOURCES')) || [
       { dir: path.join(HOME, '.openclaw', 'workspace', 'memory'), scope: 'openclaw', type: 'session' },
       { dir: path.join(HOME, '.hermes', 'memories'), scope: 'hermes', type: 'note' },
       { dir: path.join(VAULT, 'OpenClaw'), scope: 'openclaw', type: 'note' },
       { dir: path.join(VAULT, 'Hermes'), scope: 'hermes', type: 'note' },
     ],
+    /** Bridge walk recurses into subfolders (skipping dot-dirs + node_modules); a per-source
+     *  `recursive:false` opts out. MIDMEM_BRIDGE_RECURSIVE=0 restores the flat walk globally. */
+    bridgeRecursive: env('BRIDGE_RECURSIVE') !== '0',
     /** LM Studio OpenAI-compatible endpoint (embeddings + extraction). */
     llmEndpoint: env('LLM_ENDPOINT') || 'http://localhost:1234/v1',
     embedModel: env('EMBED_MODEL') || 'nomic-embed-text',
@@ -214,10 +221,40 @@ export function loadConfig(overrides = {}) {
      *  Set per MCP registration (OCMW_AGENT_SCOPE). Writes default here; reads = this + shared.
      *  `shared` = admin/bridge context (may write any scope). */
     agentScope: env('AGENT_SCOPE') || 'shared',
+    /** Project axis (roadmap 2026-09 #18), orthogonal to scope. MIDMEM_PROJECT = this process's
+     *  default project slug: writes (remember/ingest/record_work/…) tag it, reads default to
+     *  project + global. Unset = global writes, unfiltered reads (the admin/bridge analog). */
+    project: normalizeProject(env('PROJECT')),
+    projectAxis: {
+      /** Promotion into a curated-only tier (wisdom) lifts a project entry to global —
+       *  cross-project lessons emerge from use. MIDMEM_PROJECT_LIFT=0 keeps the tag on promotion. */
+      liftOnCurated: env('PROJECT_LIFT') !== '0',
+    },
     /** Governance: deny on policy-eval error (fail-closed). */
     failClosed: true,
   };
   return { ...cfg, ...overrides };
+}
+
+/**
+ * Parse MIDMEM_BRIDGE_SOURCES: entries separated by `;`, fields by `|` — `dir|scope|type|project`.
+ * `~` expands to $HOME; type defaults to `note`; project omitted = global. Returns null when unset
+ * (so the built-in defaults apply); a malformed entry throws — misconfigured capture must be loud.
+ */
+export function parseBridgeSources(spec) {
+  if (!spec || !String(spec).trim()) return null;
+  const out = [];
+  for (const raw of String(spec).split(';')) {
+    const item = raw.trim();
+    if (!item) continue;
+    const [dir, scope, type, project, recursive] = item.split('|').map((f) => f.trim());
+    if (!dir || !scope) throw new Error(`bad MIDMEM_BRIDGE_SOURCES entry '${item}' (expected dir|scope[|type[|project[|recursive]]])`);
+    const src = { dir: dir.startsWith('~/') ? path.join(HOME, dir.slice(2)) : dir, scope, type: type || 'note' };
+    if (project) src.project = normalizeProject(project);
+    if (recursive === '0' || recursive === 'false') src.recursive = false;
+    out.push(src);
+  }
+  return out.length ? out : null;
 }
 
 export const REPO_ROOT = REPO;

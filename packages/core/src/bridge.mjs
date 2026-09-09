@@ -12,9 +12,29 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+/** Recursive markdown walk (roadmap 2026-09 #38). Dot-dirs and node_modules are skipped; the
+ *  result is sorted so a bridge pass is deterministic. Returns paths relative to `root`. */
+export function walkMarkdown(root, { recursive = true } = {}) {
+  const out = [];
+  const visit = (dir, rel) => {
+    let ents = [];
+    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const d of ents) {
+      if (d.name.startsWith('.') || d.name === 'node_modules') continue;
+      const r = rel ? `${rel}/${d.name}` : d.name;
+      if (d.isDirectory()) { if (recursive) visit(path.join(dir, d.name), r); }
+      else if (d.name.endsWith('.md')) out.push(r);
+    }
+  };
+  visit(root, '');
+  return out.sort();
+}
+
 /**
  * @param {import('./orchestrator.mjs').Orchestrator} o
- * @param {{sources?:Array<{dir:string,scope:string,type?:string}>, project?:boolean}} [opts]
+ * @param {{sources?:Array<{dir:string,scope:string,type?:string,project?:string|null,recursive?:boolean}>, project?:boolean}} [opts]
+ *   `project:true` here means "reproject the vault afterwards" (legacy name); a source's own
+ *   `project` field is the project-axis tag its files are ingested under.
  */
 export async function bridgeMemory(o, { sources = o.cfg.bridgeSources, project = true } = {}) {
   let ingested = 0, skipped = 0;
@@ -31,18 +51,19 @@ export async function bridgeMemory(o, { sources = o.cfg.bridgeSources, project =
       perSource.push({ dir: s.dir, scope: s.scope, skippedReason: `not writable from agentScope '${o.cfg.agentScope}'` });
       continue;
     }
-    let files = [];
-    try { files = fs.readdirSync(s.dir).filter((f) => f.endsWith('.md')); }
-    catch { continue; } // dir may not exist yet (e.g. vault not on NFS yet)
+    if (!fs.existsSync(s.dir)) continue; // dir may not exist yet (e.g. vault not on NFS yet)
+    const recursive = s.recursive ?? o.cfg.bridgeRecursive !== false;
+    const files = walkMarkdown(s.dir, { recursive });
     let si = 0, ss = 0;
     for (const f of files) {
       const p = path.join(s.dir, f);
       try {
-        const r = await o.ingest({ path: p, type: s.type || 'note', scope: s.scope, title: f });
+        // Title = path relative to the root, so nested files stay distinguishable in the wiki.
+        const r = await o.ingest({ path: p, type: s.type || 'note', scope: s.scope, title: f, project: s.project ?? null });
         if (r.skipped) { skipped++; ss++; } else { ingested++; si++; }
       } catch (e) { errors.push(`${p}: ${e.message}`); }
     }
-    perSource.push({ dir: s.dir, scope: s.scope, files: files.length, ingested: si, skipped: ss });
+    perSource.push({ dir: s.dir, scope: s.scope, project: s.project ?? null, recursive, files: files.length, ingested: si, skipped: ss });
   }
 
   if (project) o.project();

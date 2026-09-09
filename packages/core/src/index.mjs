@@ -12,7 +12,9 @@ export { PolicyEvaluator, GovernanceError, governed, defaultPolicies } from './g
 export { hybridSearch, progressiveSearch, evidenceSufficient } from './retrieval.mjs';
 export { checkGrounding, groundingScore } from './grounding.mjs';
 export { projectVault } from './project.mjs';
-export { bridgeMemory } from './bridge.mjs';
+export { bridgeMemory, walkMarkdown } from './bridge.mjs';
+export { normalizeProject, resolveProjects, projectClause, matchesProject } from './projectaxis.mjs';
+export { parseBridgeSources } from './config.mjs';
 export { makeVectorStore, SqliteVectorStore, QdrantVectorStore } from './vectorstore.mjs';
 export { handoffBrief, HANDOFF_PROFILES } from './handoff.mjs';
 export { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, forgetNodes, isOpaqueTaskLabel, consolidateWork, categorizeIngest, functionForType, MEMORY_FUNCTIONS, WORK_EVENT_TYPES, WORK_EVENT_NAMES } from './workmemory.mjs';

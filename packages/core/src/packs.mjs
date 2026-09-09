@@ -63,7 +63,7 @@ export function loadPacks(cfg = {}) {
  * the pack's tier + function; the graph gets a typed node for the pattern plus
  * `evidence` edges to source nodes and `about` edges to concepts.
  */
-export async function recordPattern(o, { type, title, context, problem, solution, evidence = [], concepts = [], scope, outcome } = {}) {
+export async function recordPattern(o, { type, title, context, problem, solution, evidence = [], concepts = [], scope, outcome, project } = {}) {
   const def = o.packs?.types?.[type];
   if (!def) throw new Error(`unknown pack type: ${type} (loaded: ${Object.keys(o.packs?.types || {}).join(', ') || 'none'})`);
   if (!title) throw new Error('recordPattern requires a title');
@@ -75,7 +75,7 @@ export async function recordPattern(o, { type, title, context, problem, solution
   if (evidence.length) parts.push(`Evidence: ${evidence.join(' · ')}`);
   const content = parts.join(' — ');
 
-  const res = await o.storeMemory({ content, type, tier: def.tier, scope, memFunction: def.function, concepts });
+  const res = await o.storeMemory({ content, type, tier: def.tier, scope, memFunction: def.function, concepts, ...(project !== undefined ? { project } : {}) });
   const prov = {
     category: type, recordedAt: new Date().toISOString(), pack: def.pack,
     pattern: { title, context: context ?? null, problem: problem ?? null, solution: solution ?? null, outcome: outcome ?? null, evidence },

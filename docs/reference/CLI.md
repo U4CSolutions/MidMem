@@ -22,7 +22,7 @@ Parsed from `packages/core/bin/cli.mjs` (the wrapper `midmem <command>` in a dep
 | `work` | `--kind` `--task` `--outcome` `--status` `--source` `--artifact` `--profile` `--related` `--scope` |
 | `tasks` | — |
 | `close-tasks` | `--task` `--match` `--opaque` `--olderThanDays` `--dryRun` |
-| `forget-entries` | `--match` `--opaque` `--scope` `--types` `--olderThanDays` `--dryRun` |
+| `forget-entries` | `--match` `--opaque` `--scope` `--project` `--types` `--olderThanDays` `--dryRun` |
 | `forget-nodes` | `--match` `--opaque` `--types` `--dryRun` |
 | `claims` | `--all` `--limit` |
 | `contradictions` | `--minShared` |

@@ -8,6 +8,8 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 |---|---|
 | `MIDMEM_DB_PATH` | `dbPath: env('DB_PATH') \|\| path.join(REPO, 'state.db'),` |
 | `MIDMEM_SOURCE_ROOTS` | `sourceRoots: (env('SOURCE_ROOTS') \|\|` |
+| `MIDMEM_BRIDGE_SOURCES` | `bridgeSources: parseBridgeSources(env('BRIDGE_SOURCES')) \|\| [` |
+| `MIDMEM_BRIDGE_RECURSIVE` | `bridgeRecursive: env('BRIDGE_RECURSIVE') !== '0',` |
 | `MIDMEM_LLM_ENDPOINT` | `llmEndpoint: env('LLM_ENDPOINT') \|\| 'http://localhost:1234/v1',` |
 | `MIDMEM_EMBED_MODEL` | `embedModel: env('EMBED_MODEL') \|\| 'nomic-embed-text',` |
 | `MIDMEM_EXTRACT_MODEL` | `extractModel: env('EXTRACT_MODEL') \|\| 'qwen/qwen3.6-35b-a3b',` |
@@ -57,5 +59,7 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_AUTO_INGEST` | `enabled: env('AUTO_INGEST') !== '0',` |
 | `MIDMEM_AUTO_INGEST_ON_MAINTAIN` | `onMaintain: env('AUTO_INGEST_ON_MAINTAIN') !== '0',` |
 | `MIDMEM_AGENT_SCOPE` | `agentScope: env('AGENT_SCOPE') \|\| 'shared',` |
+| `MIDMEM_PROJECT` | `project: normalizeProject(env('PROJECT')),` |
+| `MIDMEM_PROJECT_LIFT` | `liftOnCurated: env('PROJECT_LIFT') !== '0',` |
 
-_51 env knobs._
+_55 env knobs._

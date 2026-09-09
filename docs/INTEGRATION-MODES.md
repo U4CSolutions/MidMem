@@ -27,7 +27,7 @@ midmem query "what did we decide about OKF"
 midmem tasks                                       # ongoing requests
 midmem maintain --force                            # decay + promote + auto-ingest + project
 ```
-Automatic ingest: point `bridgeSources` at your notes dirs (or rely on `ingest`); `maintain`
+Automatic ingest: point `MIDMEM_BRIDGE_SOURCES` at your notes dirs (or rely on `ingest`); `maintain`
 (daily timer `midmem-maintain.timer`) pulls + categorizes them. Trigger-less recall: alias
 `midmem-recall () { midmem recall-check "$*"; }`.
 
@@ -118,6 +118,10 @@ Hermes builds; both read/write the one shared `state.db`.
 |---|---|---|
 | `MIDMEM_DB_PATH` | repo `state.db` | shared source of truth (point all modes here to bridge) |
 | `MIDMEM_AGENT_SCOPE` | `shared` | this caller's write scope (`openclaw`/`hermes`/`shared`) |
+| `MIDMEM_PROJECT` | unset (global) | this caller's project slug — writes tag it, reads return project + global; unset = global writes, unfiltered reads |
+| `MIDMEM_PROJECT_LIFT` | on | promotion into `wisdom` lifts a project entry to global (lineage kept in `provenance.liftedFrom`) |
+| `MIDMEM_BRIDGE_SOURCES` | built-in four (OpenClaw/Hermes memory dirs + vault folders) | `dir\|scope\|type\|project\|recursive;…` — replaces the default bridge roots so any harness's memory dir or report folder registers with zero core change |
+| `MIDMEM_BRIDGE_RECURSIVE` | on | bridge walks subfolders (dot-dirs + `node_modules` skipped); `0` = flat walk |
 | `MIDMEM_WORK_MEMORY` | on | enable work-memory event recording |
 | `MIDMEM_AUTO_INGEST` / `…_ON_MAINTAIN` | on | auto-bridge agent session/memory dirs during `maintain()` |
 | `MIDMEM_PROACTIVE_RECALL` | on | enable the pre-turn recall primitive |

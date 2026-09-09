@@ -12,14 +12,17 @@ import { ftsMatchExpr, tokenize } from './util.mjs';
 import { functionForType } from './workmemory.mjs';
 import { conceptSeedsFromVector } from './concepts.mjs';
 import { authorityRank, AUTHORITY_LEVELS } from './authority.mjs';
+import { projectClause, matchesProject } from './projectaxis.mjs';
 
-/** One FTS lane (token or trigram), scope/tier filtered. Returns ranked entry ids.
+/** One FTS lane (token or trigram), scope/tier/project filtered. Returns ranked entry ids.
  *  Expired leases are filtered here too — decay holds even between maintenance sweeps. */
-function ftsLane(db, table, expr, tiers, scoped, limit = 200) {
+function ftsLane(db, table, expr, tiers, scoped, projects, limit = 200) {
   if (!expr) return [];
   const conds = ["e.status='active'", '(e.expires_at IS NULL OR e.expires_at > ?)', `e.tier IN (${tiers.map(() => '?').join(',')})`];
   const params = [expr, new Date().toISOString(), ...tiers];
   if (scoped) { conds.push(`e.scope IN (${scoped.map(() => '?').join(',')})`); params.push(...scoped); }
+  const pc = projectClause('e.project', projects);
+  if (pc) { conds.push(pc.sql); params.push(...pc.params); }
   return db.prepare(`
     SELECT e.id id FROM ${table} JOIN entries e ON e.rowid = ${table}.rowid
     WHERE ${table} MATCH ? AND ${conds.join(' AND ')}
@@ -28,11 +31,13 @@ function ftsLane(db, table, expr, tiers, scoped, limit = 200) {
 }
 
 /** Filter vector-store candidate ids against live entries (state.db is the metadata authority). */
-function filterActiveIds(db, ids, tiers, scoped) {
+function filterActiveIds(db, ids, tiers, scoped, projects) {
   if (!ids.length) return new Set();
   const conds = [`id IN (${ids.map(() => '?').join(',')})`, "status='active'", '(expires_at IS NULL OR expires_at > ?)', `tier IN (${tiers.map(() => '?').join(',')})`];
   const params = [...ids, new Date().toISOString(), ...tiers];
   if (scoped) { conds.push(`scope IN (${scoped.map(() => '?').join(',')})`); params.push(...scoped); }
+  const pc = projectClause('project', projects);
+  if (pc) { conds.push(pc.sql); params.push(...pc.params); }
   return new Set(db.prepare(`SELECT id FROM entries WHERE ${conds.join(' AND ')}`).all(...params).map((r) => r.id));
 }
 
@@ -48,6 +53,8 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
   const k = cfg.rrfK;
   const w = cfg.fusionWeights;
   const scoped = scopes && scopes.length ? scopes : null;
+  // Project axis (roadmap #18): a list means project + global; null means no partition filter.
+  const projects = Array.isArray(opts.projects) && opts.projects.length ? opts.projects : null;
   const expr = ftsMatchExpr(query);
 
   // --- Lanes ---
@@ -56,15 +63,15 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
   // are all it pays for. Everything downstream (filters, boosts, budget) behaves identically.
   const lexicalOnly = opts.lexicalOnly === true;
   const lanes = {
-    fts: ftsLane(db, 'entries_fts', expr, tiers, scoped),
-    trigram: ftsLane(db, 'entries_fts_trigram', expr, tiers, scoped),
+    fts: ftsLane(db, 'entries_fts', expr, tiers, scoped, projects),
+    trigram: ftsLane(db, 'entries_fts_trigram', expr, tiers, scoped, projects),
     vector: [],
   };
   let qv = null;
   if (!lexicalOnly) {
     ({ vector: qv } = await embedder.embed(query));
     const vraw = await memory.vectorStore.search(qv, 400); // backend-ranked candidates (id+score)
-    const vAllowed = filterActiveIds(db, vraw.map((r) => r.id), tiers, scoped);
+    const vAllowed = filterActiveIds(db, vraw.map((r) => r.id), tiers, scoped, projects);
     lanes.vector = vraw.filter((r) => vAllowed.has(r.id)).slice(0, 200).map((r) => r.id);
   }
 
@@ -89,6 +96,13 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
 
   // Hydrate candidates once.
   let cand = [...fused.entries()].map(([id, m]) => ({ id, score: m.score, ranks: m.ranks, entry: memory.get(id) })).filter((c) => c.entry);
+  // Concept-routing seeds enter after the lane filters — re-apply the project rule (and the
+  // scope/tier filters the lanes already enforced) so a seed can never leak across a partition.
+  if (conceptSeeds.size) {
+    const tierSet = new Set(tiers);
+    cand = cand.filter((c) => !conceptSeeds.has(c.id) || c.ranks.fts || c.ranks.trigram || c.ranks.vector
+      || (matchesProject(c.entry, projects) && tierSet.has(c.entry.tier) && (!scoped || scoped.includes(c.entry.scope)) && c.entry.status === 'active'));
+  }
 
   // --- Function-axis filter (survey 2607.25380): restrict to the requested memory ROLE(s).
   //     Legacy rows (null mem_function) resolve through the same deterministic type map, so
@@ -178,6 +192,7 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
     id: c.id,
     tier: c.entry.tier,
     type: c.entry.type,
+    project: c.entry.project ?? null,
     content: preview(c.entry),
     score: Number(c.score.toFixed(6)),
     trust: c.entry.trust_score,

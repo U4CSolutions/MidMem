@@ -4,6 +4,7 @@
  */
 import { genId, nowISO, json } from './util.mjs';
 import { functionForType, MEMORY_FUNCTIONS } from './workmemory.mjs';
+import { normalizeProject, projectClause } from './projectaxis.mjs';
 
 export class TieredMemory {
   /** @param {import('./db.mjs').StateDB} db @param {object} cfg */
@@ -20,21 +21,22 @@ export class TieredMemory {
    * Store an entry (single transactional write to entries; vector set separately).
    * @returns {{id:string, rowid:number, tier:string}}
    */
-  store({ content, type = 'note', tier = 'memory', scope = 'shared', sourceId = null, provenance = null, concepts = null, memFunction = null }) {
+  store({ content, type = 'note', tier = 'memory', scope = 'shared', sourceId = null, provenance = null, concepts = null, memFunction = null, project = null }) {
     const tc = this.tier(tier);
     if (!tc) throw new Error(`unknown tier: ${tier}`);
     const fn = memFunction || functionForType(type);
+    const proj = normalizeProject(project); // null = global
     if (!MEMORY_FUNCTIONS.includes(fn)) throw new Error(`unknown memory function: ${fn} (expected: ${MEMORY_FUNCTIONS.join('|')})`);
     const id = genId(tier, content.slice(0, 80) + type + Date.now());
     const ts = nowISO();
     const expiresAt = tc.ttl ? new Date(Date.now() + tc.ttl).toISOString() : null;
     const info = this.db.prepare(`
-      INSERT INTO entries(id,tier,type,content,source_id,provenance,concepts,status,scope,created_at,updated_at,expires_at,mem_function)
-      VALUES(?,?,?,?,?,?,?, 'active', ?,?,?,?,?)
+      INSERT INTO entries(id,tier,type,content,source_id,provenance,concepts,status,scope,created_at,updated_at,expires_at,mem_function,project)
+      VALUES(?,?,?,?,?,?,?, 'active', ?,?,?,?,?,?)
     `).run(id, tier, type, content, sourceId,
       provenance ? JSON.stringify(provenance) : null,
-      concepts ? JSON.stringify(concepts) : null, scope, ts, ts, expiresAt, fn);
-    return { id, rowid: Number(info.lastInsertRowid), tier, scope, memFunction: fn };
+      concepts ? JSON.stringify(concepts) : null, scope, ts, ts, expiresAt, fn, proj);
+    return { id, rowid: Number(info.lastInsertRowid), tier, scope, memFunction: fn, project: proj };
   }
 
   async upsertVector(entryId, embedding, model, mode = 'unknown') {
@@ -96,27 +98,32 @@ export class TieredMemory {
     return r ? this.#hydrate(r) : null;
   }
 
-  /** Active entries, optionally filtered by tier and scope. Expired-but-unswept
-   *  entries are excluded — an expired lease is dead even before maintenance runs. */
-  listActive({ tiers = this.tierNames, scopes = null } = {}) {
+  /** Active entries, optionally filtered by tier, scope and project (project + global rule).
+   *  Expired-but-unswept entries are excluded — an expired lease is dead even before
+   *  maintenance runs. */
+  listActive({ tiers = this.tierNames, scopes = null, projects = null } = {}) {
     const conds = ["status='active'", '(expires_at IS NULL OR expires_at > ?)', `tier IN (${tiers.map(() => '?').join(',')})`];
     const params = [nowISO(), ...tiers];
     if (scopes && scopes.length) { conds.push(`scope IN (${scopes.map(() => '?').join(',')})`); params.push(...scopes); }
+    const pc = projectClause('project', projects);
+    if (pc) { conds.push(pc.sql); params.push(...pc.params); }
     return this.db.prepare(`SELECT * FROM entries WHERE ${conds.join(' AND ')}`).all(...params).map((r) => this.#hydrate(r));
   }
 
   /** Map of rowid → entry for a tier/scope set (used by retrieval to join FTS hits). */
-  rowidMap(tiers = this.tierNames, scopes = null) {
+  rowidMap(tiers = this.tierNames, scopes = null, projects = null) {
     const m = new Map();
-    for (const e of this.listActive({ tiers, scopes })) m.set(e.rowid, e);
+    for (const e of this.listActive({ tiers, scopes, projects })) m.set(e.rowid, e);
     return m;
   }
 
-  /** Vectors for active entries in the given tiers/scopes: [{id, tier, vector}]. */
-  activeVectors(tiers = this.tierNames, scopes = null) {
+  /** Vectors for active entries in the given tiers/scopes/projects: [{id, tier, vector}]. */
+  activeVectors(tiers = this.tierNames, scopes = null, projects = null) {
     const conds = ["e.status='active'", '(e.expires_at IS NULL OR e.expires_at > ?)', `e.tier IN (${tiers.map(() => '?').join(',')})`];
     const params = [nowISO(), ...tiers];
     if (scopes && scopes.length) { conds.push(`e.scope IN (${scopes.map(() => '?').join(',')})`); params.push(...scopes); }
+    const pc = projectClause('e.project', projects);
+    if (pc) { conds.push(pc.sql); params.push(...pc.params); }
     return this.db.prepare(`
       SELECT v.entry_id id, e.tier tier, v.embedding emb
       FROM vectors v JOIN entries e ON e.id = v.entry_id
@@ -127,11 +134,21 @@ export class TieredMemory {
   promote(id, toTier) {
     const tc = this.tier(toTier);
     if (!tc) throw new Error(`unknown tier: ${toTier}`);
-    const r = this.db.prepare('SELECT id FROM entries WHERE id=?').get(id);
+    const r = this.db.prepare('SELECT id, project, provenance FROM entries WHERE id=?').get(id);
     if (!r) return { success: false, message: `not found: ${id}` };
     // Single write (one FTS trigger pass); expires_at follows the destination tier's TTL
     // so e.g. a fact promoted to wisdom doesn't carry its 7-day expiry along.
     const expiresAt = tc.ttl ? new Date(Date.now() + tc.ttl).toISOString() : null;
+    // Project lift (roadmap #18): a project-tagged entry earning a curated-only tier becomes
+    // GLOBAL — that tier is the cross-project lesson set. Lineage is kept (provenance.liftedFrom)
+    // so the source project is never lost. Deterministic; off via projectAxis.liftOnCurated=false.
+    const lift = this.cfg.projectAxis?.liftOnCurated !== false && tc.curatedOnly && r.project != null;
+    if (lift) {
+      const prov = { ...json(r.provenance, {}), liftedFrom: { project: r.project, tier: toTier, at: nowISO() } };
+      this.db.prepare("UPDATE entries SET tier=?, status='active', expires_at=?, updated_at=?, project=NULL, provenance=? WHERE id=?")
+        .run(toTier, expiresAt, nowISO(), JSON.stringify(prov), id);
+      return { success: true, message: `promoted ${id} → ${toTier} (lifted from project '${r.project}' to global)`, liftedFrom: r.project };
+    }
     this.db.prepare("UPDATE entries SET tier=?, status='active', expires_at=?, updated_at=? WHERE id=?")
       .run(toTier, expiresAt, nowISO(), id);
     return { success: true, message: `promoted ${id} → ${toTier}` };
@@ -213,6 +230,12 @@ export class TieredMemory {
     for (const t of this.tierNames) out[t] = 0;
     for (const r of rows) out[r.tier] = r.c;
     return out;
+  }
+
+  /** Active-entry counts per project (roadmap #18 open-project listing); `null` key = global. */
+  projectStats() {
+    const rows = this.db.prepare("SELECT project, COUNT(*) c FROM entries WHERE status='active' GROUP BY project ORDER BY c DESC").all();
+    return rows.map((r) => ({ project: r.project ?? null, entries: r.c }));
   }
 
   #hydrate(r) {
