@@ -1,4 +1,4 @@
-<!-- research-tracker: evaluated-through=2026-09-09T13:30:00Z -->
+<!-- research-tracker: evaluated-through=2026-09-11T01:10:00Z -->
 # RESEARCH — midmem-kb-store
 
 Research and architecture decisions behind **midmem-kb-store**, grounded in published work we
@@ -25,6 +25,51 @@ what the marker at the top has not yet evaluated.
 > (1–15, shipped) and [`docs/ROADMAP-2026-09.md`](docs/ROADMAP-2026-09.md) (16–42).
 
 ---
+
+## 2026-09-11 — Operator-named paper: procedural knowledge as a graph of (procedure, relation, procedure) triplets
+
+Named by the operator via the tracker; not in the store before. Staged from the HTML full text
+(`ingest-staging/arxiv-2609-09153-procedural-graphs/`), ingested scope `shared` type `research`:
+grounding 0.902, 8 concepts + 1 claim kept, 0 quarantined, real embedding (entry
+`memory-mtw8usyw-317bbda964ff`). No weekly digest covers this paper yet (submitted 2026-09-08).
+
+### ADOPT NOW — the second reference capture pack is a procedure graph; procedures need relations to each other
+- **Paper:** Yuxing Lu, Yicheng Chen, Shanchan Wu, Sercan Ö. Arık, *Procedural Graphs: Self-Evolving
+  Execution Structures for LLM Agents* — arXiv [2609.09153](https://arxiv.org/abs/2609.09153)
+  (submitted 2026-09-08; cs.AI, cs.CL, cs.MA).
+- **Finding:** procedural knowledge kept as a directed, attributed graph of (procedure, relation,
+  procedure) triplets — edges carrying *condition*, *guidance* and *pitfalls* — and served at each step
+  as the h-hop neighbourhood around the agent's localized node beats memory-based baselines across
+  six benchmarks and two solvers (sign test 19 wins / 2 ties / 3 losses, p = 4.3×10⁻⁴; e.g. τ-bench
+  73.91% vs 60.87–71.30%, ALFWorld 93.28% vs 67.16–91.79% with Claude Sonnet). The *connected
+  neighbourhood* is what matters: full-graph guidance scores 54.48% on ALFWorld against 81.53% for the
+  subgraph, at 70.9% fewer guidance tokens — "independent retrieval of transition attributes, such as
+  top-k similarity search, can omit the connections between procedural steps". Long-horizon
+  EnterpriseArena survival rises 44%→58% (Claude Sonnet) and 6%→34% (Gemini 3.1 Pro). Self-evolution
+  accepts an LLM-proposed graph edit only if held-out validation does not drop, and keeps every
+  rejected candidate in a *rejection memory* so the same bad edit is not re-proposed (10 rounds:
+  0% → 85% test survival, p = 2.6×10⁻⁸). Stated cost: guidance raises tokens per task even when it
+  cuts solver steps (MultiChallenge 6,629 → 12,295).
+- **Decision (ground-checked 2026-09-11):** MidMem stores procedures as pack-typed entries
+  (`coding-patterns`: pattern / scaffold / anti-pattern / recipe, function `procedural`) whose graph
+  node links only to *evidence* (the pack's edge) and *concepts* (`about`) — there is no
+  procedure→procedure relation, and `recordPattern` has no way to write one even though packs may
+  declare edge vocabularies (`packs.mjs`, `graph.mjs` `EDGE_TYPES`). So the paper's contribution is
+  adoptable as the **second reference pack roadmap #22 already owes**: a `procedures` pack with a
+  `procedure` type (tier memory, function procedural, fields *condition / guidance / pitfalls*) and
+  the edge vocabulary `precedes · requires · alternative_to · pitfall_of`, plus one S-sized core seam
+  — `recordPattern({ relations: [{ to, type }] })` writing pack-declared edges between pattern nodes.
+  Retrieval of the connected neighbourhood is the bounded-expansion shape of **#25** (the paper's
+  subgraph-vs-full-graph numbers are the strongest budget evidence in the ledger; composes with
+  **#42**). Rejection memory is VALIDATION of `dead_end` work events with the retrieval demotion + the
+  bench `dead-end-avoided` metric; validation gating that never restarts from a rejected candidate is
+  VALIDATION of the paired bench gate and the **#35** verdict object. NOT ADOPTING in core: the
+  LLM refiner that rewrites the graph — graph/schema evolution stays data plus a migration op (#22),
+  and any such loop is a consumer's (orchestrator's) job that records its accepted procedures and its
+  rejected candidates into the store.
+- **Validation (planned with #22):** smoke — the `procedures` pack loads with zero errors; two
+  procedures linked `precedes` are returned together by a neighbourhood read; an undeclared relation
+  type is rejected; existing dead-end smoke + bench `dead-end-avoided` cover the rejection-memory half.
 
 ## 2026-09-09 — Weeks of 2026-08-31 and 2026-09-07: memory as typed, provenance-carrying state that must survive compaction, model swaps, poisoning and revocation
 
@@ -334,6 +379,7 @@ Evidence: numbers (benchmark / controlled result) or prose (the source gives no 
 
 | Paper | Finding that matters | Candidate | Roadmap # | Effort | Evidence | Blocker / note |
 |---|---|---|---|---|---|---|
+| Procedural Graphs [2609.09153](https://arxiv.org/abs/2609.09153) | procedure triplets served as an h-hop neighbourhood beat memory baselines (19/2/3 sign test); subgraph 81.53% vs full graph 54.48% at −70.9% tokens | `procedures` pack (condition / guidance / pitfalls; `precedes · requires · alternative_to · pitfall_of`) + `recordPattern` relations seam; neighbourhood read | **#22** (spec), **#25** (evidence) | S | numbers (six benchmarks, two solvers) | ADOPT NOW — next `midmem-dev` item after #39/#40; LLM refiner stays consumer-side |
 | Utility Under Attack [2608.21230](https://arxiv.org/abs/2608.21230) | additive provenance weighting cannot suppress poison without suppressing legitimate untrusted evidence | per-authority occupancy caps + protected operator slots + lineage minimum in budgeted selection | **#39** | S | prose (screener rejected 0 poisons) | ADOPT NOW — next `midmem-dev` item; composes with #34 |
 | InjecMEM [2608.23471](https://arxiv.org/abs/2608.23471) | one ordinary interaction plants a retrievable command | instruction-likeness flag + "evidence, not instruction" inject framing | **#40** | S | prose | ADOPT NOW; deterministic patterns only |
 | Forgetting Without Restarting [2609.04875](https://arxiv.org/abs/2609.04875) | deleting the record leaves derived summaries/plans unchanged | dependency-aware `forget` (claims by source, sole-support concepts, dirty pages, cascade log) | **#41** | M | prose ("substantially fewer" tokens) | execution-state replay stays consumer-side |
