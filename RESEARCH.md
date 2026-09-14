@@ -1,4 +1,4 @@
-<!-- research-tracker: evaluated-through=2026-09-11T01:10:00Z -->
+<!-- research-tracker: evaluated-through=2026-09-14T13:05:00Z -->
 # RESEARCH — midmem-kb-store
 
 Research and architecture decisions behind **midmem-kb-store**, grounded in published work we
@@ -25,6 +25,120 @@ what the marker at the top has not yet evaluated.
 > (1–15, shipped) and [`docs/ROADMAP-2026-09.md`](docs/ROADMAP-2026-09.md) (16–42).
 
 ---
+
+## 2026-09-14 — Week of 2026-09-14: what is stored vs what is used; lifecycle at write time; summaries as cues
+
+Weekly report ingested (`ingest-staging/llmwiki-weekly-2026-09-14/report.md`, scope `shared`, type
+`research`): grounding **0.909**, 11 concepts + 1 claim kept, **0 quarantined**, real embedding,
+verification clean (entry `memory-mu195djt-ad3da0374ece`). Seven key papers; one (Procedural Graphs
+2609.09153) was already evaluated on 2026-09-11 and is cross-referenced, not re-decided. The report's
+own headline — "persistent memory should retain more than the agent actively uses" — is the week's
+one genuinely new architectural claim against our code, and it lands on the entry store, not the
+claim ledger.
+
+### ADOPT NOW — the claim ledger already separates stored from used; the entry store does not
+- **Paper:** *What Should an Agent Forget? Separating What Is Stored from What Is Used* (RD-Forget) —
+  arXiv [2609.10263](https://arxiv.org/abs/2609.10263) (submitted 2026-09-09).
+- **Finding:** forgetting for answering does not require deleting history. The framework keeps the
+  source archive and builds a *query-conditioned* view: a superseded value is suppressed for
+  current-state questions while staying retrievable for historical ones, via semantic slots,
+  same-slot replacement links, intent-aware retrieval and rate-distortion selection at answer time.
+  The report states the distinction as five states: stored · eligible for current query · suppressed
+  for current query · historically retrievable · physically deleted. *Evidence: prose — the report
+  quotes no benchmark numbers for this paper.*
+- **Decision (ground-checked 2026-09-14):** MidMem implements exactly this split for **claims** and
+  not at all for **entries**. `claims.search()` accepts a `statuses` filter and searches every status,
+  while `current()` narrows to active/verified — that is RD-Forget's two views, already shipped (#14,
+  #9). Entries are the opposite: every read path hardcodes `status='active'` — both FTS lanes and the
+  vector-candidate filter in `retrieval.mjs`, plus `listActive()` and `activeVectors()` in
+  `memory.mjs`. Archival is therefore a **one-way exit from retrieval**: the lifecycle sweep archives
+  an expired lease or a distrusted entry, supersede-on-reingest archives the previous version, and
+  from that moment the content is reachable only by `recall(<id>)` if the caller already knows the id
+  (`memory.get()` has no status filter — history is preserved, just unsearchable). For a consumer
+  whose run history outlives a 30-day `memory` lease, that is silent loss of exactly the historical
+  answers this paper says to keep. Adopt the read half: a `statuses` / `asOf` option threaded through
+  the lanes and `listActive`, defaulting to current-only so today's behavior is unchanged, plus a
+  `historical:true` query mode that reports which results are archived and why. Roadmap **#43**,
+  effort S — no schema change (the `status` column and the archival writes already exist), fully
+  deterministic. NOT ADOPTING: rate-distortion answer-time selection (a learned objective; our
+  budgeted selection stays deterministic) and semantic slots as a new schema (claim supersession
+  already carries the same-slot link).
+- **Validation (planned with #43):** smoke — an archived entry is absent from a default query and
+  present in a `historical` query, labelled archived; a superseded ingest's prior version is
+  retrievable historically while the current version alone answers the default query; `recall(id)`
+  behavior for archived entries is asserted unchanged.
+
+### BACKLOG — `working` memory is documented as non-persistent and nothing enforces it
+- **Paper:** *LifeFuse-Mem: Lifecycle-Aware State Fusion Against Temporary Overwriting for Long-Term
+  Memory* — arXiv [2609.12436](https://arxiv.org/abs/2609.12436) (submitted 2026-09-11).
+- **Finding:** **temporary overwriting** — a short-lived condition incorrectly replaces durable
+  knowledge because the system treats recency as equivalent to persistence. The fix is lifecycle
+  metadata carried on the write (`class: transient | durable`, `valid_for`, `promotion_allowed`) so
+  transient and durable state evolve separately; retention tier and lifecycle semantics are different
+  axes. *Evidence: prose.*
+- **Decision (ground-checked 2026-09-14):** MidMem already declares the axis and does not enforce it.
+  `MEMORY_FUNCTIONS` includes `working`, documented in `workmemory.mjs` as "context-assembly-time only
+  — valid but not persisted by default", but `working` appears nowhere else in the core: a caller may
+  store a `working` entry and it persists exactly like a semantic one, it is ranked by the same lanes,
+  and `autoPromoteCandidates()` filters on tier, trust and counts only — so a transient entry that
+  happens to be retrieved enough can be promoted toward `wisdom`. That is the paper's failure mode
+  reached by our own promotion path rather than by recency. Roadmap **#44**, effort S–M: honor the
+  declared contract — `working` entries are lease-bound and ineligible for promotion, excluded from
+  default reads, and may never supersede an entry of durable function. Deterministic, no LLM, no new
+  column (`mem_function` exists). This is a documentation-versus-code discrepancy, so it also earns a
+  smoke assertion regardless of when the rest lands.
+- **Validation (planned with #44):** smoke — a `working` entry is never returned by
+  `autoPromoteCandidates()`; a `working` write does not archive a durable entry on the same subject;
+  the existing function-axis filter still returns it when `functions:['working']` is asked for
+  explicitly.
+
+### VALIDATION — confirmed by this week, no change
+- **AIM** — arXiv [2609.12320](https://arxiv.org/abs/2609.12320): privacy scope must be a field on the
+  memory object with **index-level** enforcement, not a prompt instruction (96.0% visibility
+  classification accuracy, 58.8% strict and 70.5% state-aware operation accuracy on its MUMBench).
+  MidMem enforces scope exactly there — `scope IN (…)` is a SQL predicate in both FTS lanes, the
+  vector-candidate filter, `listActive()` and `activeVectors()`, with a fail-closed governance policy
+  blocking cross-private writes; reads default to own-plus-shared and the project axis adds a second
+  orthogonal partition. What we do **not** have is a per-*user* axis (`owner_id`, `shared_with`,
+  `tenant`): our scopes are per-agent. Deliberately deferred — a third partition needs a real
+  multi-user consumer, and the store is single-operator today. Tracked as a watch row, not an
+  increment.
+- **Agent Zero Memory** — arXiv [2608.29606](https://arxiv.org/abs/2608.29606): three parallel
+  representations (memory events timeline, entity-event graph, hierarchical documentary memory) with
+  provenance, timestamp and evidence pointers on every learned item, plus citation-locking so an
+  answer may cite only evidence actually opened; 95.60% LongMemEval, 93.60% LoCoMo, and **accuracy
+  varies far less than cost across backbone models**. MidMem's three representations over one
+  `state.db` are the same shape: work events are the episodic timeline, the typed concept graph is the
+  associative layer, the projected wiki is the documentary layer. The cross-model result is
+  independent evidence for two of our standing choices — architecture over backbone size, and a
+  dedicated small extraction model rather than the chat primary. Citation-locking is a consumer rule:
+  the Wave 5 recall card should cite only the entry ids it actually injected, which is already how the
+  fenced block is built.
+- **Procedural Graphs** — arXiv [2609.09153](https://arxiv.org/abs/2609.09153): evaluated
+  2026-09-11 (ADOPT NOW → the #22 `procedures` pack spec). This report independently states the same
+  conclusion we drew — a semantic graph and a procedural graph, separate but cross-referencing — which
+  is why #22's pack declares procedure→procedure edges rather than a second node type in the concept
+  graph. No re-decision.
+- **Recommendation 10** (smaller models for routine memory operations, frontier models reserved for
+  hard consolidation) restates the 2026-08-03 LightMem lesson and matches the shipped split
+  (`MIDMEM_EXTRACT_MODEL` separate from the chat primary).
+
+### Amendments to open increments
+- **#34** gains a second driver: **CueMem** arXiv [2609.12354](https://arxiv.org/abs/2609.12354) —
+  compressed records should act as *cues* that map to source-turn anchors and expand locally to
+  reconstruct evidence, beating long-term baselines on LoCoMo and LongMemEval at fewer query-time
+  tokens than full-history prompting. Our entries carry `provenance.originalSource` and a `source_id`
+  row, which is a *file path*, not a locator: reconstructing evidence means re-reading the whole
+  document. HERO (2608.22310) already put an excerpt locator on #34; CueMem raises its rank and adds
+  the local-expansion step, which is the same bounded neighbourhood #25 owes.
+- **#35** gains a security dimension: **SoK: Rethinking Jailbreaking in the Era of Agentic AI** arXiv
+  [2609.12413](https://arxiv.org/abs/2609.12413) — a final-output filter cannot repair a poisoned
+  durable memory state, so evaluation must cover write → state → retrieval, not answer accuracy. Our
+  smoke covers governance denials and write-time grounding, and the bench covers recall quality;
+  neither has an adversarial slice. #35's protected slices should include poisoned-entry,
+  instruction-injection and scope-leak probes — which also makes the already-adopted **#39**
+  (bounded occupancy) and **#40** (instruction-likeness flag) the tests' subjects rather than
+  untested claims.
 
 ## 2026-09-11 — Operator-named paper: procedural knowledge as a graph of (procedure, relation, procedure) triplets
 
@@ -379,6 +493,11 @@ Evidence: numbers (benchmark / controlled result) or prose (the source gives no 
 
 | Paper | Finding that matters | Candidate | Roadmap # | Effort | Evidence | Blocker / note |
 |---|---|---|---|---|---|---|
+| RD-Forget [2609.10263](https://arxiv.org/abs/2609.10263) | forgetting for answering ≠ deleting history; a query-conditioned view suppresses superseded values that stay historically retrievable | `statuses`/`asOf` through the lanes + a `historical` query mode (claims already have this split; entries hardcode `status='active'`) | **#43** | S | prose | ADOPT NOW — no schema change; archive is a one-way exit from retrieval today |
+| LifeFuse-Mem [2609.12436](https://arxiv.org/abs/2609.12436) | transient context must not overwrite durable knowledge by recency; lifecycle is an axis beyond retention | enforce the declared `working` contract: lease-bound, never promoted, excluded from default reads, never supersedes a durable entry | **#44** | S–M | prose | doc-vs-code discrepancy: `working` is documented as non-persistent, enforced nowhere |
+| CueMem [2609.12354](https://arxiv.org/abs/2609.12354) | compressed memory should be a cue mapping to source anchors, then expand locally | source excerpt locator + local expansion (second driver, raises rank) | **#34**, **#25** | S–M | prose (LoCoMo, LongMemEval; no figures quoted) | our `originalSource` is a file path, not a locator |
+| SoK Jailbreaking [2609.12413](https://arxiv.org/abs/2609.12413) | a final-output filter cannot repair a poisoned durable memory state | adversarial slice (poisoned entry, instruction injection, scope leak) in the protected bench slices | **#35** | S | prose | makes #39/#40 tested rather than asserted |
+| AIM [2609.12320](https://arxiv.org/abs/2609.12320) | multi-user memory needs owner/tenant visibility on the object, enforced at the index | per-user scope axis (`owner_id`, `shared_with`) beside the agent scope | watch — no consumer yet | M | numbers (96.0% visibility classification) | index-level enforcement already VALIDATED; deferred until a real multi-user consumer |
 | Procedural Graphs [2609.09153](https://arxiv.org/abs/2609.09153) | procedure triplets served as an h-hop neighbourhood beat memory baselines (19/2/3 sign test); subgraph 81.53% vs full graph 54.48% at −70.9% tokens | `procedures` pack (condition / guidance / pitfalls; `precedes · requires · alternative_to · pitfall_of`) + `recordPattern` relations seam; neighbourhood read | **#22** (spec), **#25** (evidence) | S | numbers (six benchmarks, two solvers) | ADOPT NOW — next `midmem-dev` item after #39/#40; LLM refiner stays consumer-side |
 | Utility Under Attack [2608.21230](https://arxiv.org/abs/2608.21230) | additive provenance weighting cannot suppress poison without suppressing legitimate untrusted evidence | per-authority occupancy caps + protected operator slots + lineage minimum in budgeted selection | **#39** | S | prose (screener rejected 0 poisons) | ADOPT NOW — next `midmem-dev` item; composes with #34 |
 | InjecMEM [2608.23471](https://arxiv.org/abs/2608.23471) | one ordinary interaction plants a retrievable command | instruction-likeness flag + "evidence, not instruction" inject framing | **#40** | S | prose | ADOPT NOW; deterministic patterns only |
@@ -418,5 +537,9 @@ Evidence: numbers (benchmark / controlled result) or prose (the source gives no 
   snapshot import, never a model interpreting "undo".
 - **Subject-predicate-value triple claims / declared validity intervals** — StateMem
   [2608.19652](https://arxiv.org/abs/2608.19652): grounded text claims with observed windows stay.
+- **Rate-distortion answer-time memory selection / semantic slots as new schema** — RD-Forget
+  [2609.10263](https://arxiv.org/abs/2609.10263): the two-view split is adopted (#43), but budgeted
+  selection stays deterministic rather than a learned objective, and claim supersession already
+  carries the same-slot replacement link.
 - **Feature flags as a new mechanism** — D²ACCI [2608.17756](https://arxiv.org/abs/2608.17756): `MIDMEM_*`
   env already gates every behavior.
