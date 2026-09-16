@@ -63,7 +63,7 @@ claim ledger.
   deterministic. NOT ADOPTING: rate-distortion answer-time selection (a learned objective; our
   budgeted selection stays deterministic) and semantic slots as a new schema (claim supersession
   already carries the same-slot link).
-- **Validation (planned with #43):** smoke — an archived entry is absent from a default query and
+- **Validation (shipped 2026-09-16, smoke section 38):** an archived entry is absent from a default query and
   present in a `historical` query, labelled archived; a superseded ingest's prior version is
   retrievable historically while the current version alone answers the default query; `recall(id)`
   behavior for archived entries is asserted unchanged.
@@ -87,7 +87,7 @@ claim ledger.
   default reads, and may never supersede an entry of durable function. Deterministic, no LLM, no new
   column (`mem_function` exists). This is a documentation-versus-code discrepancy, so it also earns a
   smoke assertion regardless of when the rest lands.
-- **Validation (planned with #44):** smoke — a `working` entry is never returned by
+- **Validation (shipped 2026-09-16, smoke section 39):** a `working` entry is never returned by
   `autoPromoteCandidates()`; a `working` write does not archive a durable entry on the same subject;
   the existing function-axis filter still returns it when `functions:['working']` is asked for
   explicitly.
@@ -226,7 +226,7 @@ four ADOPT NOW decisions below are the design rules that card and its MidMem rea
   with protected slots for `operator` lines and a minimum number of independent source lineages
   (composes with #34). Roadmap **#39**, effort S. What we do *not* do: add an LLM content screener —
   the paper measured that class of filter at zero recall on fluent poison.
-- **Validation (planned with #39):** smoke — a budgeted brief over a store where one authority class
+- **Validation (shipped 2026-09-16, smoke section 37):** a budgeted brief over a store where one authority class
   holds 90% of matching entries still returns operator lines and at least N lineages; bench
   `recall-inject-tok` stays inside budget.
 
@@ -247,7 +247,7 @@ four ADOPT NOW decisions below are the design rules that card and its MidMem rea
   memory: governance stays code (`governance.mjs`), the console's outbox allowlist stays the ledger,
   and MidMem records decisions but grants nothing — NOT ADOPTING an authorization ledger inside the
   store (VALIDATION of #10 no-raise authority + `operator` requires `curated:true`).
-- **Validation (planned with #40):** smoke — an entry whose content is an agent-directed imperative
+- **Validation (shipped 2026-09-16, smoke section 35):** an entry whose content is an agent-directed imperative
   is returned flagged and ranked below an unflagged peer with equal lexical score; existing
   governance smoke (`operator` authority without curation is denied) covers the laundering half.
 
@@ -493,16 +493,16 @@ Evidence: numbers (benchmark / controlled result) or prose (the source gives no 
 
 | Paper | Finding that matters | Candidate | Roadmap # | Effort | Evidence | Blocker / note |
 |---|---|---|---|---|---|---|
-| RD-Forget [2609.10263](https://arxiv.org/abs/2609.10263) | forgetting for answering ≠ deleting history; a query-conditioned view suppresses superseded values that stay historically retrievable | `statuses`/`asOf` through the lanes + a `historical` query mode (claims already have this split; entries hardcode `status='active'`) | **#43** | S | prose | ADOPT NOW — no schema change; archive is a one-way exit from retrieval today |
-| LifeFuse-Mem [2609.12436](https://arxiv.org/abs/2609.12436) | transient context must not overwrite durable knowledge by recency; lifecycle is an axis beyond retention | enforce the declared `working` contract: lease-bound, never promoted, excluded from default reads, never supersedes a durable entry | **#44** | S–M | prose | doc-vs-code discrepancy: `working` is documented as non-persistent, enforced nowhere |
+| RD-Forget [2609.10263](https://arxiv.org/abs/2609.10263) | forgetting for answering ≠ deleting history; a query-conditioned view suppresses superseded values that stay historically retrievable | `statuses`/`asOf` through the lanes + a `historical` query mode (claims already have this split; entries hardcode `status='active'`) | **#43 ✅ 2026-09-16** | S | prose | shipped; no schema change |
+| LifeFuse-Mem [2609.12436](https://arxiv.org/abs/2609.12436) | transient context must not overwrite durable knowledge by recency; lifecycle is an axis beyond retention | enforce the declared `working` contract: lease-bound, never promoted, excluded from default reads, never supersedes a durable entry | **#44 ✅ 2026-09-16** | S–M | prose | shipped; the doc-vs-code discrepancy is closed |
 | CueMem [2609.12354](https://arxiv.org/abs/2609.12354) | compressed memory should be a cue mapping to source anchors, then expand locally | source excerpt locator + local expansion (second driver, raises rank) | **#34**, **#25** | S–M | prose (LoCoMo, LongMemEval; no figures quoted) | our `originalSource` is a file path, not a locator |
 | SoK Jailbreaking [2609.12413](https://arxiv.org/abs/2609.12413) | a final-output filter cannot repair a poisoned durable memory state | adversarial slice (poisoned entry, instruction injection, scope leak) in the protected bench slices | **#35** | S | prose | makes #39/#40 tested rather than asserted |
 | AIM [2609.12320](https://arxiv.org/abs/2609.12320) | multi-user memory needs owner/tenant visibility on the object, enforced at the index | per-user scope axis (`owner_id`, `shared_with`) beside the agent scope | watch — no consumer yet | M | numbers (96.0% visibility classification) | index-level enforcement already VALIDATED; deferred until a real multi-user consumer |
 | Procedural Graphs [2609.09153](https://arxiv.org/abs/2609.09153) | procedure triplets served as an h-hop neighbourhood beat memory baselines (19/2/3 sign test); subgraph 81.53% vs full graph 54.48% at −70.9% tokens | `procedures` pack (condition / guidance / pitfalls; `precedes · requires · alternative_to · pitfall_of`) + `recordPattern` relations seam; neighbourhood read | **#22** (spec), **#25** (evidence) | S | numbers (six benchmarks, two solvers) | ADOPT NOW — next `midmem-dev` item after #39/#40; LLM refiner stays consumer-side |
-| Utility Under Attack [2608.21230](https://arxiv.org/abs/2608.21230) | additive provenance weighting cannot suppress poison without suppressing legitimate untrusted evidence | per-authority occupancy caps + protected operator slots + lineage minimum in budgeted selection | **#39** | S | prose (screener rejected 0 poisons) | ADOPT NOW — next `midmem-dev` item; composes with #34 |
-| InjecMEM [2608.23471](https://arxiv.org/abs/2608.23471) | one ordinary interaction plants a retrievable command | instruction-likeness flag + "evidence, not instruction" inject framing | **#40** | S | prose | ADOPT NOW; deterministic patterns only |
-| Forgetting Without Restarting [2609.04875](https://arxiv.org/abs/2609.04875) | deleting the record leaves derived summaries/plans unchanged | dependency-aware `forget` (claims by source, sole-support concepts, dirty pages, cascade log) | **#41** | M | prose ("substantially fewer" tokens) | execution-state replay stays consumer-side |
-| Compaction Cliff [2608.22752](https://arxiv.org/abs/2608.22752) | 53% of safety rules survive one compaction, 10% after five | fidelity class (verbatim / loss-limited / compressible) from authority × tier; verbatim lines untruncated in briefs | **#42** | S | numbers (20 configs) | today every result is a 600-char preview |
+| Utility Under Attack [2608.21230](https://arxiv.org/abs/2608.21230) | additive provenance weighting cannot suppress poison without suppressing legitimate untrusted evidence | per-authority occupancy caps + protected operator slots + lineage minimum in budgeted selection | **#39 ✅ 2026-09-16** | S | prose (screener rejected 0 poisons) | shipped; composes with #34 |
+| InjecMEM [2608.23471](https://arxiv.org/abs/2608.23471) | one ordinary interaction plants a retrievable command | instruction-likeness flag + "evidence, not instruction" inject framing | **#40 ✅ 2026-09-16** | S | prose | shipped; eight named deterministic patterns |
+| Forgetting Without Restarting [2609.04875](https://arxiv.org/abs/2609.04875) | deleting the record leaves derived summaries/plans unchanged | dependency-aware `forget` (claims by source, sole-support concepts, dirty pages, cascade log) | **#41 ✅ 2026-09-16** | M | prose ("substantially fewer" tokens) | shipped; execution-state replay stays consumer-side |
+| Compaction Cliff [2608.22752](https://arxiv.org/abs/2608.22752) | 53% of safety rules survive one compaction, 10% after five | fidelity class (verbatim / loss-limited / compressible) from authority × tier; verbatim lines untruncated in briefs | **#42 ✅ 2026-09-16** | S | numbers (20 configs) | shipped |
 | Memory Portability [2609.05339](https://arxiv.org/abs/2609.05339) | partial embedding migration forfeits most of a full re-embed | `reembed --model <old>` / `--all` for an embedder swap; migration pipeline with replay probes | **#23** (amend), **#26** | S / M | prose | re-embed half shipped 2026-09-09 |
 | Total Recall at What Cost? [2608.11879](https://arxiv.org/abs/2608.11879) | healthy-looking store, degraded recall | serving-cost ledger in the op log + fallback share in `brief` | **#23** (ledger half) | S | prose + our own outages | — |
 | StateMem [2608.19652](https://arxiv.org/abs/2608.19652) + PlanFence [2609.03340](https://arxiv.org/abs/2609.03340) | operative state needs dependencies; a freshness-only executor acted on obsolete plans in every revision scenario | `depends_on` claim edges; decisions cite the record ids they depend on; supersede flags dependents | **#32** | M | controlled workflows (PlanFence) | action-time validation is the consumer's |

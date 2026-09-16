@@ -34,6 +34,11 @@ Hybrid (lexical+vector) search of the knowledge store with provenance. Defaults 
 | `includeGraphContext` | boolean |  |  |
 | `minAuthority` | string |  | action-risk gate: exclude results below this origin authority (operator\|stack\|doc\|web) |
 | `deep` | boolean |  | force the full hybrid pipeline (skip the progressive lexical-first sufficiency gate) |
+| `historical` | boolean |  | stored-vs-used read: include archived entries (labelled by status); history reads never renew leases |
+| `statuses` | array<string> |  | explicit status set (active\|archived\|deleted); overrides historical |
+| `asOf` | string |  | ISO time: only entries that existed then (created_at <= asOf) |
+| `bounded` | boolean |  | apply the occupancy policy (per-authority caps, protected operator slots, lineage floor) even without maxTokens |
+| `includeWorking` | boolean |  | include working-function (context-assembly) entries, excluded by default |
 
 ## `feedback`
 
@@ -93,7 +98,7 @@ _No arguments._
 
 ## `forget`
 
-Remove a memory entry (soft by default; hard requires force:true).
+Remove a memory entry (soft by default; hard requires force:true). Dependency-aware: claims this entry sourced are archived and concept nodes it alone supported are flagged for review (returned as `cascade`; see audit.orphanedConcepts).
 
 | arg | type | required | notes |
 |---|---|---|---|

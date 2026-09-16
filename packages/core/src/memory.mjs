@@ -29,7 +29,13 @@ export class TieredMemory {
     if (!MEMORY_FUNCTIONS.includes(fn)) throw new Error(`unknown memory function: ${fn} (expected: ${MEMORY_FUNCTIONS.join('|')})`);
     const id = genId(tier, content.slice(0, 80) + type + Date.now());
     const ts = nowISO();
-    const expiresAt = tc.ttl ? new Date(Date.now() + tc.ttl).toISOString() : null;
+    let expiresAt = tc.ttl ? new Date(Date.now() + tc.ttl).toISOString() : null;
+    // Lifecycle class (#44): a `working` entry is context-assembly state — lease-bound to the
+    // working TTL whatever its tier, so a transient note can never outlive the task that wrote it.
+    if (fn === 'working') {
+      const cap = new Date(Date.now() + (this.cfg.lifecycle?.workingTtlMs ?? 24 * 3600e3)).toISOString();
+      expiresAt = expiresAt && expiresAt < cap ? expiresAt : cap;
+    }
     const info = this.db.prepare(`
       INSERT INTO entries(id,tier,type,content,source_id,provenance,concepts,status,scope,created_at,updated_at,expires_at,mem_function,project)
       VALUES(?,?,?,?,?,?,?, 'active', ?,?,?,?,?,?)
@@ -98,12 +104,15 @@ export class TieredMemory {
     return r ? this.#hydrate(r) : null;
   }
 
-  /** Active entries, optionally filtered by tier, scope and project (project + global rule).
-   *  Expired-but-unswept entries are excluded — an expired lease is dead even before
-   *  maintenance runs. */
-  listActive({ tiers = this.tierNames, scopes = null, projects = null } = {}) {
-    const conds = ["status='active'", '(expires_at IS NULL OR expires_at > ?)', `tier IN (${tiers.map(() => '?').join(',')})`];
-    const params = [nowISO(), ...tiers];
+  /** Entries filtered by tier, scope and project (project + global rule) and — roadmap #43 —
+   *  by status: default `['active']` (expired-but-unswept excluded — an expired lease is dead even
+   *  before maintenance runs); `statuses:['active','archived']` is the historical read, where the
+   *  lease rule applies to active rows only; `asOf` keeps rows that existed at that time. */
+  listActive({ tiers = this.tierNames, scopes = null, projects = null, statuses = null, asOf = null } = {}) {
+    const st = statuses && statuses.length ? statuses : ['active'];
+    const conds = [`status IN (${st.map(() => '?').join(',')})`, "(status != 'active' OR expires_at IS NULL OR expires_at > ?)", `tier IN (${tiers.map(() => '?').join(',')})`];
+    const params = [...st, nowISO(), ...tiers];
+    if (asOf) { conds.push('created_at <= ?'); params.push(asOf); }
     if (scopes && scopes.length) { conds.push(`scope IN (${scopes.map(() => '?').join(',')})`); params.push(...scopes); }
     const pc = projectClause('project', projects);
     if (pc) { conds.push(pc.sql); params.push(...pc.params); }
@@ -111,16 +120,18 @@ export class TieredMemory {
   }
 
   /** Map of rowid → entry for a tier/scope set (used by retrieval to join FTS hits). */
-  rowidMap(tiers = this.tierNames, scopes = null, projects = null) {
+  rowidMap(tiers = this.tierNames, scopes = null, projects = null, statuses = null, asOf = null) {
     const m = new Map();
-    for (const e of this.listActive({ tiers, scopes, projects })) m.set(e.rowid, e);
+    for (const e of this.listActive({ tiers, scopes, projects, statuses, asOf })) m.set(e.rowid, e);
     return m;
   }
 
-  /** Vectors for active entries in the given tiers/scopes/projects: [{id, tier, vector}]. */
-  activeVectors(tiers = this.tierNames, scopes = null, projects = null) {
-    const conds = ["e.status='active'", '(e.expires_at IS NULL OR e.expires_at > ?)', `e.tier IN (${tiers.map(() => '?').join(',')})`];
-    const params = [nowISO(), ...tiers];
+  /** Vectors for entries in the given tiers/scopes/projects/statuses: [{id, tier, vector}]. */
+  activeVectors(tiers = this.tierNames, scopes = null, projects = null, statuses = null, asOf = null) {
+    const st = statuses && statuses.length ? statuses : ['active'];
+    const conds = [`e.status IN (${st.map(() => '?').join(',')})`, "(e.status != 'active' OR e.expires_at IS NULL OR e.expires_at > ?)", `e.tier IN (${tiers.map(() => '?').join(',')})`];
+    const params = [...st, nowISO(), ...tiers];
+    if (asOf) { conds.push('e.created_at <= ?'); params.push(asOf); }
     if (scopes && scopes.length) { conds.push(`e.scope IN (${scopes.map(() => '?').join(',')})`); params.push(...scopes); }
     const pc = projectClause('e.project', projects);
     if (pc) { conds.push(pc.sql); params.push(...pc.params); }
@@ -197,7 +208,8 @@ export class TieredMemory {
       if (!tc.autoPromote || !next[tc.name]) continue;
       const target = this.tier(next[tc.name]);
       const rule = target.curatedOnly ? maint.wisdomPromote : maint.factPromote;
-      const conds = ["status='active'", 'tier = ?'];
+      // Lifecycle class (#44): working entries are never promotion candidates, whatever their counts.
+      const conds = ["status='active'", 'tier = ?', "(mem_function IS NULL OR mem_function != 'working')"];
       const params = [tc.name];
       if (target.curatedOnly) {
         conds.push('retrieval_count >= ?', 'trust_score >= ?', 'helpful_count >= ?');

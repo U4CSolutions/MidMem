@@ -58,8 +58,20 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_GUARD_OPAQUE_TASK_LABELS` | `guardOpaqueTaskLabels: env('GUARD_OPAQUE_TASK_LABELS') !== '0',` |
 | `MIDMEM_AUTO_INGEST` | `enabled: env('AUTO_INGEST') !== '0',` |
 | `MIDMEM_AUTO_INGEST_ON_MAINTAIN` | `onMaintain: env('AUTO_INGEST_ON_MAINTAIN') !== '0',` |
+| `MIDMEM_OCCUPANCY` | `enabled: env('OCCUPANCY') !== '0',` |
+| `MIDMEM_OCCUPANCY_CAP_STACK` | `caps: { operator: 1, stack: Number(env('OCCUPANCY_CAP_STACK') ?? 0.6), doc: Number(env('OCCUPANCY_CAP_DOC') ?? 0.6), web: Number(env('OCCUPA` |
+| `MIDMEM_OCCUPANCY_CAP_DOC` | `caps: { operator: 1, stack: Number(env('OCCUPANCY_CAP_STACK') ?? 0.6), doc: Number(env('OCCUPANCY_CAP_DOC') ?? 0.6), web: Number(env('OCCUPA` |
+| `MIDMEM_OCCUPANCY_CAP_WEB` | `caps: { operator: 1, stack: Number(env('OCCUPANCY_CAP_STACK') ?? 0.6), doc: Number(env('OCCUPANCY_CAP_DOC') ?? 0.6), web: Number(env('OCCUPA` |
+| `MIDMEM_OCCUPANCY_OPERATOR_SLOTS` | `protectedOperatorSlots: Number(env('OCCUPANCY_OPERATOR_SLOTS') ?? 2),` |
+| `MIDMEM_OCCUPANCY_MIN_LINEAGES` | `minLineages: Number(env('OCCUPANCY_MIN_LINEAGES') ?? 2),` |
+| `MIDMEM_INSTRUCTION_FLAG` | `instructionLike: { enabled: env('INSTRUCTION_FLAG') !== '0', penalty: Number(env('INSTRUCTION_PENALTY') ?? 0.01) },` |
+| `MIDMEM_INSTRUCTION_PENALTY` | `instructionLike: { enabled: env('INSTRUCTION_FLAG') !== '0', penalty: Number(env('INSTRUCTION_PENALTY') ?? 0.01) },` |
+| `MIDMEM_FIDELITY` | `fidelity: { enabled: env('FIDELITY') !== '0', verbatimMaxChars: Number(env('VERBATIM_MAX_CHARS') ?? 4000) },` |
+| `MIDMEM_VERBATIM_MAX_CHARS` | `fidelity: { enabled: env('FIDELITY') !== '0', verbatimMaxChars: Number(env('VERBATIM_MAX_CHARS') ?? 4000) },` |
+| `MIDMEM_WORKING_TTL_MS` | `lifecycle: { workingTtlMs: Number(env('WORKING_TTL_MS') \|\| 24 * 3600e3) },` |
+| `MIDMEM_FORGET_CASCADE` | `forget: { cascade: env('FORGET_CASCADE') !== '0' },` |
 | `MIDMEM_AGENT_SCOPE` | `agentScope: env('AGENT_SCOPE') \|\| 'shared',` |
 | `MIDMEM_PROJECT` | `project: normalizeProject(env('PROJECT')),` |
 | `MIDMEM_PROJECT_LIFT` | `liftOnCurated: env('PROJECT_LIFT') !== '0',` |
 
-_55 env knobs._
+_67 env knobs._

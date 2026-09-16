@@ -217,6 +217,31 @@ export function loadConfig(overrides = {}) {
       enabled: env('AUTO_INGEST') !== '0',
       onMaintain: env('AUTO_INGEST_ON_MAINTAIN') !== '0',
     },
+    /** Recall policy (roadmap 2026-09 #39/#40/#42): what a budgeted recall may return. */
+    recall: {
+      /** #39 bounded occupancy — applies when a query carries maxTokens (briefs, proactive recall)
+       *  or `bounded:true`. Caps are fractions of the row limit per authority class and bind only
+       *  while a competitor from another class is waiting; operator lines get protected slots;
+       *  selection keeps at least minLineages distinct root sources when candidates allow. */
+      occupancy: {
+        enabled: env('OCCUPANCY') !== '0',
+        caps: { operator: 1, stack: Number(env('OCCUPANCY_CAP_STACK') ?? 0.6), doc: Number(env('OCCUPANCY_CAP_DOC') ?? 0.6), web: Number(env('OCCUPANCY_CAP_WEB') ?? 0.25) },
+        protectedOperatorSlots: Number(env('OCCUPANCY_OPERATOR_SLOTS') ?? 2),
+        minLineages: Number(env('OCCUPANCY_MIN_LINEAGES') ?? 2),
+      },
+      /** #40 instruction-likeness — deterministic injection-shape flag; flagged rows are demoted
+       *  by `penalty` (same magnitude family as the dead-end penalty) and labelled, never dropped. */
+      instructionLike: { enabled: env('INSTRUCTION_FLAG') !== '0', penalty: Number(env('INSTRUCTION_PENALTY') ?? 0.01) },
+      /** #42 fidelity class — verbatim rows (operator authority / curated tier) return full content
+       *  up to verbatimMaxChars (a safety ceiling, flagged `truncated` when hit). */
+      fidelity: { enabled: env('FIDELITY') !== '0', verbatimMaxChars: Number(env('VERBATIM_MAX_CHARS') ?? 4000) },
+    },
+    /** Lifecycle class (roadmap 2026-09 #44): `working` entries are context-assembly state —
+     *  lease-bound to workingTtlMs regardless of tier, never promoted, excluded from default reads. */
+    lifecycle: { workingTtlMs: Number(env('WORKING_TTL_MS') || 24 * 3600e3) },
+    /** Dependency-aware forget (roadmap 2026-09 #41): forgetting an entry archives the claims it
+     *  sourced and flags concept nodes it alone supported (report-only flags). */
+    forget: { cascade: env('FORGET_CASCADE') !== '0' },
     /** Default memory scope for this process: `openclaw` | `hermes` | `shared`.
      *  Set per MCP registration (OCMW_AGENT_SCOPE). Writes default here; reads = this + shared.
      *  `shared` = admin/bridge context (may write any scope). */

@@ -9,7 +9,7 @@ Parsed from `packages/core/bin/cli.mjs` (the wrapper `midmem <command>` in a dep
 | `init` | — |
 | `ingest` | `--type` `--title` `--scope` `--curated` `--authority` |
 | `remember` | `--tier` `--type` `--scope` `--curated` `--function` `--authority` |
-| `query` | `--tiers` `--scopes` `--functions` `--limit` `--graph` `--minAuthority` `--deep` |
+| `query` | `--tiers` `--scopes` `--functions` `--limit` `--graph` `--minAuthority` `--deep` `--historical` `--statuses` `--asOf` `--bounded` `--includeWorking` |
 | `bridge` | — |
 | `handoff` | `--profile` `--scopes` `--tiers` |
 | `recall` | — |

@@ -221,11 +221,15 @@ export async function forgetEntries(o, { ids = [], match = null, opaque = false,
   });
 
   let forgotten = 0;
+  const cascade = { claimsArchived: 0, conceptsFlagged: 0 }; // #41: summed over the batch
   if (!dryRun) {
-    for (const r of selected) { const res = await o.forget(r.id, { soft: true }); if (res.success) forgotten++; }
-    o.db.logOp('forget-entries', { forgotten, match: match || null, opaque, scope, project, types: types.join(',') || null });
+    for (const r of selected) {
+      const res = await o.forget(r.id, { soft: true });
+      if (res.success) { forgotten++; cascade.claimsArchived += res.cascade?.claimsArchived || 0; cascade.conceptsFlagged += res.cascade?.conceptsFlagged || 0; }
+    }
+    o.db.logOp('forget-entries', { forgotten, cascade, match: match || null, opaque, scope, project, types: types.join(',') || null });
   }
-  return { matched: selected.length, forgotten, dryRun, sample: selected.slice(0, 5).map((r) => r.id) };
+  return { matched: selected.length, forgotten, cascade, dryRun, sample: selected.slice(0, 5).map((r) => r.id) };
 }
 
 /**

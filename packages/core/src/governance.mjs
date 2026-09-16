@@ -56,6 +56,15 @@ export function defaultPolicies(cfg) {
       },
     },
     {
+      // Lifecycle class (roadmap #44): `working` is context-assembly state and never climbs tiers —
+      // the documented contract, now enforced on the manual path too (auto-promotion filters it out).
+      name: 'working-never-promotes',
+      applies: (op) => op === 'promote',
+      check: (_op, ctx) => (ctx.memFunction === 'working')
+        ? { allow: false, reason: "memory function 'working' is lease-bound context state; it cannot be promoted" }
+        : { allow: true },
+    },
+    {
       name: 'scope-write',
       applies: (op) => op === 'store' || op === 'ingest' || op === 'promote',
       check: (_op, ctx) => {

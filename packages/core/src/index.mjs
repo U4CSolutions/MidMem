@@ -15,6 +15,7 @@ export { projectVault } from './project.mjs';
 export { bridgeMemory, walkMarkdown } from './bridge.mjs';
 export { normalizeProject, resolveProjects, projectClause, matchesProject } from './projectaxis.mjs';
 export { parseBridgeSources } from './config.mjs';
+export { instructionLikeness, fidelityClass, selectBounded, lineageOf, INSTRUCTION_PATTERNS, FIDELITY_CLASSES } from './recallpolicy.mjs';
 export { makeVectorStore, SqliteVectorStore, QdrantVectorStore } from './vectorstore.mjs';
 export { handoffBrief, HANDOFF_PROFILES } from './handoff.mjs';
 export { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, forgetNodes, isOpaqueTaskLabel, consolidateWork, categorizeIngest, functionForType, MEMORY_FUNCTIONS, WORK_EVENT_TYPES, WORK_EVENT_NAMES } from './workmemory.mjs';

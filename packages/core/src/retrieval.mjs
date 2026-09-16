@@ -13,13 +13,17 @@ import { functionForType } from './workmemory.mjs';
 import { conceptSeedsFromVector } from './concepts.mjs';
 import { authorityRank, AUTHORITY_LEVELS } from './authority.mjs';
 import { projectClause, matchesProject } from './projectaxis.mjs';
+import { instructionLikeness, fidelityClass, selectBounded } from './recallpolicy.mjs';
 
 /** One FTS lane (token or trigram), scope/tier/project filtered. Returns ranked entry ids.
  *  Expired leases are filtered here too — decay holds even between maintenance sweeps. */
-function ftsLane(db, table, expr, tiers, scoped, projects, limit = 200) {
+function ftsLane(db, table, expr, tiers, scoped, projects, statuses = ['active'], asOf = null, limit = 200) {
   if (!expr) return [];
-  const conds = ["e.status='active'", '(e.expires_at IS NULL OR e.expires_at > ?)', `e.tier IN (${tiers.map(() => '?').join(',')})`];
-  const params = [expr, new Date().toISOString(), ...tiers];
+  // Historical reads (#43): status set is a parameter; the lease rule applies to active rows only.
+  const st = statuses && statuses.length ? statuses : ['active'];
+  const conds = [`e.status IN (${st.map(() => '?').join(',')})`, "(e.status != 'active' OR e.expires_at IS NULL OR e.expires_at > ?)", `e.tier IN (${tiers.map(() => '?').join(',')})`];
+  const params = [expr, ...st, new Date().toISOString(), ...tiers];
+  if (asOf) { conds.push('e.created_at <= ?'); params.push(asOf); }
   if (scoped) { conds.push(`e.scope IN (${scoped.map(() => '?').join(',')})`); params.push(...scoped); }
   const pc = projectClause('e.project', projects);
   if (pc) { conds.push(pc.sql); params.push(...pc.params); }
@@ -31,10 +35,12 @@ function ftsLane(db, table, expr, tiers, scoped, projects, limit = 200) {
 }
 
 /** Filter vector-store candidate ids against live entries (state.db is the metadata authority). */
-function filterActiveIds(db, ids, tiers, scoped, projects) {
+function filterActiveIds(db, ids, tiers, scoped, projects, statuses = ['active'], asOf = null) {
   if (!ids.length) return new Set();
-  const conds = [`id IN (${ids.map(() => '?').join(',')})`, "status='active'", '(expires_at IS NULL OR expires_at > ?)', `tier IN (${tiers.map(() => '?').join(',')})`];
-  const params = [...ids, new Date().toISOString(), ...tiers];
+  const st = statuses && statuses.length ? statuses : ['active'];
+  const conds = [`id IN (${ids.map(() => '?').join(',')})`, `status IN (${st.map(() => '?').join(',')})`, "(status != 'active' OR expires_at IS NULL OR expires_at > ?)", `tier IN (${tiers.map(() => '?').join(',')})`];
+  const params = [...ids, ...st, new Date().toISOString(), ...tiers];
+  if (asOf) { conds.push('created_at <= ?'); params.push(asOf); }
   if (scoped) { conds.push(`scope IN (${scoped.map(() => '?').join(',')})`); params.push(...scoped); }
   const pc = projectClause('project', projects);
   if (pc) { conds.push(pc.sql); params.push(...pc.params); }
@@ -55,6 +61,10 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
   const scoped = scopes && scopes.length ? scopes : null;
   // Project axis (roadmap #18): a list means project + global; null means no partition filter.
   const projects = Array.isArray(opts.projects) && opts.projects.length ? opts.projects : null;
+  // Historical reads (#43): current-only by default; historical:true = active + archived; an
+  // explicit statuses list wins. asOf keeps rows that existed at that time (created_at <= asOf).
+  const statuses = Array.isArray(opts.statuses) && opts.statuses.length ? opts.statuses : (opts.historical ? ['active', 'archived'] : ['active']);
+  const asOf = opts.asOf || null;
   const expr = ftsMatchExpr(query);
 
   // --- Lanes ---
@@ -63,15 +73,15 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
   // are all it pays for. Everything downstream (filters, boosts, budget) behaves identically.
   const lexicalOnly = opts.lexicalOnly === true;
   const lanes = {
-    fts: ftsLane(db, 'entries_fts', expr, tiers, scoped, projects),
-    trigram: ftsLane(db, 'entries_fts_trigram', expr, tiers, scoped, projects),
+    fts: ftsLane(db, 'entries_fts', expr, tiers, scoped, projects, statuses, asOf),
+    trigram: ftsLane(db, 'entries_fts_trigram', expr, tiers, scoped, projects, statuses, asOf),
     vector: [],
   };
   let qv = null;
   if (!lexicalOnly) {
     ({ vector: qv } = await embedder.embed(query));
     const vraw = await memory.vectorStore.search(qv, 400); // backend-ranked candidates (id+score)
-    const vAllowed = filterActiveIds(db, vraw.map((r) => r.id), tiers, scoped, projects);
+    const vAllowed = filterActiveIds(db, vraw.map((r) => r.id), tiers, scoped, projects, statuses, asOf);
     lanes.vector = vraw.filter((r) => vAllowed.has(r.id)).slice(0, 200).map((r) => r.id);
   }
 
@@ -101,7 +111,12 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
   if (conceptSeeds.size) {
     const tierSet = new Set(tiers);
     cand = cand.filter((c) => !conceptSeeds.has(c.id) || c.ranks.fts || c.ranks.trigram || c.ranks.vector
-      || (matchesProject(c.entry, projects) && tierSet.has(c.entry.tier) && (!scoped || scoped.includes(c.entry.scope)) && c.entry.status === 'active'));
+      || (matchesProject(c.entry, projects) && tierSet.has(c.entry.tier) && (!scoped || scoped.includes(c.entry.scope)) && statuses.includes(c.entry.status) && (!asOf || c.entry.created_at <= asOf)));
+  }
+  // Lifecycle class (#44): `working` is context-assembly state — excluded from reads unless the
+  // caller asks for that function explicitly (functions:['working']) or passes includeWorking.
+  if (!(opts.functions && opts.functions.includes('working')) && !opts.includeWorking) {
+    cand = cand.filter((c) => (c.entry.mem_function || functionForType(c.entry.type)) !== 'working');
   }
 
   // --- Function-axis filter (survey 2607.25380): restrict to the requested memory ROLE(s).
@@ -162,6 +177,17 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
     }
   }
 
+  // --- Instruction-likeness (#40): flag injection-shaped rows and demote them by a fixed penalty.
+  //     The flag and its matched pattern names travel in rank so a consumer can drop by name;
+  //     nothing is removed here. ---
+  const il = cfg.recall?.instructionLike || {};
+  if (il.enabled !== false) {
+    for (const c of cand) {
+      const v = instructionLikeness(c.entry.content);
+      if (v.flag) { c.score -= (il.penalty ?? 0.01); c.ranks.instructionLike = true; c.ranks.instructionMatched = v.matched; }
+    }
+  }
+
   // --- P5 concept boost: lift entries surfaced by concept routing (small, like graph boost). ---
   if (conceptSeeds.size) {
     const cb = cfg.conceptRouting?.boost ?? 0.005;
@@ -170,36 +196,62 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
 
   cand.sort((a, b) => b.score - a.score);
 
-  const preview = (e) => e.content.slice(0, 600) + (e.content.length > 600 ? '…' : '');
+  // --- Fidelity class (#42): verbatim rows (operator authority / curated tier) return their full
+  //     content up to a safety ceiling; the rest keep the preview cut. The class travels on the
+  //     result so a brief can budget verbatim lines first. ---
+  const fcfg = cfg.recall?.fidelity || {};
+  const fidelityOf = (e) => (fcfg.enabled === false ? 'compressible' : fidelityClass(e, cfg.tiers || []));
+  const render = (e) => {
+    if (fidelityOf(e) === 'verbatim') {
+      const max = fcfg.verbatimMaxChars ?? 4000;
+      return e.content.length > max ? { text: e.content.slice(0, max) + '…', truncated: true } : { text: e.content, truncated: false };
+    }
+    return { text: e.content.slice(0, 600) + (e.content.length > 600 ? '…' : ''), truncated: e.content.length > 600 };
+  };
 
-  // --- Token budget (surgical injection) or top-k ---
+  // --- Token budget (surgical injection) or top-k. A budgeted (or `bounded:true`) selection runs
+  //     the occupancy policy (#39): per-authority caps that bind only against a waiting competitor,
+  //     protected operator slots, and a minimum of independent source lineages. ---
   let selected;
-  if (maxTokens) {
-    selected = [];
-    let budget = maxTokens;
-    for (const c of cand) {
-      const cost = Math.ceil(preview(c.entry).length / 4);
-      if (cost > budget) continue; // skip oversized, keep filling from the rest
-      budget -= cost;
-      selected.push(c);
-      if (limit && selected.length >= limit) break;
+  const occ = cfg.recall?.occupancy || {};
+  if (maxTokens || opts.bounded) {
+    const costOf = (c) => Math.ceil(render(c.entry).text.length / 4);
+    if (occ.enabled !== false) {
+      selected = selectBounded(cand, { limit: limit || 20, budget: maxTokens || null, costOf, occupancy: occ });
+    } else {
+      selected = [];
+      let budget = maxTokens || Infinity;
+      for (const c of cand) {
+        const cost = costOf(c);
+        if (cost > budget) continue; // skip oversized, keep filling from the rest
+        budget -= cost;
+        selected.push(c);
+        if (limit && selected.length >= limit) break;
+      }
     }
   } else {
     selected = cand.slice(0, limit);
   }
 
-  return selected.map((c) => ({
-    id: c.id,
-    tier: c.entry.tier,
-    type: c.entry.type,
-    project: c.entry.project ?? null,
-    content: preview(c.entry),
-    score: Number(c.score.toFixed(6)),
-    trust: c.entry.trust_score,
-    authority: c.entry.provenance?.authority ?? null,
-    rank: c.ranks,
-    provenance: includeProvenance ? c.entry.provenance ?? null : undefined,
-  }));
+  return selected.map((c) => {
+    const r = render(c.entry);
+    return {
+      id: c.id,
+      tier: c.entry.tier,
+      type: c.entry.type,
+      status: c.entry.status,
+      memFunction: c.entry.mem_function || functionForType(c.entry.type),
+      project: c.entry.project ?? null,
+      fidelity: fidelityOf(c.entry),
+      truncated: r.truncated,
+      content: r.text,
+      score: Number(c.score.toFixed(6)),
+      trust: c.entry.trust_score,
+      authority: c.entry.provenance?.authority ?? null,
+      rank: c.ranks,
+      provenance: includeProvenance ? c.entry.provenance ?? null : undefined,
+    };
+  });
 }
 
 /** Deterministic evidence-sufficiency check (roadmap #11): the top hits must cover enough of the
