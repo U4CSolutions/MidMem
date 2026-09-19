@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           # Floor major: node:sqlite is flag-free from 22.13 (backport of 23.4).
           # "22" resolves to the latest 22.x, proving the oldest supported major.
