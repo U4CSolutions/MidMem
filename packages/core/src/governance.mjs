@@ -65,6 +65,31 @@ export function defaultPolicies(cfg) {
         : { allow: true },
     },
     {
+      // Governed reclassification (2026-09-23): a stack scope may reclassify only rows in its own
+      // scope or 'shared', and may only move them into its own scope or 'shared' — it can never pull
+      // another stack's private rows out, nor push rows into another stack's private scope.
+      // 'shared' (admin/bridge) may reclassify anything.
+      name: 'reclassify-scope-write',
+      applies: (op) => op === 'rescope' || op === 'authority-lower',
+      check: (op, ctx) => {
+        if (cfg.agentScope === 'shared') return { allow: true };
+        const ok = (s) => s === cfg.agentScope || s === 'shared';
+        const touched = [...(ctx.fromScopes || []), ...(op === 'rescope' && ctx.to ? [ctx.to] : [])];
+        const bad = [...new Set(touched.filter((s) => !ok(s)))];
+        return bad.length ? { allow: false, reason: `agent '${cfg.agentScope}' cannot reclassify rows in private scope(s): ${bad.join(', ')}` } : { allow: true };
+      },
+    },
+    {
+      // Authority is assigned at origin and can never be RAISED downstream (roadmap #10). This op is
+      // the governed way to correct an over-labelled origin DOWNWARD; raising stays impossible here —
+      // it requires a curated re-ingest, which the operator-authority policy already gates.
+      name: 'authority-lower-only',
+      applies: (op) => op === 'authority-lower',
+      check: (_op, ctx) => (ctx.raising > 0)
+        ? { allow: false, reason: `authority can only be lowered — ${ctx.raising} selected row(s) would be raised to '${ctx.to}'` }
+        : { allow: true },
+    },
+    {
       name: 'scope-write',
       applies: (op) => op === 'store' || op === 'ingest' || op === 'promote',
       check: (_op, ctx) => {

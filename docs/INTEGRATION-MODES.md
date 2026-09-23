@@ -120,7 +120,7 @@ Hermes builds; both read/write the one shared `state.db`.
 | `MIDMEM_AGENT_SCOPE` | `shared` | this caller's write scope (`openclaw`/`hermes`/`shared`) |
 | `MIDMEM_PROJECT` | unset (global) | this caller's project slug — writes tag it, reads return project + global; unset = global writes, unfiltered reads |
 | `MIDMEM_PROJECT_LIFT` | on | promotion into `wisdom` lifts a project entry to global (lineage kept in `provenance.liftedFrom`) |
-| `MIDMEM_BRIDGE_SOURCES` | built-in four (OpenClaw/Hermes memory dirs + vault folders) | `dir\|scope\|type\|project\|recursive;…` — replaces the default bridge roots so any harness's memory dir or report folder registers with zero core change |
+| `MIDMEM_BRIDGE_SOURCES` | built-in: OpenClaw/Hermes memory dirs + each agent vault folder split (the folder private, its `research/` + `reports/` bridged as `shared`) | `dir\|scope\|type\|project\|recursive\|exclude,…;…` — replaces the default bridge roots so any harness's memory dir or report folder registers with zero core change; the sixth field lists subfolders another source owns |
 | `MIDMEM_BRIDGE_RECURSIVE` | on | bridge walks subfolders (dot-dirs + `node_modules` skipped); `0` = flat walk |
 | `MIDMEM_OCCUPANCY` / `…_CAP_STACK` `…_CAP_DOC` `…_CAP_WEB` `…_OPERATOR_SLOTS` `…_MIN_LINEAGES` | on / 0.6 / 0.6 / 0.25 / 2 / 2 | bounded-occupancy selection on budgeted reads (#39): per-authority caps that bind only against a waiting competitor, protected operator slots, lineage floor |
 | `MIDMEM_INSTRUCTION_FLAG` / `MIDMEM_INSTRUCTION_PENALTY` | on / 0.01 | instruction-likeness flag on results (#40); flagged rows demoted + labelled, never dropped |

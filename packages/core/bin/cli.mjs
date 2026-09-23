@@ -49,6 +49,12 @@ try {
     case 'refresh-concepts': out(await o.refreshConcepts({ maxEmbedPerPass: flags.max != null ? Number(flags.max) : undefined })); break;
     case 'packs': out(o.listPacks()); break;
     case 'export': out(o.exportKnowledge()); break;
+    case 'rescope':
+    case 'lower-authority': {
+      const sel = { to: flags.to, ids: pos, pathPrefix: typeof flags.pathPrefix === 'string' ? flags.pathPrefix : null, match: typeof flags.match === 'string' ? flags.match : null, fromScopes: typeof flags.from === 'string' ? flags.from.split(',') : null, statuses: typeof flags.statuses === 'string' ? flags.statuses.split(',') : null, dryRun: !!flags.dryRun };
+      out(cmd === 'rescope' ? await o.rescope(sel) : await o.lowerAuthority({ ...sel, reason: typeof flags.reason === 'string' ? flags.reason : null }));
+      break;
+    }
     case 'reembed': out(await o.reembedFallback({ limit: Number(flags.limit) || 200, since: typeof flags.since === 'string' ? flags.since : null, dryRun: !!flags.dryRun })); break;
     case 'prospective': {
       const sub = pos[0];
@@ -60,7 +66,7 @@ try {
     }
     case 'pattern': out(await o.recordPattern({ type: flags.type || pos[0], title: flags.title || pos.slice(flags.type ? 0 : 1).join(' '), context: flags.context, problem: flags.problem, solution: flags.solution, outcome: flags.outcome, evidence: typeof flags.evidence === 'string' ? flags.evidence.split(';').filter(Boolean) : [], scope: flags.scope, ...wproj() })); break;
     default:
-      out('Usage: ocmw <init|ingest <path>|remember <text>|query <text>|recall <id>|recall-check <message>|work --kind <type>|tasks|close-tasks [labels…]|brief|lint|project|promote <id> <tier>|maintain|bridge|reembed [--since <ISO> --limit <n> --dryRun]|handoff <task>> [--kind task_attempt|source_used|dead_end|correction|artifact|decision --task --outcome --status --source --artifact --related --type --title --tier --tiers --scope --scopes --limit --minScore --maxTokens --graph --curated --force --profile local|frontier --project <slug> --projects a,b --all-projects]\n  project axis: --project tags writes (default MIDMEM_PROJECT) and filters reads to project + global; --projects a,b filters on several; --all-projects lifts the default\n  query history/policy: --historical (active + archived, labelled) | --statuses a,b | --asOf <ISO> | --bounded (occupancy policy without a token budget) | --includeWorking\n  close-tasks selectors (at least one required): [labels…] | --task <label> | --match <regex> | --opaque | --olderThanDays <n>; preview with --dryRun\n  forget-nodes (HARD delete, edges cascade) selectors: [node ids…] | --match <label regex> | --opaque; --types narrows; preview with --dryRun');
+      out('Usage: ocmw <init|ingest <path>|remember <text>|query <text>|recall <id>|recall-check <message>|work --kind <type>|tasks|close-tasks [labels…]|brief|lint|project|promote <id> <tier>|maintain|bridge|reembed [--since <ISO> --limit <n> --dryRun]|rescope --to <scope>|lower-authority --to <authority>|handoff <task>> [--kind task_attempt|source_used|dead_end|correction|artifact|decision --task --outcome --status --source --artifact --related --type --title --tier --tiers --scope --scopes --limit --minScore --maxTokens --graph --curated --force --profile local|frontier --project <slug> --projects a,b --all-projects]\n  project axis: --project tags writes (default MIDMEM_PROJECT) and filters reads to project + global; --projects a,b filters on several; --all-projects lifts the default\n  rescope / lower-authority selectors (at least one required): [entry ids…] | --pathPrefix <source dir> | --match <content regex>; --from a,b and --statuses a,b narrow; --reason (lower-authority); preview with --dryRun\n  query history/policy: --historical (active + archived, labelled) | --statuses a,b | --asOf <ISO> | --bounded (occupancy policy without a token budget) | --includeWorking\n  close-tasks selectors (at least one required): [labels…] | --task <label> | --match <regex> | --opaque | --olderThanDays <n>; preview with --dryRun\n  forget-nodes (HARD delete, edges cascade) selectors: [node ids…] | --match <label regex> | --opaque; --types narrows; preview with --dryRun');
   }
 } catch (e) { console.error('ERROR:', e.message); process.exitCode = 1; }
 finally { o.close(); }

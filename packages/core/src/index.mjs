@@ -14,7 +14,7 @@ export { checkGrounding, groundingScore } from './grounding.mjs';
 export { projectVault } from './project.mjs';
 export { bridgeMemory, walkMarkdown } from './bridge.mjs';
 export { normalizeProject, resolveProjects, projectClause, matchesProject } from './projectaxis.mjs';
-export { parseBridgeSources } from './config.mjs';
+export { parseBridgeSources, agentVaultSources, DELIVERABLE_DIRS } from './config.mjs';
 export { instructionLikeness, fidelityClass, selectBounded, lineageOf, INSTRUCTION_PATTERNS, FIDELITY_CLASSES } from './recallpolicy.mjs';
 export { makeVectorStore, SqliteVectorStore, QdrantVectorStore } from './vectorstore.mjs';
 export { handoffBrief, HANDOFF_PROFILES } from './handoff.mjs';

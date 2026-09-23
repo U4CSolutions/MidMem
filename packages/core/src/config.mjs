@@ -52,13 +52,13 @@ export function loadConfig(overrides = {}) {
     /** Native→middleware bridge: dirs scanned by `bridgeMemory`, each tagged with a scope (+ an
      *  optional project). Pulls each stack's memory into the shared, tiered, searchable store.
      *  Configurable (roadmap 2026-09 #38): MIDMEM_BRIDGE_SOURCES = `dir|scope|type|project;…`
-     *  (type/project optional) REPLACES the default list, so a third harness's memory dir or a
+     *  (type/project optional; a sixth field lists subfolders to skip, comma-separated) REPLACES the default list, so a third harness's memory dir or a
      *  console's report folders register without a core change. */
     bridgeSources: parseBridgeSources(env('BRIDGE_SOURCES')) || [
       { dir: path.join(HOME, '.openclaw', 'workspace', 'memory'), scope: 'openclaw', type: 'session' },
       { dir: path.join(HOME, '.hermes', 'memories'), scope: 'hermes', type: 'note' },
-      { dir: path.join(VAULT, 'OpenClaw'), scope: 'openclaw', type: 'note' },
-      { dir: path.join(VAULT, 'Hermes'), scope: 'hermes', type: 'note' },
+      ...agentVaultSources(path.join(VAULT, 'OpenClaw'), 'openclaw'),
+      ...agentVaultSources(path.join(VAULT, 'Hermes'), 'hermes'),
     ],
     /** Bridge walk recurses into subfolders (skipping dot-dirs + node_modules); a per-source
      *  `recursive:false` opts out. MIDMEM_BRIDGE_RECURSIVE=0 restores the flat walk globally. */
@@ -262,6 +262,23 @@ export function loadConfig(overrides = {}) {
 }
 
 /**
+ * Deliverable subfolders of an agent's vault folder (2026-09-23). Documents an agent writes FOR the
+ * operator — research write-ups and reports — are shared knowledge: each stack must be able to read
+ * the other's. Everything else under the agent's folder (notes/, the root, any subfolder added later)
+ * stays private to that stack by default, because notes can be personal.
+ */
+export const DELIVERABLE_DIRS = Object.freeze(['research', 'reports']);
+
+/** Bridge sources for one agent vault folder: the folder itself (private scope, deliverable
+ *  subfolders excluded) plus each deliverable subfolder as its own `shared` source. */
+export function agentVaultSources(dir, scope, type = 'note') {
+  return [
+    { dir, scope, type, exclude: [...DELIVERABLE_DIRS] },
+    ...DELIVERABLE_DIRS.map((d) => ({ dir: path.join(dir, d), scope: 'shared', type })),
+  ];
+}
+
+/**
  * Parse MIDMEM_BRIDGE_SOURCES: entries separated by `;`, fields by `|` — `dir|scope|type|project`.
  * `~` expands to $HOME; type defaults to `note`; project omitted = global. Returns null when unset
  * (so the built-in defaults apply); a malformed entry throws — misconfigured capture must be loud.
@@ -272,11 +289,12 @@ export function parseBridgeSources(spec) {
   for (const raw of String(spec).split(';')) {
     const item = raw.trim();
     if (!item) continue;
-    const [dir, scope, type, project, recursive] = item.split('|').map((f) => f.trim());
-    if (!dir || !scope) throw new Error(`bad MIDMEM_BRIDGE_SOURCES entry '${item}' (expected dir|scope[|type[|project[|recursive]]])`);
+    const [dir, scope, type, project, recursive, exclude] = item.split('|').map((f) => f.trim());
+    if (!dir || !scope) throw new Error(`bad MIDMEM_BRIDGE_SOURCES entry '${item}' (expected dir|scope[|type[|project[|recursive[|exclude,…]]]])`);
     const src = { dir: dir.startsWith('~/') ? path.join(HOME, dir.slice(2)) : dir, scope, type: type || 'note' };
     if (project) src.project = normalizeProject(project);
     if (recursive === '0' || recursive === 'false') src.recursive = false;
+    if (exclude) src.exclude = exclude.split(',').map((e) => e.trim()).filter(Boolean);
     out.push(src);
   }
   return out.length ? out : null;

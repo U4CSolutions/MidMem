@@ -14,15 +14,18 @@ import * as path from 'node:path';
 
 /** Recursive markdown walk (roadmap 2026-09 #38). Dot-dirs and node_modules are skipped; the
  *  result is sorted so a bridge pass is deterministic. Returns paths relative to `root`. */
-export function walkMarkdown(root, { recursive = true } = {}) {
+export function walkMarkdown(root, { recursive = true, exclude = [] } = {}) {
   const out = [];
+  // Excluded subfolders are matched by path relative to the root ('research', 'reports/drafts');
+  // another source owns them (e.g. a shared-scope deliverables source) — skipping is not loss.
+  const ex = new Set((exclude || []).map((e) => String(e).replace(/^\/+|\/+$/g, '')).filter(Boolean));
   const visit = (dir, rel) => {
     let ents = [];
     try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const d of ents) {
       if (d.name.startsWith('.') || d.name === 'node_modules') continue;
       const r = rel ? `${rel}/${d.name}` : d.name;
-      if (d.isDirectory()) { if (recursive) visit(path.join(dir, d.name), r); }
+      if (d.isDirectory()) { if (recursive && !ex.has(r)) visit(path.join(dir, d.name), r); }
       else if (d.name.endsWith('.md')) out.push(r);
     }
   };
@@ -53,7 +56,7 @@ export async function bridgeMemory(o, { sources = o.cfg.bridgeSources, project =
     }
     if (!fs.existsSync(s.dir)) continue; // dir may not exist yet (e.g. vault not on NFS yet)
     const recursive = s.recursive ?? o.cfg.bridgeRecursive !== false;
-    const files = walkMarkdown(s.dir, { recursive });
+    const files = walkMarkdown(s.dir, { recursive, exclude: s.exclude || [] });
     let si = 0, ss = 0;
     for (const f of files) {
       const p = path.join(s.dir, f);
@@ -63,7 +66,7 @@ export async function bridgeMemory(o, { sources = o.cfg.bridgeSources, project =
         if (r.skipped) { skipped++; ss++; } else { ingested++; si++; }
       } catch (e) { errors.push(`${p}: ${e.message}`); }
     }
-    perSource.push({ dir: s.dir, scope: s.scope, project: s.project ?? null, recursive, files: files.length, ingested: si, skipped: ss });
+    perSource.push({ dir: s.dir, scope: s.scope, project: s.project ?? null, recursive, ...(s.exclude?.length ? { exclude: s.exclude } : {}), files: files.length, ingested: si, skipped: ss });
   }
 
   if (project) o.project();

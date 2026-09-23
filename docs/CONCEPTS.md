@@ -57,6 +57,14 @@ An agent writes to its own scope or `shared`; reads default to *own + shared*. `
 admin/bridge context. Governance blocks cross-private writes. Adding a new agent requires **zero
 code** — set `MIDMEM_AGENT_SCOPE` in its registration.
 
+**Reclassification is governed, never hand-edited.** `rescope` moves selected entries to another
+scope (metadata-only — content, tier, lease and `updated_at` untouched; the move is recorded in
+`provenance.rescoped`), and `authority_lower` corrects an over-labelled origin **downward only**,
+propagating to the claims derived from it. Both require a selector (ids, source-path prefix, or content
+match), preview with `dryRun`, and a stack scope may reclassify only rows in its own scope and `shared`.
+The default vault bridge keeps each agent folder private but bridges its `research/` and `reports/`
+subfolders as `shared` — deliverables are meant for both stacks; notes can be personal.
+
 ## Project axis — per-project memory, global lessons
 
 Orthogonal to scope: **scope** says who may read/write an entry (access), **project** says which

@@ -22,10 +22,10 @@ import { verifyTransition, verifyPromotion, auditTransition } from './transition
 import { loadPacks, recordPattern } from './packs.mjs';
 import { exportKnowledge } from './export.mjs';
 import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
-import { normalizeAuthority, clampAuthority } from './authority.mjs';
+import { normalizeAuthority, clampAuthority, authorityRank } from './authority.mjs';
 import { checkConsistency } from './consistency.mjs';
 import { runExpectedQueryProbes } from './evalprobes.mjs';
-import { genId, sha12, nowISO } from './util.mjs';
+import { genId, sha12, nowISO, json } from './util.mjs';
 import { normalizeProject, resolveProjects } from './projectaxis.mjs';
 
 export class Orchestrator {
@@ -359,7 +359,10 @@ export class Orchestrator {
    * fallback and calls it repaired). `since` narrows to vectors created at/after an ISO time.
    */
   async reembedFallback({ limit = 200, since = null, dryRun = false } = {}) {
-    const conds = ["v.model LIKE 'fallback%'", "e.status = 'active'"];
+    // Active AND archived (2026-09-23): #43 made archived rows searchable through historical reads —
+    // vector lane included — so their placeholder vectors are retrieval debt too. Deleted rows are
+    // excluded (retention prunes their vectors). Re-embedding never touches an entry's lifecycle.
+    const conds = ["v.model LIKE 'fallback%'", "e.status IN ('active', 'archived')"];
     const params = [];
     if (since) { conds.push('v.created_at >= ?'); params.push(since); }
     const rows = this.db.prepare(`SELECT v.entry_id id, e.content, v.created_at FROM vectors v JOIN entries e ON e.id = v.entry_id
@@ -377,6 +380,94 @@ export class Orchestrator {
     const out = { success, candidates: total, batch: rows.length, reembedded, remaining: total - reembedded, model, stoppedAt, reason: stoppedAt && !reembedded ? 'embedder-offline' : stoppedAt ? 'embedder-dropped-mid-run' : null };
     this.db.logOp('reembed', out);
     return out;
+  }
+
+  /** Selector shared by the governed reclassification ops: entries by exact `ids`, a source-path
+   *  directory `pathPrefix` (matched on the source row, else provenance.originalSource), or a content
+   *  regex `match` — at least one is REQUIRED so a bare call can never reclassify the store.
+   *  `fromScopes` and `statuses` only narrow (default statuses: active + archived — history moves with
+   *  the row; deleted rows are never reclassified). */
+  #selectEntries({ ids = [], pathPrefix = null, match = null, fromScopes = null, statuses = null } = {}) {
+    const wanted = new Set((ids || []).map((s) => String(s).trim()).filter(Boolean));
+    if (!wanted.size && !pathPrefix && !match) throw new Error('a selector is required: ids, pathPrefix, or match (fromScopes/statuses only narrow)');
+    const re = match ? new RegExp(match, 'i') : null;
+    const st = statuses && statuses.length ? statuses.filter((s) => s !== 'deleted') : ['active', 'archived'];
+    if (!st.length) return [];
+    const prefix = pathPrefix ? String(pathPrefix).replace(/\/+$/, '') : null;
+    const rows = this.db.prepare(`SELECT e.id, e.scope, e.status, e.content, e.provenance, e.source_id, s.path FROM entries e LEFT JOIN sources s ON s.id = e.source_id WHERE e.status IN (${st.map(() => '?').join(',')})`).all(...st);
+    return rows.map((r) => ({ ...r, provenance: json(r.provenance, {}) })).filter((r) => {
+      if (fromScopes && fromScopes.length && !fromScopes.includes(r.scope)) return false;
+      const p = r.path || r.provenance?.originalSource || null;
+      const byPath = !!prefix && !!p && (p === prefix || p.startsWith(prefix + '/'));
+      return wanted.has(r.id) || byPath || (re && re.test(r.content || ''));
+    });
+  }
+
+  /**
+   * Governed rescope (2026-09-23): move selected entries to scope `to`. Metadata-only — content,
+   * tier, lease and `updated_at` are untouched (a reclassification must not look like new knowledge
+   * to recency ranking or bulk archival); the move is recorded in `provenance.rescoped`. Claims carry
+   * no scope. Governance: a stack scope may move rows only within its own scope + 'shared'.
+   * Born from the 2026-09-23 audit: the bridge had tagged every vault research digest `openclaw`,
+   * hiding them from Hermes, and hash-dedup blocks re-ingest from ever re-tagging them.
+   */
+  async rescope({ to, dryRun = false, ...sel } = {}) {
+    if (!to || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(to))) throw new Error(`rescope requires a valid target scope, got '${to}'`);
+    const selected = this.#selectEntries(sel);
+    const moving = selected.filter((r) => r.scope !== to);
+    const fromScopes = [...new Set(moving.map((r) => r.scope))].sort();
+    return governed(this.gov, 'rescope', { to, fromScopes, count: moving.length, dryRun: !!dryRun }, () => {
+      if (!dryRun && moving.length) {
+        const ts = nowISO();
+        const upd = this.db.prepare('UPDATE entries SET scope=?, provenance=? WHERE id=?');
+        this.db.tx(() => {
+          for (const r of moving) upd.run(to, JSON.stringify({ ...r.provenance, rescoped: [...(r.provenance.rescoped || []), { from: r.scope, to, at: ts }] }), r.id);
+        });
+        this.db.logOp('rescope', { to, fromScopes, moved: moving.length });
+        this.#markVaultDirty();
+      }
+      return { success: true, dryRun: !!dryRun, to, matched: selected.length, wouldMove: moving.length, moved: dryRun ? 0 : moving.length, fromScopes, sample: moving.slice(0, 5).map((r) => `${r.scope}→${to} ${r.id}`) };
+    });
+  }
+
+  /**
+   * Governed authority correction (2026-09-23): LOWER the origin authority of selected entries to
+   * `to`, and propagate it to the claims derived from them (claims inherit their source's authority,
+   * roadmap #10). Lowering only — the governance policy denies any row it would raise. Recorded in
+   * `provenance.authorityLowered` / claim `metadata.authorityLowered`; claim `updated_at` is untouched
+   * so current-claim ordering does not move. Born from the 2026-09-23 audit: an external research
+   * synthesis ingested with curation carried `operator` authority into #39's protected slots.
+   */
+  async lowerAuthority({ to, reason = null, dryRun = false, ...sel } = {}) {
+    const target = normalizeAuthority(to);
+    if (!target) throw new Error(`unknown authority: ${to} (expected operator|stack|doc|web)`);
+    const selected = this.#selectEntries(sel);
+    const changes = selected.map((r) => ({ r, from: normalizeAuthority(r.provenance?.authority) || 'doc' })).filter((x) => x.from !== target);
+    const raising = changes.filter((x) => authorityRank(x.from) < authorityRank(target)).length;
+    const fromScopes = [...new Set(changes.map((x) => x.r.scope))].sort();
+    return governed(this.gov, 'authority-lower', { to: target, count: changes.length, raising, fromScopes, reason, dryRun: !!dryRun }, () => {
+      let claimsLowered = 0;
+      if (!dryRun && changes.length) {
+        const ts = nowISO();
+        const updE = this.db.prepare('UPDATE entries SET provenance=? WHERE id=?');
+        const updC = this.db.prepare('UPDATE claims SET provenance=?, metadata=? WHERE id=?');
+        this.db.tx(() => {
+          for (const { r, from } of changes) {
+            const mark = { from, to: target, at: ts, reason };
+            updE.run(JSON.stringify({ ...r.provenance, authority: target, authorityLowered: [...(r.provenance.authorityLowered || []), mark] }), r.id);
+            for (const c of this.#claimsDerivedFrom(r)) {
+              const cFrom = normalizeAuthority(c.provenance?.authority) || 'doc';
+              if (authorityRank(cFrom) <= authorityRank(target)) continue; // never raise a claim either
+              updC.run(JSON.stringify({ ...c.provenance, authority: target }), JSON.stringify({ ...(c.metadata || {}), authorityLowered: { from: cFrom, to: target, at: ts, reason, entry: r.id } }), c.id);
+              claimsLowered++;
+            }
+          }
+        });
+        this.db.logOp('authority-lower', { to: target, entries: changes.length, claimsLowered, reason });
+        this.#markVaultDirty();
+      }
+      return { success: true, dryRun: !!dryRun, to: target, matched: selected.length, wouldLower: changes.length, lowered: dryRun ? 0 : changes.length, claimsLowered, sample: changes.slice(0, 5).map((x) => `${x.from}→${target} ${x.r.id}`) };
+    });
   }
 
   /** Deterministic knowledge snapshot (JSONL, stable bytes) for git revision history. */
@@ -482,24 +573,31 @@ export class Orchestrator {
    * (`properties.orphanedBy`) — never deleted, the same report-only discipline as stale-path flags.
    * The projection is already marked dirty by the caller. Deterministic; returns the cascade counts.
    */
+  /** Live claims derived from an entry's ingest: exact on the `source.sourceId` written at ingest
+   *  (since #41); legacy claims without one match by source path only when no OTHER live entry still
+   *  stands for that path. Shared by the forget cascade (#41) and authority lowering. */
+  #claimsDerivedFrom(entry) {
+    const sourceRow = entry.source_id ? this.db.prepare('SELECT path FROM sources WHERE id=?').get(entry.source_id) : null;
+    const path = sourceRow?.path || entry.provenance?.originalSource || null;
+    if (!path && !entry.source_id) return [];
+    const otherLive = path ? this.db.prepare("SELECT COUNT(*) c FROM entries e JOIN sources s ON s.id = e.source_id WHERE s.path = ? AND e.status = 'active' AND e.id != ?").get(path, entry.id).c : 0;
+    return this.claims.getAll().filter((c) => {
+      if (!['active', 'verified', 'deferred'].includes(c.status)) return false;
+      let src = c.source; if (typeof src === 'string') { try { src = JSON.parse(src); } catch { src = {}; } }
+      src = src || {};
+      const exact = !!entry.source_id && src.sourceId === entry.source_id;
+      const legacy = !src.sourceId && !!path && src.path === path && otherLive === 0;
+      return exact || legacy;
+    });
+  }
+
   #cascadeForget(entry) {
     const ts = nowISO();
     let claimsArchived = 0;
-    const sourceRow = entry.source_id ? this.db.prepare('SELECT path FROM sources WHERE id=?').get(entry.source_id) : null;
-    const path = sourceRow?.path || entry.provenance?.originalSource || null;
-    if (path || entry.source_id) {
-      const otherLive = path ? this.db.prepare("SELECT COUNT(*) c FROM entries e JOIN sources s ON s.id = e.source_id WHERE s.path = ? AND e.status = 'active' AND e.id != ?").get(path, entry.id).c : 0;
-      const upd = this.db.prepare('UPDATE claims SET status=?, metadata=?, updated_at=? WHERE id=?');
-      for (const c of this.claims.getAll()) {
-        if (!['active', 'verified', 'deferred'].includes(c.status)) continue;
-        let src = c.source; if (typeof src === 'string') { try { src = JSON.parse(src); } catch { src = {}; } }
-        src = src || {};
-        const exact = !!entry.source_id && src.sourceId === entry.source_id;
-        const legacy = !src.sourceId && !!path && src.path === path && otherLive === 0;
-        if (!exact && !legacy) continue;
-        upd.run('archived', JSON.stringify({ ...(c.metadata || {}), archivedBy: { entry: entry.id, at: ts, reason: 'source-forgotten' } }), ts, c.id);
-        claimsArchived++;
-      }
+    const upd = this.db.prepare('UPDATE claims SET status=?, metadata=?, updated_at=? WHERE id=?');
+    for (const c of this.#claimsDerivedFrom(entry)) {
+      upd.run('archived', JSON.stringify({ ...(c.metadata || {}), archivedBy: { entry: entry.id, at: ts, reason: 'source-forgotten' } }), ts, c.id);
+      claimsArchived++;
     }
     let conceptsFlagged = 0;
     const names = (entry.concepts || []).map((c) => c?.name).filter(Boolean);

@@ -920,6 +920,118 @@ try {
   const fgBulk = await o.forgetEntries({ match: 'hafnium scheduler' });
   ok(fgBulk.forgotten >= 1 && fgBulk.cascade && fgBulk.cascade.claimsArchived >= 1, `forgetEntries reports the summed cascade (${JSON.stringify(fgBulk.cascade)})`);
 
+  // 41. Bridge deliverables split (2026-09-23): a source can exclude subfolders; the default vault
+  //     layout bridges research/ + reports/ as shared and everything else under an agent folder private.
+  const { walkMarkdown: wm41, parseBridgeSources: pbs41, loadConfig: lc41, bridgeMemory: bm41 } = await import('../src/index.mjs');
+  const v41 = path.join(tmp, 'vault41', 'AgentX');
+  for (const d of ['research', 'reports/deep', 'notes', 'other']) fs.mkdirSync(path.join(v41, d), { recursive: true });
+  fs.writeFileSync(path.join(v41, 'top.md'), 'PELLUCID41 root note for agent x.');
+  fs.writeFileSync(path.join(v41, 'notes', 'n.md'), 'PELLUCID41 personal note kept private.');
+  fs.writeFileSync(path.join(v41, 'other', 'o.md'), 'PELLUCID41 later subfolder defaults private.');
+  fs.writeFileSync(path.join(v41, 'research', 'r.md'), 'PELLUCID41 research write-up for both stacks.');
+  fs.writeFileSync(path.join(v41, 'reports', 'deep', 'd.md'), 'PELLUCID41 nested report for both stacks.');
+  ok(JSON.stringify(wm41(v41, { exclude: ['research', 'reports'] })) === JSON.stringify(['notes/n.md', 'other/o.md', 'top.md']), 'walkMarkdown excludes named subfolders (relative paths)');
+  const p41 = pbs41(`${v41}|openclaw|note|||research,reports`);
+  ok(JSON.stringify(p41[0].exclude) === '["research","reports"]', 'MIDMEM_BRIDGE_SOURCES sixth field = exclude list');
+  const dflt41 = lc41().bridgeSources;
+  const find41 = (suffix) => dflt41.find((x) => x.dir.endsWith(suffix));
+  ok(['OpenClaw', 'Hermes'].every((a) => find41(`/${a}`)?.exclude?.join(',') === 'research,reports' && find41(`/${a}/research`)?.scope === 'shared' && find41(`/${a}/reports`)?.scope === 'shared'),
+    'default bridge: agent folders private with research/ + reports/ excluded and bridged as shared');
+  ok(find41('/OpenClaw').scope === 'openclaw' && find41('/Hermes').scope === 'hermes', 'default bridge: the agent folder itself (notes, root, new subfolders) stays private');
+  await bm41(o, { sources: [{ dir: v41, scope: 'openclaw', exclude: ['research', 'reports'] }, { dir: path.join(v41, 'research'), scope: 'shared' }, { dir: path.join(v41, 'reports'), scope: 'shared' }], project: false });
+  const sc41 = (rel) => o.db.prepare("SELECT e.scope FROM entries e JOIN sources s ON s.id = e.source_id WHERE s.path = ? AND e.status = 'active'").get(path.join(v41, rel))?.scope;
+  ok(sc41('notes/n.md') === 'openclaw' && sc41('other/o.md') === 'openclaw' && sc41('top.md') === 'openclaw', 'bridged: notes, root and other subfolders land private');
+  ok(sc41('research/r.md') === 'shared' && sc41('reports/deep/d.md') === 'shared', 'bridged: research and nested reports land shared');
+
+  // 42. Governed rescope: selector required, dryRun, metadata-only move, archived moves / deleted
+  //     never, a stack scope cannot touch another stack's private rows.
+  const P42 = '/virtual/vault42/research';
+  const r42a = await o.storeMemory({ content: 'TOURMALINE42 digest alpha on retrieval gates.', type: 'note', scope: 'openclaw', source: { path: `${P42}/a.md` } });
+  const r42b = await o.storeMemory({ content: 'TOURMALINE42 digest beta on retrieval gates.', type: 'note', scope: 'openclaw', source: { path: `${P42}/b.md` } });
+  const r42c = await o.storeMemory({ content: 'TOURMALINE42 archived digest gamma.', type: 'note', scope: 'openclaw', source: { path: `${P42}/c.md` } });
+  const r42d = await o.storeMemory({ content: 'TOURMALINE42 deleted digest delta.', type: 'note', scope: 'openclaw', source: { path: `${P42}/d.md` } });
+  const r42n = await o.storeMemory({ content: 'TOURMALINE42 private note outside the prefix.', type: 'note', scope: 'openclaw', source: { path: '/virtual/vault42/notes/n.md' } });
+  const r42s = await o.storeMemory({ content: 'TOURMALINE42 sibling folder with a shared name prefix.', type: 'note', scope: 'openclaw', source: { path: '/virtual/vault42/research-old/s.md' } });
+  o.db.prepare("UPDATE entries SET status='archived' WHERE id=?").run(r42c.id);
+  o.db.prepare("UPDATE entries SET status='deleted' WHERE id=?").run(r42d.id);
+  let noSel42 = false; try { await o.rescope({ to: 'shared' }); } catch (e) { noSel42 = /selector is required/.test(e.message); }
+  ok(noSel42, 'rescope without a selector throws');
+  const hq42a = await o.query('TOURMALINE42 digest retrieval gates', { scopes: ['hermes', 'shared'], limit: 10 });
+  ok(!hq42a.results.some((r) => r.id === r42a.id), 'before rescope: the hermes lens cannot see the openclaw digest');
+  const oh42 = new Orchestrator({ dbPath: path.join(tmp, 'state.db'), vaultPath: path.join(tmp, 'vault'), llmEnabled: false, sourceRoots: [tmp], autoIngest: { enabled: false, onMaintain: false }, agentScope: 'hermes' });
+  const oc42 = new Orchestrator({ dbPath: path.join(tmp, 'state.db'), vaultPath: path.join(tmp, 'vault'), llmEnabled: false, sourceRoots: [tmp], autoIngest: { enabled: false, onMaintain: false }, agentScope: 'openclaw' });
+  try {
+    await denies(() => oh42.rescope({ to: 'shared', pathPrefix: P42 }), "a hermes-scope agent cannot rescope openclaw's private rows");
+    await denies(() => oc42.rescope({ to: 'hermes', ids: [r42n.id] }), "an openclaw-scope agent cannot push rows into hermes' private scope");
+    const upBefore42 = o.recall(r42a.id).updated_at;
+    const dry42 = await oc42.rescope({ to: 'shared', pathPrefix: P42, dryRun: true });
+    ok(dry42.dryRun && dry42.wouldMove === 3 && dry42.moved === 0 && o.recall(r42a.id).scope === 'openclaw', `dryRun previews 3 moves (active + archived, deleted excluded), writes nothing`);
+    const real42 = await oc42.rescope({ to: 'shared', pathPrefix: P42 });
+    ok(real42.moved === 3 && JSON.stringify(real42.fromScopes) === '["openclaw"]', 'openclaw-scope agent may publish its own rows to shared');
+    ok(o.recall(r42a.id).scope === 'shared' && o.recall(r42c.id).scope === 'shared' && o.recall(r42c.id).status === 'archived', 'active and archived rows moved; archived stays archived');
+    ok(o.recall(r42d.id).scope === 'openclaw', 'deleted row never moves');
+    ok(o.recall(r42n.id).scope === 'openclaw' && o.recall(r42s.id).scope === 'openclaw', 'rows outside the directory prefix (incl. a name-prefix sibling folder) untouched');
+    ok(o.recall(r42a.id).updated_at === upBefore42 && o.recall(r42a.id).provenance.rescoped?.[0]?.from === 'openclaw', 'metadata-only: updated_at unchanged, move recorded in provenance.rescoped');
+    const hq42b = await o.query('TOURMALINE42 digest retrieval gates', { scopes: ['hermes', 'shared'], limit: 10 });
+    ok(hq42b.results.some((r) => r.id === r42a.id), 'after rescope: the hermes lens sees the digest');
+    const again42 = await oc42.rescope({ to: 'shared', pathPrefix: P42 });
+    ok(again42.moved === 0 && again42.matched === 3, 'rescope is idempotent (already-shared rows are not re-moved)');
+  } finally { oh42.close(); oc42.close(); }
+
+  // 43. Governed authority lowering: lowers the entry and the claims derived from it, never raises,
+  //     leaves claim ordering alone; the lowered row loses verbatim fidelity.
+  const f43 = path.join(tmp, 'authority43.md');
+  fs.writeFileSync(f43, 'The ZIRCALOY43 synthesis claims seven memory layers. The ZIRCALOY43 synthesis ranks provenance first. ZIRCALOY43 recommends typed decay.');
+  const i43 = await o.ingest({ path: f43, type: 'research', curated: true });
+  const e43 = o.recall(i43.entry.id);
+  const cl43 = () => o.claims.getAll().filter((c) => c.source?.sourceId === e43.source_id);
+  ok(e43.provenance.authority === 'operator' && cl43().length > 0 && cl43().every((c) => c.provenance.authority === 'operator'), `curated ingest carries operator authority to entry + ${cl43().length} claims`);
+  const q43a = await o.query('ZIRCALOY43 synthesis memory layers', { limit: 5 });
+  ok(q43a.results.find((r) => r.id === e43.id)?.fidelity === 'verbatim', 'before: the operator-labelled synthesis returns verbatim');
+  const cUp43 = cl43().map((c) => c.updated_at).join('|');
+  const dry43 = await o.lowerAuthority({ ids: [e43.id], to: 'doc', dryRun: true });
+  ok(dry43.wouldLower === 1 && dry43.lowered === 0 && o.recall(e43.id).provenance.authority === 'operator', 'dryRun previews, writes nothing');
+  const lo43 = await o.lowerAuthority({ ids: [e43.id], to: 'doc', reason: 'external research synthesis' });
+  ok(lo43.lowered === 1 && lo43.claimsLowered === cl43().length, `lowered the entry and its ${lo43.claimsLowered} derived claims`);
+  const e43b = o.recall(e43.id);
+  ok(e43b.provenance.authority === 'doc' && e43b.provenance.authorityLowered?.[0]?.from === 'operator' && e43b.provenance.authorityLowered[0].reason === 'external research synthesis', 'entry authority doc, correction recorded with its reason');
+  ok(cl43().every((c) => c.provenance.authority === 'doc' && c.metadata.authorityLowered?.from === 'operator'), 'derived claims lowered and marked');
+  await denies(() => o.lowerAuthority({ ids: [e43.id], to: 'operator' }), 'raising the lowered entry back to operator is denied');
+  ok(o.recall(e43.id).provenance.authority === 'doc', 'the denied raise wrote nothing');
+  ok(cl43().map((c) => c.updated_at).join('|') === cUp43, 'claim updated_at untouched (current-claim ordering does not move)');
+  const q43b = await o.query('ZIRCALOY43 synthesis memory layers', { limit: 5 });
+  ok(q43b.results.find((r) => r.id === e43.id)?.fidelity === 'loss-limited', 'after: the synthesis is loss-limited, no longer verbatim');
+  let bad43 = false; try { await o.lowerAuthority({ ids: [e43.id], to: 'gospel' }); } catch (e) { bad43 = /unknown authority/.test(e.message); }
+  ok(bad43, 'unknown authority label rejected');
+
+  // 44. Verifier proof hash binds to what was checked: different clean sets → different hashes,
+  //     the same set → the same hash (deterministic), and the audit row carries the kind.
+  const h44a = o.verifier.verifyConcepts([{ name: 'qxv44 lumen braid' }]);
+  const h44b = o.verifier.verifyConcepts([{ name: 'qxv44 cobalt sieve' }]);
+  const h44c = o.verifier.verifyConcepts([{ name: 'qxv44 lumen braid' }]);
+  ok(h44a.verified && h44b.verified && h44a.proofHash !== h44b.proofHash, 'two clean verifications over different concepts produce different proof hashes');
+  ok(h44a.proofHash === h44c.proofHash && h44a.checked === 1, 'the same checked set yields the same hash (deterministic), checked stays a count');
+  const a44 = JSON.parse(o.db.prepare("SELECT detail FROM audit WHERE kind='verify' AND proof_hash=? ORDER BY id DESC LIMIT 1").get(h44b.proofHash).detail);
+  ok(a44.kind === 'concepts' && a44.checked === 1, 'verify audit row records the kind of check');
+
+  // 45. Re-embed covers archived rows (historical reads reach them since #43); deleted rows never.
+  const t45 = new Date().toISOString();
+  const a45 = await o.storeMemory({ content: 'SPHALERITE45 archived fixture awaiting a real vector.', type: 'note' });
+  const d45 = await o.storeMemory({ content: 'SPHALERITE45 deleted fixture that must stay untouched.', type: 'note' });
+  o.db.prepare("UPDATE entries SET status='archived' WHERE id=?").run(a45.id);
+  o.db.prepare("UPDATE entries SET status='deleted' WHERE id=?").run(d45.id);
+  const vm45 = (id) => o.db.prepare('SELECT model FROM vectors WHERE entry_id=?').get(id)?.model;
+  ok(vm45(a45.id)?.startsWith('fallback') && vm45(d45.id)?.startsWith('fallback'), 'fixtures start with placeholder vectors (offline)');
+  const realEmbed45 = o.embedder.embed.bind(o.embedder);
+  o.embedder.embed = async () => ({ vector: new Array(1024).fill(0).map((_, i) => (i === 7 ? 1 : 0)), model: 'stub-embed-45', mode: 'lmstudio' });
+  try {
+    const rc45 = o.recall(a45.id).retrieval_count;
+    const re45 = await o.reembedFallback({ since: t45, limit: 50 });
+    ok(re45.reembedded >= 1 && vm45(a45.id) === 'stub-embed-45', 'archived row re-embedded with the real model');
+    ok(o.recall(a45.id).status === 'archived' && o.recall(a45.id).retrieval_count === rc45, 'its lifecycle is untouched (still archived, no usage bump)');
+    ok(vm45(d45.id)?.startsWith('fallback'), 'deleted row not re-embedded');
+  } finally { o.embedder.embed = realEmbed45; }
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;

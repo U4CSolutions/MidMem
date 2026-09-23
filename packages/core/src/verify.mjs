@@ -33,7 +33,7 @@ export class SigmaVerifier {
         });
       }
     }
-    return this.#finish(conflicts, concepts.length);
+    return this.#finish(conflicts, concepts.map((c) => `${c.type || 'concept'}:${String(c.name).toLowerCase()}`), 'concepts');
   }
 
   /** Scan active entries for direct contradictions (negation-difference + overlap). */
@@ -52,12 +52,16 @@ export class SigmaVerifier {
           detail: `negation mismatch with ${(sim * 100).toFixed(0)}% overlap`, severity: sim > 0.8 ? 'high' : 'medium',
         });
       }
-    return this.#finish(conflicts, rows.length);
+    return this.#finish(conflicts, rows.map((r) => r.id), 'entries');
   }
 
-  #finish(conflicts, checked) {
-    const proofHash = sha(conflicts.map((c) => `${c.type}:${c.a}:${c.b}`).join('|') || 'none');
-    this.db.recordAudit('verify', proofHash, { checked, conflicts });
-    return { conflicts, verified: conflicts.length === 0, checked, proofHash, timestamp: nowISO() };
+  /** The proof binds to WHAT was checked, not only to what failed. Until 2026-09-23 the hash covered
+   *  the conflict list alone, so every clean run hashed the same string (206 of 242 audit rows shared
+   *  one hash) and the receipt could not tell one clean check from another. Deterministic: the same
+   *  checked set with the same outcome always yields the same hash. */
+  #finish(conflicts, checkedKeys, kind) {
+    const proofHash = sha(JSON.stringify({ kind, checked: [...checkedKeys].sort(), conflicts: conflicts.map((c) => `${c.type}:${c.a}:${c.b}`).sort() }));
+    this.db.recordAudit('verify', proofHash, { kind, checked: checkedKeys.length, conflicts });
+    return { conflicts, verified: conflicts.length === 0, checked: checkedKeys.length, proofHash, timestamp: nowISO() };
   }
 }
