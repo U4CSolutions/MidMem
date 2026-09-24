@@ -151,7 +151,11 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    for a Node caller on the same host. Both are governed identically.
 
 **Coming for this mode:** metadata filters on query (#48) and MidMem's Qdrant spin-up with a vector
-backfill (#50, #51). None changes the contract above. **Shipped (#49): the library lane** — MidMem
+backfill (#50, #51). None changes the contract above. The Qdrant adapter's code half has landed: search
+uses `POST /points/query` (Qdrant ≥ 1.19 removed `/points/search`), one collection per embedding space,
+and a `store_id` tenant key (keyword index created `is_tenant: true`, filtered on every search); the
+migration path is `vectors backfill` (copies the SQLite vectors, no re-embed) → `vectors parity` → flip
+`MIDMEM_VECTOR_BACKEND=qdrant` by config. **Shipped (#49): the library lane** — MidMem
 asks a registered library system for full-document evidence at the deep stage of retrieval and fuses
 it as its own lane, never storing it; register one with
 `MIDMEM_LIBRARIES="kb|http:http://127.0.0.1:8790/provider"` (HTTP) or `kb|module:/abs/provider.mjs`
@@ -175,6 +179,9 @@ it as its own lane, never storing it; register one with
 | `MIDMEM_BRIDGE_RECURSIVE` | on | bridge walks subfolders (dot-dirs + `node_modules` skipped); `0` = flat walk |
 | `MIDMEM_LIBRARIES` | unset (no library) | `id\|module:<abs path>;id2\|http:<base url>` — registers external library systems (#49) asked for evidence at the deep stage of retrieval; their rows are fused, never stored |
 | `MIDMEM_LIBRARY_LANE` / `…_LIMIT` / `…_TIMEOUT_MS` / `…_WEIGHT` | on / 8 / 4000 / 0.8 | library lane (#49): on/off, max library rows per query, per-provider call timeout, RRF weight of the lane |
+| `MIDMEM_VECTOR_BACKEND` / `MIDMEM_QDRANT_URL` / `…_COLLECTION` / `…_API_KEY` | `sqlite` / `http://localhost:6333` / `midmem_memory` / unset | vector backend; the Qdrant endpoint, collection (one per embedding space) and `api-key` header (#50) |
+| `MIDMEM_STORE_ID` | `default` | tenant key (#51): written as payload `store_id` on every Qdrant point and filtered on every Qdrant search, so several stores can share one collection |
+| `MIDMEM_QDRANT_TIMEOUT_MS` / `MIDMEM_QDRANT_BATCH` | 5000 / 100 | per-request Qdrant timeout; points per upsert batch in `vectors backfill` |
 | `MIDMEM_OCCUPANCY` / `…_CAP_STACK` `…_CAP_DOC` `…_CAP_WEB` `…_OPERATOR_SLOTS` `…_MIN_LINEAGES` | on / 0.6 / 0.6 / 0.25 / 2 / 2 | bounded-occupancy selection on budgeted reads (#39): per-authority caps that bind only against a waiting competitor, protected operator slots, lineage floor |
 | `MIDMEM_INSTRUCTION_FLAG` / `MIDMEM_INSTRUCTION_PENALTY` | on / 0.01 | instruction-likeness flag on results (#40); flagged rows demoted + labelled, never dropped |
 | `MIDMEM_FIDELITY` / `MIDMEM_VERBATIM_MAX_CHARS` | on / 4000 | fidelity class on results (#42); verbatim rows (operator / curated tier) uncut up to the ceiling |

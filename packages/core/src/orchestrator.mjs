@@ -16,7 +16,7 @@ import { PolicyEvaluator, governed } from './governance.mjs';
 import { projectVault, probeProjection } from './project.mjs';
 import { hybridSearch, progressiveSearch } from './retrieval.mjs';
 import { checkGrounding, groundingScore } from './grounding.mjs';
-import { makeVectorStore } from './vectorstore.mjs';
+import { makeVectorStore, QdrantVectorStore } from './vectorstore.mjs';
 import { handoffBrief as buildHandoffBrief } from './handoff.mjs';
 import { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, forgetNodes, consolidateWork, categorizeIngest, recordProspective, dueProspective, resolveProspective } from './workmemory.mjs';
 import { verifyTransition, verifyPromotion, auditTransition } from './transitions.mjs';
@@ -26,7 +26,7 @@ import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from '.
 import { normalizeAuthority, clampAuthority, authorityRank } from './authority.mjs';
 import { checkConsistency } from './consistency.mjs';
 import { runExpectedQueryProbes } from './evalprobes.mjs';
-import { genId, sha12, nowISO, json } from './util.mjs';
+import { genId, sha12, nowISO, json, cosine } from './util.mjs';
 import { normalizeProject, resolveProjects } from './projectaxis.mjs';
 import { LibraryRegistry } from './libraries.mjs';
 
@@ -512,6 +512,83 @@ export class Orchestrator {
     return out;
   }
 
+  /** Real-model SQLite vectors eligible for Qdrant (#50): non-fallback, on active or archived entries
+   *  (the rows retrieval can reach, historical reads included). Deleted rows never migrate. */
+  static #REAL_VECTORS = "FROM vectors v JOIN entries e ON e.id = v.entry_id WHERE v.model NOT LIKE 'fallback%' AND e.status IN ('active', 'archived')";
+
+  /**
+   * Vector backfill (roadmap #50, the migration path): copy the REAL SQLite vectors into the
+   * configured Qdrant collection WITHOUT re-embedding, in `cfg.qdrant.batch` batches, through a
+   * Qdrant store built from this config on demand — so it runs while `vectorBackend` is still
+   * `sqlite`: backfill → `vectorParity` → flip MIDMEM_VECTOR_BACKEND by config. Fallback-hash
+   * placeholders never migrate (repair them first with `reembedFallback`). Refuses mixed
+   * dimensions. Self-gating: a `health()` probe first — unreachable → nothing pushed; a failing
+   * batch stops the pass there. Idempotent: points are upserted by their deterministic id.
+   */
+  async backfillVectors({ limit = 100000, dryRun = false } = {}) {
+    const from = Orchestrator.#REAL_VECTORS;
+    const candidates = this.db.prepare(`SELECT COUNT(*) c ${from}`).get().c;
+    const dims = this.db.prepare(`SELECT DISTINCT v.dim d ${from} ORDER BY v.dim`).all().map((r) => r.d);
+    if (dims.length > 1) throw new Error(`vectors backfill refused: candidate vectors span ${dims.length} dimensions (${dims.join(', ')}) — one Qdrant collection holds one embedding space; re-embed or reset first`);
+    const dim = dims[0] ?? null;
+    const model = this.db.prepare(`SELECT v.model m, COUNT(*) c ${from} GROUP BY v.model ORDER BY c DESC, v.model LIMIT 1`).get()?.m ?? null;
+    const qd = new QdrantVectorStore(this.cfg);
+    const out = { success: true, dryRun: !!dryRun, candidates, pushed: 0, remaining: candidates, dim, model, collection: qd.collection, storeId: qd.storeId, stoppedAt: null, reason: null };
+    if (dryRun || !candidates) return out;
+    const health = await qd.health();
+    if (!health.reachable) {
+      Object.assign(out, { success: false, reason: 'qdrant-unreachable', error: health.error });
+      this.db.logOp('vectors-backfill', out);
+      return out;
+    }
+    const rows = this.db.prepare(`SELECT v.entry_id id, v.embedding emb, v.model model ${from} ORDER BY v.created_at, v.entry_id LIMIT ?`).all(Math.max(1, Math.floor(Number(limit) || 1)));
+    for (let i = 0; i < rows.length; i += qd.batch) {
+      const batch = rows.slice(i, i + qd.batch).map((r) => ({ id: r.id, embedding: json(r.emb, []), model: r.model }));
+      try { out.pushed += await qd.upsertMany(batch); }
+      catch (e) { Object.assign(out, { success: false, stoppedAt: batch[0].id, reason: 'batch-failed', error: e.message }); break; }
+    }
+    out.remaining = candidates - out.pushed;
+    this.db.logOp('vectors-backfill', out);
+    return out;
+  }
+
+  /**
+   * Vector parity (roadmap #50): the check to run before flipping MIDMEM_VECTOR_BACKEND. Each query
+   * is embedded once; the top-`k` ids from the SQLite vectors (the same real-vector set backfill
+   * migrates) and from the configured Qdrant collection (tenant-filtered) are compared by Jaccard
+   * agreement. `pass` = mean ≥ 0.9. Fail-soft: an unreachable Qdrant, an offline embedder (a
+   * fallback query vector matches nothing on either side and would agree vacuously) or no queries
+   * → `pass: false` with a `reason`.
+   */
+  async vectorParity({ queries = [], k = 10 } = {}) {
+    const qs = (Array.isArray(queries) ? queries : String(queries || '').split(';')).map((q) => String(q).trim()).filter(Boolean);
+    const topK = Math.max(1, Math.floor(Number(k) || 10));
+    const qd = new QdrantVectorStore(this.cfg);
+    const out = { queries: qs.length, k: topK, collection: qd.collection, storeId: qd.storeId, agreements: [], mean: null, pass: false };
+    const fail = (reason, extra = {}) => { Object.assign(out, { reason, ...extra }); this.db.logOp('vectors-parity', { queries: out.queries, k: topK, mean: null, pass: false, reason }); return out; };
+    if (!qs.length) return fail('no-queries');
+    const health = await qd.health();
+    if (!health.reachable) return fail('qdrant-unreachable', { error: health.error });
+    if (health.error) return fail('qdrant-error', { error: health.error });
+    const rows = this.db.prepare(`SELECT v.entry_id id, v.embedding emb ${Orchestrator.#REAL_VECTORS}`).all().map((r) => ({ id: r.id, vector: json(r.emb, []) }));
+    const byScore = (a, b) => (b.score - a.score) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    for (const query of qs) {
+      const { vector, mode } = await this.embedder.embed(query);
+      if (mode === 'fallback') return fail('embedder-offline');
+      const sq = rows.map((r) => ({ id: r.id, score: cosine(vector, r.vector) })).filter((x) => x.score > 0).sort(byScore).slice(0, topK).map((x) => x.id);
+      // Mirror the SQLite store's contract (non-positive scores are not matches).
+      const qq = (await qd.search(vector, topK)).filter((x) => x.score > 0).slice(0, topK).map((x) => x.id);
+      const a = new Set(sq), b = new Set(qq);
+      const inter = [...a].filter((id) => b.has(id)).length;
+      const union = new Set([...a, ...b]).size;
+      out.agreements.push({ query, agreement: union ? inter / union : 1, sqlite: a.size, qdrant: b.size });
+    }
+    out.mean = out.agreements.reduce((s, x) => s + x.agreement, 0) / out.agreements.length;
+    out.pass = out.mean >= 0.9;
+    this.db.logOp('vectors-parity', { queries: out.queries, k: topK, mean: out.mean, pass: out.pass });
+    return out;
+  }
+
   /** Selector shared by the governed reclassification ops: entries by exact `ids`, a source-path
    *  directory `pathPrefix` (matched on the source row, else provenance.originalSource), or a content
    *  regex `match` — at least one is REQUIRED so a bare call can never reclassify the store.
@@ -648,7 +725,7 @@ export class Orchestrator {
 
   async brief() {
     const g = this.graph.getGraph();
-    return {
+    const out = {
       tiers: this.memory.stats(),
       projects: this.memory.projectStats(),
       claims: this.claims.stats(),
@@ -657,6 +734,9 @@ export class Orchestrator {
       libraries: this.libraries.list().map(({ id, transport, lastError }) => ({ id, transport, lastError })),
       recent: this.db.prepare('SELECT ts,operation FROM log ORDER BY id DESC LIMIT 10').all(),
     };
+    // Qdrant health (#50) only when Qdrant is the configured backend — never probe one nobody set up.
+    if (this.cfg.vectorBackend === 'qdrant') out.qdrant = await new QdrantVectorStore(this.cfg).health();
+    return out;
   }
 
   lint() {

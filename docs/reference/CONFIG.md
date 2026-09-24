@@ -19,8 +19,11 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_WORKFLOW_BOOST` | `enabled: env('WORKFLOW_BOOST') !== '0',` |
 | `MIDMEM_VECTOR_BACKEND` | `vectorBackend: env('VECTOR_BACKEND') \|\| 'sqlite',` |
 | `MIDMEM_QDRANT_URL` | `qdrantUrl: env('QDRANT_URL') \|\| 'http://localhost:6333',` |
-| `MIDMEM_QDRANT_COLLECTION` | `qdrantCollection: env('QDRANT_COLLECTION') \|\| 'openduck_memory',` |
+| `MIDMEM_QDRANT_COLLECTION` | `qdrantCollection: env('QDRANT_COLLECTION') \|\| 'midmem_memory',` |
 | `MIDMEM_QDRANT_API_KEY` | `qdrantApiKey: env('QDRANT_API_KEY') \|\| '',` |
+| `MIDMEM_STORE_ID` | `storeId: env('STORE_ID') \|\| 'default',` |
+| `MIDMEM_QDRANT_TIMEOUT_MS` | `qdrant: { timeoutMs: Number(env('QDRANT_TIMEOUT_MS') ?? 5000), batch: Number(env('QDRANT_BATCH') ?? 100) },` |
+| `MIDMEM_QDRANT_BATCH` | `qdrant: { timeoutMs: Number(env('QDRANT_TIMEOUT_MS') ?? 5000), batch: Number(env('QDRANT_BATCH') ?? 100) },` |
 | `MIDMEM_CONCEPT_ROUTING` | `enabled: env('CONCEPT_ROUTING') !== '0',` |
 | `MIDMEM_GROUNDING` | `enabled: env('GROUNDING') !== '0',` |
 | `MIDMEM_GROUNDING_MIN_OVERLAP` | `minOverlap: Number(env('GROUNDING_MIN_OVERLAP') \|\| 0.5),` |
@@ -82,4 +85,4 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_PROJECT` | `project: normalizeProject(env('PROJECT')),` |
 | `MIDMEM_PROJECT_LIFT` | `liftOnCurated: env('PROJECT_LIFT') !== '0',` |
 
-_75 env knobs._
+_78 env knobs._

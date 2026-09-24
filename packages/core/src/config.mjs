@@ -97,8 +97,15 @@ export function loadConfig(overrides = {}) {
     /** Vector backend: 'sqlite' (in-DB JSON cosine, zero-dep, default) or 'qdrant' (external ANN). */
     vectorBackend: env('VECTOR_BACKEND') || 'sqlite',
     qdrantUrl: env('QDRANT_URL') || 'http://localhost:6333',
-    qdrantCollection: env('QDRANT_COLLECTION') || 'openduck_memory',
+    qdrantCollection: env('QDRANT_COLLECTION') || 'midmem_memory',
     qdrantApiKey: env('QDRANT_API_KEY') || '',
+    /** Tenant key (roadmap #51): this store writes it as payload `store_id` on every Qdrant point
+     *  and filters every Qdrant search on it (keyword index created `is_tenant: true`). One memory
+     *  collection may then hold several stores, each promoted to its own shard later without new
+     *  collections. Collections split only by embedding space, workload and access boundary. */
+    storeId: env('STORE_ID') || 'default',
+    /** Qdrant client knobs: per-request timeout (ms) and points per upsert batch (backfill). */
+    qdrant: { timeoutMs: Number(env('QDRANT_TIMEOUT_MS') ?? 5000), batch: Number(env('QDRANT_BATCH') ?? 100) },
     /** P5 concept routing: embed concept nodes + deterministic communities (built in forced/daily
      *  maintain), then the query vector seeds entries linked to its nearest concept communities into
      *  retrieval (+ a small boost). Fail-soft → flat hybrid when nothing is embedded. No per-query LLM. */

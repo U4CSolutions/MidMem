@@ -1413,6 +1413,130 @@ try {
     } finally { oC.close(); }
   } finally { oP.close(); }
 
+  // 50. Qdrant adapter on the v1.19 API + tenant keys + backfill/parity + health (roadmap #50 code half,
+  //     #51). Every call goes to a test-only fake (helpers/fake-qdrant.mjs); no real Qdrant is contacted.
+  const { startFakeQdrant } = await import('./helpers/fake-qdrant.mjs');
+  const { QdrantVectorStore: QVS50, pointId: pointId50 } = await import('../src/vectorstore.mjs');
+  const hermetic50 = { vaultPath: path.join(tmp, 'vault50'), llmEnabled: false, sourceRoots: [tmp], autoIngest: { enabled: false, onMaintain: false }, maintenance: { ...o.cfg.maintenance, enabled: false } };
+  const col50 = 'midmem_test50';
+  let fq = null, fk = null, f2 = null;
+  const orch50 = [];
+  const mk50 = (opts) => { const x = new Orchestrator({ ...hermetic50, ...opts }); orch50.push(x); return x; };
+  try {
+    fq = await startFakeQdrant();
+    const url = fq.url;
+    // 50.1 — writes land as tenant-keyed points in a Cosine collection with an is_tenant keyword index.
+    const oQ = mk50({ dbPath: path.join(tmp, 'q50a.db'), vectorBackend: 'qdrant', qdrantUrl: url, qdrantCollection: col50, storeId: 'store-a' });
+    const qa1 = await oQ.storeMemory({ content: 'MALACHITE50 green copper carbonate banded mineral specimen', type: 'note' });
+    const qa2 = await oQ.storeMemory({ content: 'MALACHITE50 polished cabochon from the Congo copper belt', type: 'note' });
+    const c50 = fq.state.collections.get(col50);
+    const pts50 = c50 ? [...c50.points.values()] : [];
+    ok(pts50.length === 2 && pts50.every((p) => p.payload.store_id === 'store-a' && typeof p.payload.model === 'string' && Array.isArray(p.vector))
+      && new Set(pts50.map((p) => p.payload.entry_id)).size === 2 && pts50.some((p) => p.payload.entry_id === qa1.id) && pts50.some((p) => p.payload.entry_id === qa2.id),
+      'two stored entries → two points with payload {entry_id, store_id: store-a, model} and plain-array vectors');
+    ok(c50?.distance === 'Cosine' && c50.indexes.store_id?.type === 'keyword' && c50.indexes.store_id?.is_tenant === true, 'collection created Cosine with a store_id keyword index (is_tenant: true)');
+    ok(fq.calls.some((c) => c.method === 'PUT' && c.path === `/collections/${col50}/index`), 'the tenant index was created via PUT …/index');
+    // 50.2 — a deep query searches through /points/query with the store filter.
+    const dq50 = await oQ.query('MALACHITE50 copper mineral', { deep: true, limit: 5 });
+    ok(dq50.results.some((r) => r.id === qa1.id && r.rank.vector != null), 'deep query returns the entry with a vector-lane rank');
+    const qc50 = fq.calls.filter((c) => c.method === 'POST' && c.path === `/collections/${col50}/points/query`);
+    ok(qc50.length >= 1 && qc50.every((c) => Array.isArray(c.body.query) && c.body.with_payload === true
+      && c.body.filter?.must?.some((m) => m.key === 'store_id' && m.match?.value === 'store-a')), 'search went to POST …/points/query with a store_id filter in the body');
+    // 50.3 — tenant isolation (#51): two stores share one collection, neither sees the other's points.
+    const oB = mk50({ dbPath: path.join(tmp, 'q50b.db'), vectorBackend: 'qdrant', qdrantUrl: url, qdrantCollection: col50, storeId: 'store-b' });
+    const qb1 = await oB.storeMemory({ content: 'MALACHITE50 store-b azurite companion specimen', type: 'note' });
+    ok(c50.points.size === 3, 'one collection now holds both stores’ points (3)');
+    const qv50 = (await oB.embedder.embed('MALACHITE50 specimen')).vector;
+    const rawA = await oQ.vectorStore.search(qv50, 400), rawB = await oB.vectorStore.search(qv50, 400);
+    ok(rawA.length === 2 && rawA.every((r) => r.id === qa1.id || r.id === qa2.id) && rawB.length === 1 && rawB[0].id === qb1.id, 'raw vector search is tenant-filtered: store-a sees 2 points, store-b sees its 1');
+    const dqB = await oB.query('MALACHITE50 specimen', { deep: true, limit: 10 });
+    const dqA = await oQ.query('MALACHITE50 specimen', { deep: true, limit: 10 });
+    ok(dqB.results.some((r) => r.id === qb1.id) && !dqB.results.some((r) => r.id === qa1.id || r.id === qa2.id)
+      && !dqA.results.some((r) => r.id === qb1.id), 'deep queries never cross stores');
+    ok(await oQ.vectorStore.count() === 2 && await oB.vectorStore.count() === 1, 'count() per store: 2 and 1');
+    // 50.4 — outage: writes and lexical reads keep working; health reports it; recovery is seen.
+    fq.setDown(true);
+    let outageErr = null, qo = null;
+    try { qo = await oQ.storeMemory({ content: 'MALACHITE50 outage write while the vector store is down', type: 'note' }); } catch (e) { outageErr = e; }
+    ok(!outageErr && qo?.success && oQ.recall(qo.id)?.status === 'active', 'Qdrant down → storeMemory still succeeds (state.db is the source of truth)');
+    const dqo = await oQ.query('MALACHITE50 outage write', { deep: true, limit: 5 });
+    ok(dqo.results.some((r) => r.id === qo?.id), 'Qdrant down → a deep query still returns lexical hits');
+    const hDown = (await oQ.brief()).qdrant;
+    ok(hDown?.reachable === false && typeof hDown.error === 'string' && hDown.error.length > 0, `brief().qdrant while down → reachable:false, error "${hDown?.error?.slice(0, 60)}"`);
+    fq.setDown(false);
+    const hUp = await oQ.vectorStore.health();
+    ok(hUp.reachable === true && hUp.points === 3 && hUp.storePoints === 2 && hUp.storeId === 'store-a' && !hUp.error, 'Qdrant back → health reachable, points 3, storePoints 2');
+    // 50.5 — API key: missing key fails soft (401 in health); the right key works.
+    fk = await startFakeQdrant({ apiKey: 'k50' });
+    const oK0 = mk50({ dbPath: path.join(tmp, 'k50a.db'), vectorBackend: 'qdrant', qdrantUrl: fk.url, qdrantCollection: 'midmem_key50', storeId: 'store-k' });
+    let k0Err = null, k0 = null, hK0 = null;
+    try { k0 = await oK0.storeMemory({ content: 'MALACHITE50 keyless write', type: 'note' }); hK0 = await oK0.vectorStore.health(); } catch (e) { k0Err = e; }
+    ok(!k0Err && k0?.success && /401/.test(hK0?.error || '') && !fk.state.collections.size, 'no api-key → write fails soft, health shows the 401, nothing reached the collection');
+    const oK1 = mk50({ dbPath: path.join(tmp, 'k50b.db'), vectorBackend: 'qdrant', qdrantUrl: fk.url, qdrantCollection: 'midmem_key50', storeId: 'store-k', qdrantApiKey: 'k50' });
+    const k1 = await oK1.storeMemory({ content: 'MALACHITE50 keyed write', type: 'note' });
+    const kq = await oK1.vectorStore.search((await oK1.embedder.embed('MALACHITE50 keyed write')).vector, 5);
+    ok(fk.state.collections.get('midmem_key50')?.points.size === 1 && kq[0]?.id === k1.id && (await oK1.vectorStore.health()).reachable === true, 'api-key k50 → upsert + query work');
+    // 50.6 — backfill + parity from the SQLite store (the migration path): no re-embed, idempotent, self-gating.
+    f2 = await startFakeQdrant();
+    const url2 = f2.url;
+    const oS = mk50({ dbPath: path.join(tmp, 'state.db'), vaultPath: path.join(tmp, 'vault'), qdrantUrl: url2, qdrantCollection: 'midmem_backfill50', storeId: 'store-s' });
+    ok(oS.cfg.vectorBackend === 'sqlite' && oS.vectorStore.backend === 'sqlite', 'backfill orchestrator still runs the sqlite backend');
+    const realRows50 = o.db.prepare("SELECT v.entry_id id, v.embedding emb, v.model model FROM vectors v JOIN entries e ON e.id = v.entry_id WHERE v.model NOT LIKE 'fallback%' AND e.status IN ('active','archived')").all();
+    const fbCount50 = o.db.prepare("SELECT COUNT(*) c FROM vectors WHERE model LIKE 'fallback%'").get().c;
+    ok(realRows50.length >= 2 && realRows50.some((r) => r.model === 'stub-embed') && fbCount50 > realRows50.length, `fixture: ${realRows50.length} real-model vectors among ${fbCount50} fallback ones`);
+    const realEmbed50 = oS.embedder.embed.bind(oS.embedder);
+    oS.embedder.embed = async () => { throw new Error('backfill must not re-embed'); };
+    let bfDry = null, bf1 = null, bf2 = null, bfDown = null, callsAfterDry = -1;
+    try {
+      bfDry = await oS.backfillVectors({ dryRun: true });
+      callsAfterDry = f2.calls.length;
+      bf1 = await oS.backfillVectors();
+      bf2 = await oS.backfillVectors();
+      f2.setDown(true);
+      bfDown = await oS.backfillVectors();
+      f2.setDown(false);
+    } finally { oS.embedder.embed = realEmbed50; f2.setDown(false); }
+    ok(bfDry.dryRun === true && bfDry.candidates === realRows50.length && bfDry.pushed === 0 && callsAfterDry === 0, `backfill dryRun → ${bfDry.candidates} candidates (non-fallback, active+archived), nothing pushed, Qdrant not contacted`);
+    const bfCol = f2.state.collections.get('midmem_backfill50');
+    const storeS = () => [...(bfCol?.points.values() || [])].filter((p) => p.payload.store_id === 'store-s');
+    ok(bf1.success && bf1.pushed === bf1.candidates && bf1.remaining === 0 && bf1.dim === 1024 && bf1.model === 'stub-embed' && storeS().length === bf1.candidates && bfCol.size === 1024,
+      `backfill → pushed ${bf1.pushed}/${bf1.candidates} at dim ${bf1.dim} (most common model ${bf1.model}), the store-s count matches`);
+    const byId50 = new Map(realRows50.map((r) => [r.id, r]));
+    ok(storeS().every((p) => byId50.has(p.payload.entry_id) && p.payload.model === byId50.get(p.payload.entry_id).model
+      && JSON.stringify(p.vector) === byId50.get(p.payload.entry_id).emb.replace(/\s/g, '') && p.id === pointId50(p.payload.entry_id)), 'every point carries the SQLite vector byte-for-byte (no re-embed) under its deterministic point id');
+    ok(bf2.success && bf2.pushed === bf2.candidates && storeS().length === bf1.candidates, 'second backfill → same pushed count, point count unchanged (idempotent)');
+    ok(bfDown.success === false && bfDown.reason === 'qdrant-unreachable' && bfDown.pushed === 0 && storeS().length === bf1.candidates, 'Qdrant down → backfill refuses, reason qdrant-unreachable, nothing pushed');
+    ok(o.db.prepare("SELECT COUNT(*) c FROM log WHERE operation='vectors-backfill'").get().c >= 3, 'backfill runs are logged as vectors-backfill');
+    const weights50 = { a: (i) => 1 / (i + 2), b: (i) => 1 / (1026 - i) };
+    oS.embedder.embed = async (t) => ({ vector: Array.from({ length: 1024 }, (_, i) => (/second/.test(t) ? weights50.b : weights50.a)(i)), model: 'stub-embed', mode: 'lmstudio' });
+    let par50 = null, parDown = null;
+    try {
+      par50 = await oS.vectorParity({ queries: ['MALACHITE50 first parity probe', 'MALACHITE50 second parity probe'], k: 5 });
+      f2.setDown(true);
+      parDown = await oS.vectorParity({ queries: ['MALACHITE50 first parity probe'], k: 5 });
+    } finally { oS.embedder.embed = realEmbed50; f2.setDown(false); }
+    ok(par50.queries === 2 && par50.agreements.length === 2 && par50.agreements.every((a) => a.agreement === 1 && a.sqlite > 0 && a.sqlite === a.qdrant) && par50.mean === 1 && par50.pass === true,
+      `parity: same vectors + cosine on both sides → mean ${par50.mean}, pass ${par50.pass}`);
+    ok(parDown.pass === false && parDown.reason === 'qdrant-unreachable', 'parity with Qdrant down → pass:false, reason qdrant-unreachable (fail-soft)');
+    // 50.7 — the named-vector rule: the fake rejects it (as the real server must be treated), the adapter never sends it.
+    const nv = await fetch(`${url}/collections/${col50}/points`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points: [{ id: 50, vector: { default: new Array(c50.size).fill(0.1) }, payload: {} }] }) });
+    ok(nv.status === 400 && /plain number array/.test((await nv.json()).status?.error || ''), 'fake: a named-vector object on an unnamed collection → 400');
+    let nvErr = null;
+    try { await new QVS50(oQ.cfg).upsert({ id: 'named-vector-50', embedding: { default: [0.1, 0.2] }, model: 'm' }); } catch (e) { nvErr = e; }
+    ok(nvErr && /plain number array/.test(nvErr.message), 'QdrantVectorStore.upsert with a non-array embedding throws');
+    // 50.8 — point ids: a safe unsigned integer the server accepts.
+    const pid50 = pointId50(qa1.id);
+    ok(Number.isSafeInteger(pid50) && pid50 >= 0 && pts50.some((p) => p.id === pid50 && p.payload.entry_id === qa1.id), `pointId → safe integer ${pid50}, accepted by the fake`);
+    ok(![fq, fk, f2].some((f) => f.calls.some((c) => c.path.endsWith('/points/search'))), 'no call ever went to the removed /points/search');
+    // 50.9 — the default config names neutral defaults and never probes a Qdrant nobody configured.
+    const b50 = await o.brief();
+    ok(!('qdrant' in b50) && o.cfg.qdrantCollection === 'midmem_memory' && o.cfg.storeId === 'default' && o.cfg.qdrant.timeoutMs === 5000 && o.cfg.qdrant.batch === 100,
+      'default config: brief has no qdrant key; collection midmem_memory, storeId default, timeout 5000, batch 100');
+  } finally {
+    for (const x of orch50) x.close();
+    await fq?.close(); await fk?.close(); await f2?.close();
+  }
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;
