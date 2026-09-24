@@ -50,5 +50,22 @@ Parsed from `packages/core/bin/cli.mjs` (the wrapper `midmem <command>` in a dep
 ## Usage text (verbatim from the CLI)
 
 ```
+Usage: ocmw <init|ingest <path>|ingest-content <text>|remember <text>|query <text>|recall <id>|recall-check <message>|work --kind <type>|tasks|close-tasks [labels…]|brief|lint|project|promote <id> <tier>|maintain|bridge|reembed [--since <ISO> --limit <n> --dryRun]|vectors <backfill [--limit --dryRun]|parity --queries "q1;q2" [--k]|health>|rescope --to <scope>|lower-authority --to <authority>|handoff <task>> [--kind task_attempt|source_used|dead_end|correction|artifact|decision --task --outcome --status --source --artifact --related --type --title --tier --tiers --scope --scopes --limit --minScore --maxTokens --graph --curated --force --profile local|frontier --project <slug> --projects a,b --all-projects]
+  project axis: --project tags writes (default MIDMEM_PROJECT) and filters reads to project + global; --projects a,b filters on several; --all-projects lifts the default
+  rescope / lower-authority selectors (at least one required): [entry ids…] | --pathPrefix <source dir> | --match <content regex>; --from a,b and --statuses a,b narrow; --reason (lower-authority); preview with --dryRun
+  query history/policy: --historical (active + archived, labelled) | --statuses a,b | --asOf <ISO> | --bounded (occupancy policy without a token budget) | --includeWorking
+  close-tasks selectors (at least one required): [labels…] | --task <label> | --match <regex> | --opaque | --olderThanDays <n>; preview with --dryRun
+  forget-nodes (HARD delete, edges cascade) selectors: [node ids…] | --match <label regex> | --opaque; --types narrows; preview with --dryRun
+  ingest source provenance: --source-uri --canonical-uri --library --doc-id --capture-method --captured-at --site --author --published-at --language
+  query / handoff / recall-check metadata filters (AND): --site --author --library --doc-id --capture-method --source-uri --canonical-uri --language --published-after --published-before --captured-after --captured-before <ISO> | --types a,b
+  library lane (#49): libraries (list registered, MIDMEM_LIBRARIES) | library-get <libraryId> <docId> --locator <JSON {docId,version,charStart,charEnd}>; query / handoff / recall-check take --libraries a,b (ask only those) | --no-libraries (skip the lane)
+  ingest-content <text> | --stdin: same source flags (one of --canonical-uri/--source-uri/--doc-id required) + --type --title --scope --authority (default web) --curated
+```
+
+## Sub-command usage
+
+```
 Usage: vectors <backfill [--limit <n>] [--dryRun] | parity --queries "q1;q2" [--k <n>] | health>
+
+Usage: prospective <add --intent "…" (--on <ISO date> | --event <name>) [--context …] | due [--now <ISO>] [--event <name>] | complete <id> | cancel <id>>
 ```

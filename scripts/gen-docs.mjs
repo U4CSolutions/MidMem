@@ -87,8 +87,12 @@ function genCliDoc() {
     const flags = [...new Set([...c.line.matchAll(/flags\.([a-zA-Z]+)/g)].map((m) => `--${m[1]}`))];
     md += `| \`${c.cmd}\` | ${flags.map((f) => `\`${f}\``).join(' ') || '—'} |\n`;
   }
-  const usage = src.match(/out\('(Usage: [\s\S]*?)'\);/);
+  // The MAIN usage string is the `Usage: ocmw …` one; sub-usages (`prospective`, `vectors`) are the
+  // default branches of their own sub-switches and must not shadow it (they did until 2026-09-24).
+  const usage = src.match(/out\('(Usage: ocmw[\s\S]*?)'\);/);
   if (usage) md += '\n## Usage text (verbatim from the CLI)\n\n```\n' + usage[1].replace(/\\n/g, '\n') + '\n```\n';
+  const subs = [...src.matchAll(/out\('(Usage: (?!ocmw)[\s\S]*?)'\);/g)].map((m) => m[1].replace(/\\n/g, '\n'));
+  if (subs.length) md += '\n## Sub-command usage\n\n```\n' + subs.join('\n\n') + '\n```\n';
   return md;
 }
 
