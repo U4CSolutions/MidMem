@@ -70,3 +70,7 @@ __pycache__/
 # This repo is public: never commit a live snapshot here. Private forks tracking
 # their own knowledge history should remove this line deliberately.
 snapshots/
+
+# Content ingest (#46) materializes captured text next to state.db by default
+# (MIDMEM_CONTENT_INGEST_DIR) — knowledge content, never for this public repo.
+ingest-content/

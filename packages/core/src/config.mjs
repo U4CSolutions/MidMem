@@ -32,9 +32,14 @@ export const DEFAULT_TIERS = [
 export function loadConfig(overrides = {}) {
   // Env reads honor the new MIDMEM_ prefix, falling back to legacy OCMW_ (safe rename).
   const env = (k) => process.env['MIDMEM_' + k] ?? process.env['OCMW_' + k];
+  const dbPath = env('DB_PATH') || path.join(REPO, 'state.db');
   const cfg = {
     /** Single SQLite source-of-truth. */
-    dbPath: env('DB_PATH') || path.join(REPO, 'state.db'),
+    dbPath,
+    /** Content ingest (roadmap #46): `ingestContent` materializes captured text (web pages, library
+     *  documents) here as <sha12(source key)>.md before the ordinary governed ingest. Defaults to a
+     *  sibling of the db; appended to sourceRoots below so the path policy admits it. */
+    contentIngestDir: env('CONTENT_INGEST_DIR') || path.join(path.dirname(dbPath), 'ingest-content'),
     /** Obsidian vault root (LLM-owned wiki projected into the `wikiPath` subfolder). */
     vaultPath: VAULT,
     /** Wiki subdir inside the vault — the projected, LLM-owned knowledge base. */
@@ -258,7 +263,14 @@ export function loadConfig(overrides = {}) {
     /** Governance: deny on policy-eval error (fail-closed). */
     failClosed: true,
   };
-  return { ...cfg, ...overrides };
+  const out = { ...cfg, ...overrides };
+  // An overridden dbPath (tests, embedded hosts) moves the default content dir with it.
+  if (overrides.dbPath && !overrides.contentIngestDir && !env('CONTENT_INGEST_DIR')) out.contentIngestDir = path.join(path.dirname(out.dbPath), 'ingest-content');
+  // Content ingest materializes to a governed root: appending the dir here (rather than bypassing
+  // the ingest-path-allowed policy for content) keeps the path policy fail-closed for every
+  // other path, whatever sourceRoots were configured or overridden.
+  if (out.contentIngestDir && !out.sourceRoots.includes(out.contentIngestDir)) out.sourceRoots = [...out.sourceRoots, out.contentIngestDir];
+  return out;
 }
 
 /**

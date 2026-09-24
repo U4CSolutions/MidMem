@@ -3,6 +3,7 @@
  * all state lives in state.db; retrieval is hybrid; the vault is a projection.
  */
 import * as fs from 'node:fs/promises';
+import * as nodePath from 'node:path';
 import { StateDB } from './db.mjs';
 import { loadConfig } from './config.mjs';
 import { TieredMemory } from './memory.mjs';
@@ -27,6 +28,40 @@ import { checkConsistency } from './consistency.mjs';
 import { runExpectedQueryProbes } from './evalprobes.mjs';
 import { genId, sha12, nowISO, json } from './util.mjs';
 import { normalizeProject, resolveProjects } from './projectaxis.mjs';
+
+/**
+ * Source provenance passthrough (roadmap #46): the caller's own identity for a source — where it
+ * came from, how it was captured, who wrote it — travels with the entry as `provenance.source`.
+ * A closed field set (unknown keys throw), bounded string values, parseable dates; `site` is
+ * derived from the URI hostname when omitted. Deterministic; returns null for an absent/empty object.
+ */
+const SOURCE_FIELDS = ['sourceUri', 'canonicalUri', 'libraryId', 'docId', 'captureMethod', 'capturedAt', 'site', 'author', 'publishedAt', 'language'];
+function normalizeSource(source) {
+  if (source === undefined || source === null) return null;
+  if (typeof source !== 'object' || Array.isArray(source)) throw new Error('source must be an object');
+  for (const k of Object.keys(source)) if (!SOURCE_FIELDS.includes(k)) throw new Error(`unknown source field: ${k}`);
+  const out = {};
+  for (const k of SOURCE_FIELDS) {
+    const v = source[k];
+    if (v === undefined) continue;
+    if (typeof v !== 'string' || v.length > 512) throw new Error(`source field ${k} must be a string of at most 512 chars`);
+    out[k] = v;
+  }
+  for (const k of ['capturedAt', 'publishedAt']) {
+    if (out[k] !== undefined && Number.isNaN(Date.parse(out[k]))) throw new Error(`source field ${k} is not a parseable date: ${out[k]}`);
+  }
+  if (out.site === undefined) {
+    for (const k of ['canonicalUri', 'sourceUri']) {
+      if (!out[k]) continue;
+      let host = '';
+      try { host = new URL(out[k]).hostname; } catch { /* not a URL — no site */ }
+      if (host) { out.site = host.toLowerCase(); break; }
+    }
+  }
+  if (!Object.keys(out).length) return null;
+  // Stable key order (the declared field order) so the stored JSON is byte-deterministic.
+  return Object.fromEntries(SOURCE_FIELDS.filter((k) => out[k] !== undefined).map((k) => [k, out[k]]));
+}
 
 export class Orchestrator {
   constructor(overrides = {}) {
@@ -53,19 +88,53 @@ export class Orchestrator {
   /** Record a structured domain entry via a pack-registered type (governed storeMemory inside). */
   async recordPattern(rec = {}) { return recordPattern(this, rec); }
 
-  /** Ingest a raw source: extract → store (memory tier) → embed → graph → claims → verify. */
-  async ingest({ path, type = 'note', title, metadata = {}, curated = false, scope = this.cfg.agentScope, authority, project = this.cfg.project }) {
+  /** Ingest a raw source: extract → store (memory tier, or a capture-pack type's tier) → embed → graph → claims → verify. */
+  async ingest({ path, type = 'note', title, metadata = {}, curated = false, scope = this.cfg.agentScope, authority, project = this.cfg.project, source }) {
     // Authority assigned at origin (roadmap #10): explicit label wins; curation implies operator;
     // otherwise ingested material is 'doc'. Unknown labels are rejected, not silently mapped.
     if (authority !== undefined && !normalizeAuthority(authority)) throw new Error(`unknown authority: ${authority} (expected operator|stack|doc|web)`);
     const auth = normalizeAuthority(authority) || (curated ? 'operator' : 'doc');
     const proj = normalizeProject(project); // project axis (#18): null = global
-    const r = await governed(this.gov, 'ingest', { path, type, scope, curated, authority: auth, project: proj }, async () => {
+    const src = normalizeSource(source); // source provenance passthrough (#46): validated before any write
+    // Pack-typed ingest (#46): a capture-pack entry type stores as itself, with the pack's tier +
+    // memory function; anything else stays a plain 'ingest' entry in the memory tier. A pack type
+    // aimed at a curated-only tier needs explicit curation — checked here, before any write.
+    const packDef = this.packs?.types?.[type] || null;
+    const entryType = packDef ? type : 'ingest';
+    const entryTier = packDef ? packDef.tier : 'memory';
+    if (packDef && this.cfg.tiers.find((t) => t.name === entryTier)?.curatedOnly && curated !== true) {
+      throw new Error(`pack type '${type}' targets curated-only tier '${entryTier}'; pass curated:true`);
+    }
+    const ctx = { path, type, scope, curated, authority: auth, project: proj, tier: entryTier, ...(src ? { source: Object.keys(src) } : {}) };
+    const r = await governed(this.gov, 'ingest', ctx, async () => {
       const text = await fs.readFile(path, 'utf8');
       const hash = sha12(text);
-      // Hash-dedup: re-ingesting an unchanged file is a no-op (makes the bridge/cron idempotent).
-      const dup = this.db.prepare('SELECT id FROM sources WHERE hash=?').get(hash);
-      if (dup) { this.db.logOp('ingest-skip', { path, hash, sourceId: dup.id }); return { success: true, skipped: true, reason: 'unchanged', sourceId: dup.id }; }
+      const sourceMeta = src ? { ...metadata, source: src } : metadata;
+      // Source-keyed dedup (#46). Same content at the SAME path is a no-op (makes the bridge/cron
+      // idempotent). Same content at a DIFFERENT path is one piece of knowledge reached twice: the
+      // new path gets its own sources row and is linked onto the live entry's provenance.alsoSources
+      // instead of minting a duplicate entry. No live entry for that content → full ingest.
+      const same = this.db.prepare('SELECT id, path FROM sources WHERE hash=? ORDER BY ingested_at, rowid').all(hash);
+      const samePath = same.find((row) => row.path === path);
+      if (samePath) { this.db.logOp('ingest-skip', { path, hash, sourceId: samePath.id }); return { success: true, skipped: true, reason: 'unchanged', sourceId: samePath.id }; }
+      if (same.length) {
+        const linked = this.db.tx(() => {
+          const active = this.db.prepare("SELECT id, provenance FROM entries WHERE source_id=? AND status='active'");
+          let live = null;
+          for (const row of same) { live = active.get(row.id); if (live) break; }
+          if (!live) return null;
+          const newSourceId = genId('src', path);
+          this.db.prepare('INSERT INTO sources(id,path,type,title,hash,ingested_at,metadata) VALUES(?,?,?,?,?,?,?)')
+            .run(newSourceId, path, type, title || null, hash, nowISO(), JSON.stringify(sourceMeta));
+          const p = json(live.provenance, {}) || {};
+          p.alsoSources = [...(Array.isArray(p.alsoSources) ? p.alsoSources : []), { sourceId: newSourceId, path, source: src, at: nowISO() }];
+          // Metadata-only: updated_at stays untouched (the knowledge did not change).
+          this.db.prepare('UPDATE entries SET provenance=? WHERE id=?').run(JSON.stringify(p), live.id);
+          this.db.logOp('ingest-link', { path, entry: live.id, sourceId: newSourceId });
+          return { success: true, skipped: true, reason: 'linked-duplicate', entry: live.id, sourceId: newSourceId };
+        });
+        if (linked) return linked;
+      }
 
       const ex = await this.extractor.extract(text, type);
       // DELEGATE-52 safeguard: ground LLM-extracted concepts/claims against the source BEFORE they
@@ -83,7 +152,7 @@ export class Orchestrator {
       const sourceId = genId('src', path);
       // Deterministic category tag so the store tracks ongoing requests by kind (research/build/...).
       const category = categorizeIngest({ type, content: ex.summary, title }, this.packs?.rules || []);
-      const prov = { originalSource: path, extractedAt: nowISO(), category, authority: auth, grounding, chain: [{ step: 'ingest', source: path }] };
+      const prov = { originalSource: path, extractedAt: nowISO(), category, authority: auth, grounding, chain: [{ step: 'ingest', source: path }], ...(src ? { source: src } : {}) };
       // Sources row (the dedup hash) commits WITH the entry: a failed ingest must not
       // leave the hash behind, or re-ingests would be skipped as 'unchanged' forever.
       // Supersede-on-reingest: a changed file replaces its earlier ingests — archive
@@ -98,8 +167,8 @@ export class Orchestrator {
         const sup = this.db.prepare("UPDATE entries SET status='archived', updated_at=? WHERE id=?");
         for (const id of superseded) sup.run(nowISO(), id);
         this.db.prepare('INSERT INTO sources(id,path,type,title,hash,ingested_at,metadata) VALUES(?,?,?,?,?,?,?)')
-          .run(sourceId, path, type, title || null, hash, nowISO(), JSON.stringify(metadata));
-        return this.memory.store({ content: ex.summary, type: 'ingest', tier: 'memory', scope, sourceId, provenance: prov, concepts: gc.grounded, project: proj });
+          .run(sourceId, path, type, title || null, hash, nowISO(), JSON.stringify(sourceMeta));
+        return this.memory.store({ content: ex.summary, type: entryType, tier: entryTier, scope, sourceId, provenance: prov, concepts: gc.grounded, memFunction: packDef ? packDef.function : null, project: proj });
       });
       await this.memory.upsertVector(stored.id, vector, model, mode);
 
@@ -117,6 +186,25 @@ export class Orchestrator {
     });
     await this.#maybeMaintain();
     return r;
+  }
+
+  /**
+   * Content ingest (#46): ingest text that has no file of its own (a captured web page, a library
+   * document). The content is materialized under cfg.contentIngestDir at a path keyed by the
+   * source's identity (canonicalUri → sourceUri → docId), so the SAME source always lands at the
+   * SAME path: unchanged content dedups by hash, changed content supersedes through the existing
+   * path-keyed supersede. Authority defaults to 'web'. Then it is an ordinary governed ingest.
+   */
+  async ingestContent({ content, source, type = 'note', title, scope, project, authority = 'web', curated = false, metadata = {} } = {}) {
+    if (typeof content !== 'string' || !content.length) throw new Error('ingestContent requires non-empty string content');
+    const sourceKey = source?.canonicalUri || source?.sourceUri || source?.docId;
+    if (!sourceKey) throw new Error('ingestContent requires source.canonicalUri, source.sourceUri or source.docId');
+    normalizeSource(source); // validate before materializing anything
+    const dir = this.cfg.contentIngestDir;
+    const filePath = nodePath.join(dir, sha12(sourceKey) + '.md');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(filePath, content);
+    return this.ingest({ path: filePath, type, title, source, scope, project, authority, curated, metadata });
   }
 
   /** The MCP `remember` op — store a memory directly. */

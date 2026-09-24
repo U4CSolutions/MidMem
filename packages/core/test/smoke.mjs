@@ -1032,6 +1032,86 @@ try {
     ok(vm45(d45.id)?.startsWith('fallback'), 'deleted row not re-embedded');
   } finally { o.embedder.embed = realEmbed45; }
 
+  // 46. Source provenance passthrough + source-keyed dedup + pack-typed ingest + ingestContent (roadmap #46)
+  const eq46 = (a, b) => JSON.stringify(Object.entries(a || {}).sort()) === JSON.stringify(Object.entries(b || {}).sort());
+  const throws46 = async (fn) => { try { await fn(); return null; } catch (e) { return e; } };
+  const text46 = 'VITRIOL46 alpha fixture: copper sulfate crystals grow slowly in a saturated solution overnight.';
+  const f46a = path.join(tmp, 'v46-a.md');
+  fs.writeFileSync(f46a, text46);
+  const s46 = { sourceUri: 'https://mirror.example.test/raw/v46?x=1', canonicalUri: 'https://Docs.Example.test/v46', libraryId: 'lib-46', docId: 'doc-46', captureMethod: 'web-clip', capturedAt: '2026-09-24T10:00:00Z', author: 'A. Author', publishedAt: '2026-09-01', language: 'en' };
+  const i46a = await o.ingest({ path: f46a, type: 'note', title: 'VITRIOL46', source: s46 });
+  const e46a = o.recall(i46a.entry.id);
+  ok(eq46(e46a.provenance.source, { ...s46, site: 'docs.example.test' }), 'provenance.source carries the normalized source object');
+  ok(e46a.provenance.source.site === 'docs.example.test', 'site derived (lowercase hostname) from canonicalUri when omitted');
+  const m46 = JSON.parse(o.db.prepare('SELECT metadata FROM sources WHERE id=?').get(e46a.source_id).metadata);
+  ok(eq46(m46.source, e46a.provenance.source), 'sources row metadata JSON carries the same source object');
+  const bad46 = await throws46(() => o.ingest({ path: f46a, source: { bogus: 'x' } }));
+  ok(bad46 && /unknown source field: bogus/.test(bad46.message), 'an unknown source key throws');
+  const date46 = await throws46(() => o.ingest({ path: f46a, source: { capturedAt: 'not-a-date' } }));
+  ok(date46 && /capturedAt/.test(date46.message), 'an unparseable capturedAt throws');
+
+  // Same content at a second path → linked onto the live entry, no duplicate entry.
+  const f46b = path.join(tmp, 'v46-b.md');
+  fs.writeFileSync(f46b, text46);
+  const up46 = e46a.updated_at;
+  const l46 = await o.ingest({ path: f46b, type: 'note', source: { sourceUri: 'https://mirror2.example.test/v46' } });
+  ok(l46.skipped === true && l46.reason === 'linked-duplicate' && l46.entry === i46a.entry.id, 'same content at a new path → linked-duplicate onto the first entry');
+  const r46b = o.db.prepare('SELECT id, hash FROM sources WHERE path=?').get(f46b);
+  ok(r46b && r46b.id === l46.sourceId, 'a NEW sources row exists for the second path');
+  const al46 = o.recall(i46a.entry.id).provenance.alsoSources;
+  ok(al46?.[0]?.path === f46b && al46[0].sourceId === l46.sourceId && al46[0].source?.site === 'mirror2.example.test', 'first entry provenance.alsoSources[0] records the second path + its source');
+  ok(o.recall(i46a.entry.id).updated_at === up46, 'linking is metadata-only (updated_at untouched)');
+  const n46 = o.db.prepare("SELECT COUNT(*) n FROM entries e JOIN sources s ON e.source_id = s.id WHERE s.hash=? AND e.status='active'").get(r46b.hash).n;
+  ok(n46 === 1, 'the store holds one active entry for that content');
+  const u46 = await o.ingest({ path: f46a, type: 'note' });
+  ok(u46.skipped === true && u46.reason === 'unchanged', 'same content re-ingested at the first path → unchanged');
+  fs.writeFileSync(f46a, 'VITRIOL46 alpha fixture revised: copper sulfate crystals now grow faster in a warm saturated solution.');
+  const v46 = await o.ingest({ path: f46a, type: 'note' });
+  ok(!v46.skipped && o.recall(i46a.entry.id).status === 'archived' && o.recall(v46.entry.id).status === 'active', 'changed content at the first path still supersedes (archived → new active)');
+
+  // Pack-typed ingest: a capture-pack type stores as itself with the pack's tier + function.
+  const f46c = path.join(tmp, 'v46-pattern.md');
+  fs.writeFileSync(f46c, 'VITRIOL46 pattern fixture: retry idempotent writes with a bounded exponential backoff.');
+  const p46 = await o.ingest({ path: f46c, type: 'pattern' });
+  const pe46 = o.recall(p46.entry.id);
+  ok(pe46.type === 'pattern' && pe46.tier === 'memory' && pe46.mem_function === 'procedural', 'pack type pattern → stored type pattern, tier memory, function procedural');
+  const f46r = path.join(tmp, 'v46-research.md');
+  fs.writeFileSync(f46r, 'VITRIOL46 research fixture: a survey of crystal growth rates across temperatures.');
+  const rr46 = await o.ingest({ path: f46r, type: 'research' });
+  ok(o.recall(rr46.entry.id).type === 'ingest' && o.recall(rr46.entry.id).tier === 'memory', 'a non-pack type still stores as type ingest in memory');
+
+  // Curated-only guard for a pack type aimed at wisdom (second orchestrator, same db, own pack dir).
+  const pdir46 = path.join(tmp, 'packs46');
+  fs.mkdirSync(pdir46, { recursive: true });
+  fs.writeFileSync(path.join(pdir46, 'sealed46.json'), JSON.stringify({ name: 'sealed46', entryTypes: { sealed46: { tier: 'wisdom', function: 'semantic' }, ingest: { tier: 'memory' } } }));
+  const o46 = new Orchestrator({ dbPath: path.join(tmp, 'state.db'), vaultPath: path.join(tmp, 'vault'), llmEnabled: false, sourceRoots: [tmp], autoIngest: { enabled: false, onMaintain: false }, capturePacks: { enabled: true, builtinDir: pdir46, paths: [] } });
+  try {
+    ok(o46.packs.types.sealed46 && !o46.packs.types.ingest && o46.packs.errors.some((e) => /'ingest' is reserved/.test(e)), 'packs still cannot register the reserved ingest type');
+    const f46s = path.join(tmp, 'v46-sealed.md');
+    fs.writeFileSync(f46s, 'VITRIOL46 sealed fixture: the reference electrode drifts two millivolts per week.');
+    const g46 = await throws46(() => o46.ingest({ path: f46s, type: 'sealed46' }));
+    ok(g46 && /pack type 'sealed46' targets curated-only tier 'wisdom'; pass curated:true/.test(g46.message), 'uncurated pack ingest into a curated-only tier throws');
+    ok(!o46.db.prepare('SELECT id FROM sources WHERE path=?').get(f46s), 'the guard fires before any write (no sources row)');
+    const c46s = await o46.ingest({ path: f46s, type: 'sealed46', curated: true });
+    ok(o46.recall(c46s.entry.id).tier === 'wisdom' && o46.recall(c46s.entry.id).type === 'sealed46', 'curated pack ingest lands in wisdom');
+  } finally { o46.close(); }
+
+  // ingestContent: content with no file of its own, materialized under the governed content dir.
+  const nos46 = await throws46(() => o.ingestContent({ content: 'VITRIOL46 orphan capture.' }));
+  ok(nos46 && /source/.test(nos46.message), 'ingestContent without a source key throws');
+  ok(o.cfg.sourceRoots.includes(o.cfg.contentIngestDir), 'contentIngestDir is appended to sourceRoots');
+  const cu46 = 'https://example.test/v46';
+  const ct46 = 'VITRIOL46 web capture: basalt columns form as lava cools and contracts into hexagons.';
+  const ic46 = await o.ingestContent({ content: ct46, source: { canonicalUri: cu46 }, type: 'note', authority: 'web' });
+  const ice46 = o.recall(ic46.entry.id);
+  ok(ice46.provenance.authority === 'web' && ice46.provenance.source?.canonicalUri === cu46 && ice46.provenance.source?.site === 'example.test', 'ingestContent stores authority web + provenance.source');
+  const mat46 = ice46.provenance.originalSource;
+  ok(mat46.startsWith(o.cfg.contentIngestDir + path.sep) && fs.readFileSync(mat46, 'utf8') === ct46, 'content materialized as a file under contentIngestDir');
+  const ic46b = await o.ingestContent({ content: ct46, source: { canonicalUri: cu46 }, type: 'note', authority: 'web' });
+  ok(ic46b.skipped === true && ic46b.reason === 'unchanged', 'the same content for the same source → unchanged');
+  const ic46c = await o.ingestContent({ content: 'VITRIOL46 web capture revised: basalt columns form as thick lava cools slowly and cracks.', source: { canonicalUri: cu46 }, type: 'note', authority: 'web' });
+  ok(!ic46c.skipped && o.recall(ic46.entry.id).status === 'archived' && o.recall(ic46c.entry.id).status === 'active' && o.recall(ic46c.entry.id).provenance.originalSource === mat46, 'changed content for the same source supersedes through the same content path');
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;

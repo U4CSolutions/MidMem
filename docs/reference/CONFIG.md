@@ -6,7 +6,8 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 
 | env var | source context (default visible) |
 |---|---|
-| `MIDMEM_DB_PATH` | `dbPath: env('DB_PATH') \|\| path.join(REPO, 'state.db'),` |
+| `MIDMEM_DB_PATH` | `const dbPath = env('DB_PATH') \|\| path.join(REPO, 'state.db');` |
+| `MIDMEM_CONTENT_INGEST_DIR` | `contentIngestDir: env('CONTENT_INGEST_DIR') \|\| path.join(path.dirname(dbPath), 'ingest-content'),` |
 | `MIDMEM_SOURCE_ROOTS` | `sourceRoots: (env('SOURCE_ROOTS') \|\|` |
 | `MIDMEM_BRIDGE_SOURCES` | `bridgeSources: parseBridgeSources(env('BRIDGE_SOURCES')) \|\| [` |
 | `MIDMEM_BRIDGE_RECURSIVE` | `bridgeRecursive: env('BRIDGE_RECURSIVE') !== '0',` |
@@ -74,4 +75,4 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_PROJECT` | `project: normalizeProject(env('PROJECT')),` |
 | `MIDMEM_PROJECT_LIFT` | `liftOnCurated: env('PROJECT_LIFT') !== '0',` |
 
-_67 env knobs._
+_68 env knobs._

@@ -11,12 +11,19 @@ const S = (props, required = []) => ({ type: 'object', properties: props, requir
 const PROJECT_W = { project: { type: 'string', description: 'project slug this entry belongs to (default: this process\'s MIDMEM_PROJECT; omit/empty = global)' } };
 const PROJECT_R = { projects: { type: 'array', items: { type: 'string' }, description: 'project filter: results from these projects PLUS global entries (default: this process\'s MIDMEM_PROJECT + global; pass [] for all projects)' } };
 const rproj = (a) => (Array.isArray(a.projects) ? { projects: a.projects.length ? a.projects : null } : {});
+// Source provenance (#46): the caller's identity for a source, stored as provenance.source.
+const SOURCE = { source: { type: 'object', description: 'source provenance: sourceUri, canonicalUri, libraryId, docId, captureMethod, capturedAt, site, author, publishedAt, language (strings)' } };
 
 const TOOLS = {
   ingest: {
-    description: 'Compile a source file into the knowledge store (extract → tier-store → embed → graph → verify). Path must be under allowed source roots. Ingest always writes the memory tier. curated:true does ONE thing here: it labels the source operator-authored (authority operator — protected recall slots, verbatim returns). Reserve it for the operator\'s own documents; external research, reports and web material are never curated.',
-    schema: S({ path: { type: 'string' }, type: { type: 'string' }, title: { type: 'string' }, scope: { type: 'string' }, curated: { type: 'boolean', description: 'operator-authored source only (sets authority operator); never for external research or web material' }, authority: { type: 'string', description: 'origin trust: operator|stack|doc|web (default doc; operator requires curated:true; never raised downstream)' }, ...PROJECT_W }, ['path']),
-    run: (a) => o.ingest({ path: a.path, type: a.type || 'note', title: a.title, scope: a.scope, curated: !!a.curated, authority: a.authority, ...(a.project !== undefined ? { project: a.project } : {}) }),
+    description: 'Compile a source file into the knowledge store (extract → tier-store → embed → graph → verify). Path must be under allowed source roots. Ingest writes the memory tier, except a capture-pack type (e.g. pattern), which stores as that type in the pack\'s tier. curated:true labels the source operator-authored (authority operator — protected recall slots, verbatim returns) and is also required when a pack type targets a curated-only tier. Reserve it for the operator\'s own documents; external research, reports and web material are never curated.',
+    schema: S({ path: { type: 'string' }, type: { type: 'string' }, title: { type: 'string' }, scope: { type: 'string' }, curated: { type: 'boolean', description: 'operator-authored source only (sets authority operator); never for external research or web material' }, authority: { type: 'string', description: 'origin trust: operator|stack|doc|web (default doc; operator requires curated:true; never raised downstream)' }, ...SOURCE, ...PROJECT_W }, ['path']),
+    run: (a) => o.ingest({ path: a.path, type: a.type || 'note', title: a.title, scope: a.scope, curated: !!a.curated, authority: a.authority, source: a.source, ...(a.project !== undefined ? { project: a.project } : {}) }),
+  },
+  ingest_content: {
+    description: 'Ingest text that has no file of its own (a captured web page, a library document). The content is materialized under the content-ingest dir at a path keyed by the source (canonicalUri → sourceUri → docId, one required), so re-capturing the same source dedups when unchanged and supersedes when changed. Authority defaults to web; otherwise identical to ingest.',
+    schema: S({ content: { type: 'string' }, ...SOURCE, type: { type: 'string' }, title: { type: 'string' }, scope: { type: 'string' }, ...PROJECT_W, authority: { type: 'string', description: 'origin trust: operator|stack|doc|web (default web; operator requires curated:true)' }, curated: { type: 'boolean', description: 'operator-authored source only (sets authority operator)' } }, ['content', 'source']),
+    run: (a) => o.ingestContent({ content: a.content, source: a.source, type: a.type || 'note', title: a.title, scope: a.scope, authority: a.authority || 'web', curated: !!a.curated, ...(a.project !== undefined ? { project: a.project } : {}) }),
   },
   query: {
     description: 'Hybrid (lexical+vector) search of the knowledge store with provenance. Defaults to this agent\'s scope + shared (and this process\'s project + global); pass scopes/projects to override.',
