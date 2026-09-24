@@ -74,3 +74,6 @@ snapshots/
 # Content ingest (#46) materializes captured text next to state.db by default
 # (MIDMEM_CONTENT_INGEST_DIR) — knowledge content, never for this public repo.
 ingest-content/
+
+# Bench verdict (#35) — rewritten by every `node packages/core/test/bench.mjs` run
+packages/core/test/.bench-last.json

@@ -1537,6 +1537,17 @@ try {
     await fq?.close(); await fk?.close(); await f2?.close();
   }
 
+  // 50b. Recorder paths keep the governed write's authority (fix at the #35 gate): record_work,
+  //      prospective_add and record_pattern rebuild provenance and used to drop it (ranked as 'doc').
+  const wkHem = await o.recordWork({ kind: 'decision', task: 'authority50b', content: 'HEMATITE50B decision keeps its authority label' });
+  ok(o.recall(wkHem.id).provenance.authority === 'stack' && o.recall(wkHem.id).provenance.work?.kind === 'decision', 'record_work keeps authority stack beside its work provenance');
+  const prHem = await o.recordProspective({ intent: 'HEMATITE50B follow up', trigger: { type: 'event', value: 'hematite50b' } });
+  ok(o.recall(prHem.id).provenance.authority === 'stack' && o.recall(prHem.id).provenance.prospective?.status === 'pending', 'prospective_add keeps authority stack');
+  const ptHem = await o.recordPattern({ type: 'pattern', title: 'HEMATITE50B pattern', context: 'x', problem: 'y', solution: 'z' });
+  ok(o.recall(ptHem.id).provenance.authority === 'stack' && o.recall(ptHem.id).provenance.pack === 'coding-patterns', 'record_pattern keeps authority stack');
+  const qHem = await o.query('HEMATITE50B decision keeps its authority', { limit: 3 });
+  ok(qHem.results.find((r) => r.id === wkHem.id)?.authority === 'stack', 'recalled work event reports authority stack');
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;

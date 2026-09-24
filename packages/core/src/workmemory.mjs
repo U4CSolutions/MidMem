@@ -118,7 +118,10 @@ export async function recordWorkEvent(o, ev = {}) {
   const res = await o.storeMemory({ content, type: ev.kind, tier: spec.tier, scope, concepts: ev.concepts, ...(ev.project !== undefined ? { project: ev.project } : {}) });
   // Tag provenance with the category + structured work fields (storeMemory leaves provenance null
   // when no source; we write the full object — no reliance on SQLite JSON1).
+  // Keep the origin authority the governed write assigned (#10): rebuilding provenance here used
+  // to drop it, so every work event ranked as 'doc' instead of 'stack' (found by the #35 bench lane).
   const prov = {
+    authority: o.recall(res.id)?.provenance?.authority ?? 'stack',
     category: ev.kind, recordedAt: nowISO(), chain: [{ step: 'record_work', kind: ev.kind }],
     work: { kind: ev.kind, task, status, outcome: ev.outcome ?? null, source: ev.source ?? null, artifact: ev.artifact ?? null, profile: ev.profile ?? null, related: ev.related ?? null },
   };
@@ -283,6 +286,7 @@ export async function recordProspective(o, { intent, trigger = {}, context, scop
   const content = `[prospective] ${intent} — trigger: ${trigger.type}=${trigger.value}${context ? ` — ${context}` : ''}`;
   const res = await o.storeMemory({ content, type: 'prospective', tier: 'memory', scope, ...(project !== undefined ? { project } : {}) });
   const prov = {
+    authority: o.recall(res.id)?.provenance?.authority ?? 'stack', // keep the governed write's authority (#10)
     category: 'prospective', recordedAt: nowISO(),
     prospective: { intent, trigger, status: 'pending', context: context ?? null, expiresWhen },
   };

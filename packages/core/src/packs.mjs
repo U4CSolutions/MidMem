@@ -88,6 +88,7 @@ export async function recordPattern(o, { type, title, context, problem, solution
 
   const res = await o.storeMemory({ content, type, tier: def.tier, scope, memFunction: def.function, concepts, ...(def.ttlDays ? { ttlMs: def.ttlDays * 864e5 } : {}), ...(project !== undefined ? { project } : {}) });
   const prov = {
+    authority: o.recall(res.id)?.provenance?.authority ?? 'stack', // keep the governed write's authority (#10)
     category: type, recordedAt: new Date().toISOString(), pack: def.pack,
     pattern: { title, context: context ?? null, problem: problem ?? null, solution: solution ?? null, outcome: outcome ?? null, evidence },
   };
