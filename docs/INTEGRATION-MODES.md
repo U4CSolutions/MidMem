@@ -107,6 +107,53 @@ Hermes builds; both read/write the one shared `state.db`.
 
 ---
 
+## 6. External library or capture system (any harness) — roadmap #45
+
+A system that captures or curates documents (a read-later app, a document library, a notes
+exporter) feeds MidMem through the ordinary governed ingest and needs **no core change**. MidMem
+holds the derived knowledge (summary, claims, concepts, embedding) and its lifecycle; the calling
+system keeps the evidence (the raw artifact and the canonical text) permanently, outside MidMem.
+
+**The contract, on the code as of #46 (2026-09-24):**
+
+1. **A stable path per source.** Write the canonical text of each source to one stable file path
+   (for example `<archive>/web/<hash of the canonical URL>/article.md`) and re-write it in place when
+   the source changes. Re-ingesting the same path with changed content archives the previous entry
+   (path-keyed supersede); unchanged content is a no-op (hash dedup). The same content arriving at a
+   second path is linked onto the existing entry (`provenance.alsoSources`), never duplicated.
+2. **Register the archive root once.** `MIDMEM_SOURCE_ROOTS` **replaces** the default root list — set
+   the full default list plus the archive root, never the archive root alone. Keep the archive
+   outside every `bridgeSources` folder (or the bridge would auto-ingest it under that folder's
+   scope) and, on this host, outside the Obsidian vault.
+3. **Call ingest with the source's identity** so recall shows the chain back to the URL:
+   ```
+   midmem ingest <archive>/web/<id>/article.md --type web-article --authority web \
+     --scope shared --project library \
+     --source-uri <original url> --canonical-uri <canonical url> --library <libraryId> \
+     --doc-id <docId> --capture-method url_fetch --captured-at <ISO> [--site --author --published-at --language]
+   ```
+   The values land in `provenance.source` (and on the sources row) and come back on every recall
+   row. `--type` may be a capture-pack type (`web-knowledge` pack: `web-article`, `news`,
+   `research-paper`, `technical-documentation`, `tutorial`, …), which sets the entry's type, memory
+   function and lease; any other type stores a plain `ingest` entry in the memory tier.
+4. **Text without a file:** `midmem ingest-content --source-uri <url> --stdin` (MCP `ingest_content`)
+   materializes the text under `MIDMEM_CONTENT_INGEST_DIR` at a path keyed by the source identity and
+   runs the same governed ingest — the same source always supersedes itself.
+5. **Authority is `web` for anything external.** Never `--curated`: it labels the source
+   operator-authored and grants protected recall slots (#39) and verbatim returns (#42).
+6. **Never write memory for captures.** No `remember`, no `record_work`, no write to `state.db`.
+   The only write is the ingest above; retrieval renews leases on its own.
+7. **Reads.** Any consumer: `midmem query "<q>" --projects library` (MCP `query` with
+   `projects: ["library"]`), or unfiltered when the caller has no project set. Rows carry
+   `authority`, `provenance.source`, `fidelity`, `status` and the instruction-likeness flag (#40).
+8. **Call shape.** Shell out to the `midmem` CLI through a durable queue with a frozen argv allowlist
+   and a provider switch (mock in every test: zero `execFile`); or import `Orchestrator` in-process
+   for a Node caller on the same host. Both are governed identically.
+
+**Coming for this mode:** metadata filters on query (#48), the library lane that lets MidMem pull
+full-document evidence from the calling system's own index at the deep stage of retrieval (#49),
+and MidMem's Qdrant spin-up with a vector backfill (#50, #51). None changes the contract above.
+
 ## What stays constant across all modes
 - `state.db` is the single source of truth; the vault is a deterministic, regenerable projection.
 - DELEGATE-52 grounding gates every extracted concept/claim before it persists (no LLM self-review).
