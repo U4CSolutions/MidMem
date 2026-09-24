@@ -13,6 +13,16 @@ export class TieredMemory {
     this.cfg = cfg;
     this.vectorStore = vectorStore; // pluggable: sqlite (default) | qdrant
     this.tierNames = cfg.tiers.map((t) => t.name);
+    /** Lease resolver (#47 fix): `({ type, tier }) => ttlMs | null`. When set, an entry's lease
+     *  (first lease without an explicit ttlMs, and every retrieval renewal) comes from it before
+     *  the tier TTL. The orchestrator wires it to the capture packs' `ttlDays`. */
+    this.leaseResolver = null;
+  }
+
+  /** The resolver's lease for a row, or null (absent resolver, or a non-positive/NaN answer). */
+  #resolvedLease(type, tier) {
+    const v = this.leaseResolver?.({ type, tier });
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null;
   }
 
   tier(name) { return this.cfg.tiers.find((t) => t.name === name); }
@@ -31,8 +41,11 @@ export class TieredMemory {
     const ts = nowISO();
     let expiresAt = tc.ttl ? new Date(Date.now() + tc.ttl).toISOString() : null;
     // Pack-declared lease (#47): an explicit ttlMs replaces the tier TTL for this entry's first
-    // lease (promotion/renewal later apply the destination tier's TTL as usual).
-    if (typeof ttlMs === 'number' && Number.isFinite(ttlMs) && ttlMs > 0) expiresAt = new Date(Date.now() + ttlMs).toISOString();
+    // lease; without one, the lease resolver (the pack's ttlDays for this type/tier) is asked
+    // before the tier TTL. Retrieval renewal asks the same resolver; promotion applies the
+    // destination tier's TTL.
+    const lease = typeof ttlMs === 'number' && Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : this.#resolvedLease(type, tier);
+    if (lease) expiresAt = new Date(Date.now() + lease).toISOString();
     // Lifecycle class (#44): a `working` entry is context-assembly state — lease-bound to the
     // working TTL whatever its tier, so a transient note can never outlive the task that wrote it.
     if (fn === 'working') {
@@ -63,23 +76,26 @@ export class TieredMemory {
 
   /** Bump retrieval_count + last_accessed_at for entries that were returned (usage signal).
    *  When maintenance.refreshOnAccess is on, retrieval also RENEWS the entry's lease
-   *  (expires_at = now + tier TTL): entries that keep getting used keep living;
-   *  entries nobody asks about expire on their tier's TTL (decay-by-disuse). */
+   *  (expires_at = now + lease): the lease resolver's answer for the row's type/tier (a pack's
+   *  ttlDays) when it has one, else the tier TTL. Entries that keep getting used keep living;
+   *  entries nobody asks about expire on their lease (decay-by-disuse). */
   recordRetrieval(ids) {
     if (!ids?.length) return;
     const ts = nowISO();
     const refresh = this.cfg.maintenance?.refreshOnAccess !== false;
-    // One tier lookup + one transaction for the whole batch (this runs on every query).
+    // One row lookup + one transaction for the whole batch (this runs on every query).
     const ph = ids.map(() => '?').join(',');
-    const tiers = new Map(this.db.prepare(`SELECT id, tier FROM entries WHERE id IN (${ph})`).all(...ids).map((r) => [r.id, r.tier]));
+    const rows = new Map(this.db.prepare(`SELECT id, tier, type FROM entries WHERE id IN (${ph})`).all(...ids).map((r) => [r.id, r]));
     const bump = this.db.prepare('UPDATE entries SET retrieval_count = retrieval_count + 1, last_accessed_at = ? WHERE id = ?');
     const renew = this.db.prepare('UPDATE entries SET expires_at = ? WHERE id = ?');
     this.db.tx(() => {
       for (const id of ids) {
         bump.run(ts, id);
         if (!refresh) continue;
-        const tier = this.tier(tiers.get(id));
-        if (tier?.ttl) renew.run(new Date(Date.now() + tier.ttl).toISOString(), id);
+        const row = rows.get(id);
+        if (!row) continue;
+        const ttl = this.#resolvedLease(row.type, row.tier) ?? this.tier(row.tier)?.ttl;
+        if (ttl > 0) renew.run(new Date(Date.now() + ttl).toISOString(), id);
       }
     });
   }

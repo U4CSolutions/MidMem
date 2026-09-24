@@ -48,12 +48,56 @@ function filterActiveIds(db, ids, tiers, scoped, projects, statuses = ['active']
 }
 
 /**
+ * Metadata filters (roadmap #48): deterministic predicates over `provenance.source` (#46) and the
+ * entry type. Exact keys match the stored string (site/language lowercase-compared; author
+ * case-insensitive); the date keys compare parsed ISO times. A row with no `provenance.source`
+ * never matches any source filter. Unknown keys throw so a typo surfaces instead of silently
+ * returning everything.
+ */
+const FILTER_EXACT = ['libraryId', 'captureMethod', 'sourceUri', 'canonicalUri', 'docId'];
+const FILTER_LOWER = ['site', 'language', 'author'];
+const FILTER_DATES = { publishedAfter: ['publishedAt', 1], publishedBefore: ['publishedAt', -1], capturedAfter: ['capturedAt', 1], capturedBefore: ['capturedAt', -1] };
+const FILTER_KEYS = [...FILTER_EXACT, ...FILTER_LOWER, ...Object.keys(FILTER_DATES)];
+
+/** Validate opts.filters / opts.types once; returns a row predicate, or null when nothing filters. */
+function compileFilters(filters, types) {
+  const preds = [];
+  if (filters !== undefined && filters !== null) {
+    if (typeof filters !== 'object' || Array.isArray(filters)) throw new Error('query filters must be an object');
+    for (const k of Object.keys(filters)) if (!FILTER_KEYS.includes(k)) throw new Error(`unknown query filter: ${k}`);
+    for (const [k, v] of Object.entries(filters)) {
+      if (v === undefined || v === null) continue;
+      const want = String(v);
+      if (FILTER_EXACT.includes(k)) preds.push((src) => src?.[k] === want);
+      else if (FILTER_LOWER.includes(k)) { const lw = want.toLowerCase(); preds.push((src) => typeof src?.[k] === 'string' && src[k].toLowerCase() === lw); }
+      else {
+        const [field, dir] = FILTER_DATES[k];
+        const bound = Date.parse(want);
+        if (Number.isNaN(bound)) throw new Error(`query filter ${k} is not a parseable date: ${want}`);
+        preds.push((src) => { const t = Date.parse(src?.[field] ?? ''); return !Number.isNaN(t) && (dir > 0 ? t >= bound : t <= bound); });
+      }
+    }
+  }
+  const typeSet = Array.isArray(types) && types.length ? new Set(types.map(String)) : null;
+  if (!preds.length && !typeSet) return null;
+  return (entry) => {
+    if (typeSet && !typeSet.has(entry.type)) return false;
+    if (!preds.length) return true;
+    const src = entry.provenance?.source;
+    if (!src || typeof src !== 'object') return false;
+    return preds.every((p) => p(src));
+  };
+}
+
+/**
  * @param {import('./db.mjs').StateDB} db
  * @param {import('./memory.mjs').TieredMemory} memory
  * @param {import('./embeddings.mjs').Embedder} embedder
  */
 export async function hybridSearch(db, memory, embedder, query, opts = {}) {
   const { scopes = null, limit = 20, maxTokens = null, includeProvenance = true } = opts;
+  // Metadata filters (#48): validated before any lane runs, so an invalid filter costs nothing.
+  const metaFilter = compileFilters(opts.filters, opts.types);
   const tiers = (opts.tiers && opts.tiers.length) ? opts.tiers : memory.tierNames;
   const cfg = memory.cfg;
   const k = cfg.rrfK;
@@ -126,6 +170,11 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
     const want = new Set(opts.functions);
     cand = cand.filter((c) => want.has(c.entry.mem_function || functionForType(c.entry.type)));
   }
+
+  // --- Metadata filters (roadmap #48): opts.types (entry type) + opts.filters (provenance.source
+  //     keys), AND-combined. Concept-routing seeds are already in `cand` after hydration, so the
+  //     same predicate covers them — a seed can never bypass a filter. ---
+  if (metaFilter) cand = cand.filter((c) => metaFilter(c.entry));
 
   // --- Source-authority filter + boost (roadmap #10): an action-risky caller passes
   //     minAuthority to exclude low-trust origins outright; otherwise authority nudges rank

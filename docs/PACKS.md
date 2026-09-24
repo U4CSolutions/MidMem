@@ -55,7 +55,7 @@ Entry type definition:
 | `function` | `procedural` | Memory function: `working` / `episodic` / `semantic` / `procedural` / `prospective`. |
 | `edge` | none | Edge type `record_pattern` uses to link the pattern node to each evidence node (falls back to `references`). Should be declared in `edgeTypes` — an undeclared edge is reported as an error (the type still loads). |
 | `fields` | `[]` | Declarative: which structured fields the type is meant to carry. The content composer itself uses the fixed `record_pattern` argument set. |
-| `ttlDays` | none | Pack-declared lease (#47): a finite number > 0. The entry's first lease is `now + ttlDays` instead of the tier TTL. |
+| `ttlDays` | none | Pack-declared lease (#47): a finite number > 0. The entry's lease is `now + ttlDays` instead of the tier TTL — at first lease and at every retrieval renewal. |
 
 ### Reserved type names
 
@@ -99,8 +99,10 @@ type to a `source` node per evidence item, and an `about` edge to each concept.
 
 ## Leases (`ttlDays`, #47)
 
-- `ttlDays` sets the entry's **first** lease only. Retrieval renewal and promotion keep their normal
-  rules (a promoted entry takes its destination tier's TTL).
+- `ttlDays` is the entry's lease for its **first** lease **and every retrieval renewal**: a recalled
+  `research-paper` is renewed to `now + 180 days`, not to the tier TTL. Promotion into another tier
+  applies that tier's TTL (a promoted entry takes its destination tier's lease, and a promotion into a
+  permanent tier stays permanent on later recalls).
 - `ttlDays` is refused on a curated-only tier (`wisdom`): **permanence is earned by promotion, never
   declared by a pack.**
 - A `working`-function entry is still capped by the working TTL (the shorter of the two wins).

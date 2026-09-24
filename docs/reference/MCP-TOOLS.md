@@ -55,6 +55,8 @@ Hybrid (lexical+vector) search of the knowledge store with provenance. Defaults 
 | `asOf` | string |  | ISO time: only entries that existed then (created_at <= asOf) |
 | `bounded` | boolean |  | apply the occupancy policy (per-authority caps, protected operator slots, lineage floor) even without maxTokens |
 | `includeWorking` | boolean |  | include working-function (context-assembly) entries, excluded by default |
+| `filters` | object |  | source metadata filters: site, author, libraryId, docId, captureMethod, sourceUri, canonicalUri, language, publishedAfter, publishedBefore, capturedAfter, capturedBefore |
+| `types` | array<string> |  | entry type filter, e.g. ["news","research-paper"] |
 
 ## `feedback`
 
@@ -76,6 +78,8 @@ Build a memory brief to inject into an agent hand-off (e.g. before spawning Herm
 | `scopes` | array<string> |  |  |
 | `tiers` | array<string> |  |  |
 | `projects` | array<string> |  | project filter: results from these projects PLUS global entries (default: this process's MIDMEM_PROJECT + global; pass [] for all projects) |
+| `filters` | object |  | source metadata filters: site, author, libraryId, docId, captureMethod, sourceUri, canonicalUri, language, publishedAfter, publishedBefore, capturedAfter, capturedBefore |
+| `types` | array<string> |  | entry type filter, e.g. ["news","research-paper"] |
 
 ## `remember`
 
@@ -293,6 +297,8 @@ Trigger-less pre-turn recall: run the budgeted hybrid search on a raw user messa
 | `maxTokens` | number |  |  |
 | `scopes` | array<string> |  |  |
 | `projects` | array<string> |  | project filter: results from these projects PLUS global entries (default: this process's MIDMEM_PROJECT + global; pass [] for all projects) |
+| `filters` | object |  | source metadata filters: site, author, libraryId, docId, captureMethod, sourceUri, canonicalUri, language, publishedAfter, publishedBefore, capturedAfter, capturedBefore |
+| `types` | array<string> |  | entry type filter, e.g. ["news","research-paper"] |
 
 ## `record_work`
 

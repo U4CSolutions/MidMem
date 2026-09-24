@@ -81,6 +81,13 @@ export class Orchestrator {
     this.packs = loadPacks(this.cfg);
     this.graph.allowEdgeTypes(this.packs.edgeTypes || []);
     this.#ledgerPackVersions();
+    // Pack-declared lease (#47 fix): the pack's ttlDays is the entry's lease for its first lease
+    // AND every retrieval renewal — while the entry sits in the pack's tier. Promoted into another
+    // tier, the entry takes that tier's TTL (a promoted-to-wisdom entry stays permanent).
+    this.memory.leaseResolver = ({ type, tier }) => {
+      const d = this.packs?.types?.[type];
+      return d?.ttlDays && d.tier === tier ? d.ttlDays * 864e5 : null;
+    };
   }
 
   /** Pack version ledger (#22/#47): meta `pack_version:<name>` holds the last-seen version.
@@ -257,7 +264,8 @@ export class Orchestrator {
     const graphContext = opts.includeGraphContext ? this.#graphContext(question) : null;
     const statuses = Array.isArray(opts.statuses) && opts.statuses.length ? opts.statuses : (opts.historical ? ['active', 'archived'] : ['active']);
     await this.#maybeMaintain();
-    return { query: question, results, sufficiency, scopes, projects, statuses, asOf: opts.asOf || null, graphContext, tiers: opts.tiers || this.memory.tierNames, timestamp: nowISO() };
+    // Metadata filters (#48) ride opts into hybridSearch; echoed so a caller sees what narrowed the set.
+    return { query: question, results, sufficiency, scopes, projects, statuses, asOf: opts.asOf || null, filters: opts.filters || null, types: opts.types || null, graphContext, tiers: opts.tiers || this.memory.tierNames, timestamp: nowISO() };
   }
 
   /**
@@ -277,7 +285,7 @@ export class Orchestrator {
     const maxItems = opts.maxItems ?? c.maxItems ?? 4;
     const scopes = opts.scopes || this.#defaultScopes();
     const projects = resolveProjects(opts, this.#defaultProjects());
-    const results = await hybridSearch(this.db, this.memory, this.embedder, message, { scopes, projects, maxTokens, limit: maxItems });
+    const results = await hybridSearch(this.db, this.memory, this.embedder, message, { scopes, projects, maxTokens, limit: maxItems, filters: opts.filters, types: opts.types });
     const passing = results.filter((r) => r.score >= minScore);
     const topScore = results[0]?.score ?? null;
     if (!passing.length) { this.db.logOp('proactive-recall', { injected: 0, topScore }); return { inject: null, used: [], topScore }; }

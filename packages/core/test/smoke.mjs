@@ -1181,6 +1181,72 @@ try {
     ok(vops47().length === 2, 'an unchanged version logs nothing');
   } finally { for (const x of ov47) x.close(); }
 
+  // 48. Lease renewal honors a pack lease (#47 fix) + metadata filters on query (roadmap #48)
+  const near48 = (iso, days) => !!iso && Math.abs(Date.parse(iso) - (Date.now() + days * 864e5)) <= 60e3;
+  const ids48 = (r) => r.results.map((x) => x.id);
+  // Part A — a recalled pack-typed entry renews to the PACK lease, not the tier TTL.
+  const f48r = path.join(tmp, 'c48-paper.md');
+  fs.writeFileSync(f48r, 'CINNABAR48 paper fixture: piezoelectric quartz oscillators hold frequency within parts per million.');
+  const r48 = await o.ingest({ path: f48r, type: 'research-paper' });
+  ok(near48(o.recall(r48.entry.id).expires_at, 180), `research-paper ingest leased for 180 days (expires ${o.recall(r48.entry.id).expires_at})`);
+  const qa48 = await o.query('CINNABAR48 piezoelectric quartz oscillators', { limit: 3 });
+  ok(ids48(qa48).includes(r48.entry.id) && o.recall(r48.entry.id).retrieval_count >= 1, 'the research-paper entry is retrieved by the query');
+  ok(near48(o.recall(r48.entry.id).expires_at, 180), `retrieval renews the research-paper lease to 180 days, not the 30-day tier TTL (expires ${o.recall(r48.entry.id).expires_at})`);
+  const f48n = path.join(tmp, 'c48-note.md');
+  fs.writeFileSync(f48n, 'CINNABAR48 note fixture: the lighthouse lamp rotates twice every minute on winter nights.');
+  const n48a = await o.ingest({ path: f48n, type: 'note' });
+  const qn48 = await o.query('CINNABAR48 lighthouse lamp rotates winter', { limit: 3 });
+  ok(ids48(qn48).includes(n48a.entry.id) && near48(o.recall(n48a.entry.id).expires_at, 30), 'a retrieved plain note ingest renews to the 30-day tier TTL');
+  const f48w = path.join(tmp, 'c48-wisdom.md');
+  fs.writeFileSync(f48w, 'CINNABAR48 promoted fixture: tidal locking keeps one lunar hemisphere facing the planet.');
+  const pw48 = await o.ingest({ path: f48w, type: 'research-paper' });
+  await o.promote(pw48.entry.id, 'wisdom', { curated: true });
+  const qw48 = await o.query('CINNABAR48 tidal locking lunar hemisphere', { limit: 3 });
+  ok(ids48(qw48).includes(pw48.entry.id) && o.recall(pw48.entry.id).tier === 'wisdom' && o.recall(pw48.entry.id).expires_at === null, 'a pack-typed entry promoted to wisdom stays permanent when recalled (the pack lease applies in the pack tier only)');
+
+  // Part B — metadata filters over provenance.source + entry type.
+  const mk48 = async (name, type, content, source) => {
+    const f = path.join(tmp, `c48-${name}.md`);
+    fs.writeFileSync(f, content);
+    return (await o.ingest({ path: f, type, ...(source ? { source } : {}) })).entry.id;
+  };
+  const news48 = await mk48('news', 'news', 'CINNABAR48 news fixture: the ferry timetable shifts to hourly crossings in spring.',
+    { sourceUri: 'https://harbour.example/ferry', site: 'harbour.example', author: 'Ada Quill', libraryId: 'lib-cin-a', captureMethod: 'rss', publishedAt: '2026-01-10T00:00:00Z', capturedAt: '2026-01-11T00:00:00Z', language: 'en' });
+  const art48 = await mk48('article', 'web-article', 'CINNABAR48 article fixture: dry stone walls drain rainwater through their unmortared gaps.',
+    { sourceUri: 'https://terrace.example/walls', site: 'terrace.example', author: 'Bo Lindqvist', libraryId: 'lib-cin-b', captureMethod: 'browser-extension', publishedAt: '2026-06-01T00:00:00Z', capturedAt: '2026-06-02T00:00:00Z', language: 'de' });
+  const note48 = await mk48('srcnote', 'note', 'CINNABAR48 sourced note fixture: copper roofs weather to a green patina over decades.',
+    { docId: 'doc-cin-3', site: 'notes.example', author: 'ada quill', libraryId: 'lib-cin-a', captureMethod: 'manual', publishedAt: '2026-03-01T00:00:00Z', capturedAt: '2026-03-02T00:00:00Z' });
+  const bare48 = await mk48('bare', 'note', 'CINNABAR48 bare fixture: sourdough starter doubles in volume within eight hours.', null);
+  const fq48 = (opts) => o.query('CINNABAR48', { limit: 20, ...opts });
+  const all48 = await fq48({});
+  ok([news48, art48, note48, bare48].every((id) => ids48(all48).includes(id)), 'unfiltered, one CINNABAR48 query reaches every filter fixture');
+  const site48 = await fq48({ filters: { site: 'harbour.example' } });
+  ok(site48.results.length > 0 && ids48(site48).includes(news48) && site48.results.every((r) => r.provenance?.source?.site === 'harbour.example'), 'filters.site keeps only that site');
+  ok(!ids48(site48).includes(bare48) && !ids48((await fq48({ filters: { site: 'notes.example' } }))).includes(bare48), 'a row ingested with no source never matches a site filter');
+  const au48 = await fq48({ filters: { author: 'ADA QUILL' } });
+  ok(ids48(au48).includes(news48) && ids48(au48).includes(note48) && !ids48(au48).includes(art48), 'filters.author is case-insensitive');
+  const lib48 = await fq48({ filters: { libraryId: 'lib-cin-b' } });
+  ok(ids48(lib48).includes(art48) && lib48.results.every((r) => r.provenance?.source?.libraryId === 'lib-cin-b') && (await fq48({ filters: { libraryId: 'LIB-CIN-B' } })).results.length === 0, 'filters.libraryId is exact (case-sensitive)');
+  const cm48 = await fq48({ filters: { captureMethod: 'rss' } });
+  ok(ids48(cm48).includes(news48) && cm48.results.every((r) => r.provenance?.source?.captureMethod === 'rss'), 'filters.captureMethod is exact');
+  const pa48 = await fq48({ filters: { publishedAfter: '2026-02-01T00:00:00Z' } });
+  ok(ids48(pa48).includes(art48) && ids48(pa48).includes(note48) && !ids48(pa48).includes(news48) && !ids48(pa48).includes(bare48), 'filters.publishedAfter excludes the older row (and rows without publishedAt)');
+  const cb48 = await fq48({ filters: { capturedBefore: '2026-05-01T00:00:00Z' } });
+  ok(ids48(cb48).includes(news48) && ids48(cb48).includes(note48) && !ids48(cb48).includes(art48), 'filters.capturedBefore excludes the newer row');
+  const and48 = await fq48({ filters: { author: 'Ada Quill', publishedAfter: '2026-02-01T00:00:00Z' } });
+  ok(ids48(and48).length === 1 && ids48(and48)[0] === note48, 'two filters combine with AND');
+  const ty48 = await fq48({ types: ['news'] });
+  ok(ids48(ty48).includes(news48) && ty48.results.every((r) => r.type === 'news'), 'types:[news] keeps only news entries');
+  let bad48 = null;
+  try { await fq48({ filters: { sitee: 'harbour.example' } }); } catch (e) { bad48 = e; }
+  ok(bad48 && /unknown query filter: sitee/.test(bad48.message), 'an unknown filter key throws unknown query filter');
+  const echo48 = await fq48({ filters: { site: 'harbour.example' }, types: ['news'] });
+  ok(echo48.filters?.site === 'harbour.example' && echo48.types?.[0] === 'news' && all48.filters === null && all48.types === null, 'the query result echoes filters and types (null when absent)');
+  const hb48 = await o.handoffBrief({ task: 'CINNABAR48', profile: 'frontier', filters: { site: 'terrace.example' } });
+  ok(hb48.count >= 1 && hb48.brief.includes(art48) && !hb48.brief.includes(news48) && !hb48.brief.includes(note48), 'handoffBrief honors filters');
+  const pr48 = await o.proactiveRecall('CINNABAR48', { filters: { site: 'terrace.example' }, force: true, minScore: 0 });
+  ok(pr48.used.includes(art48) && !pr48.used.includes(news48) && !pr48.used.includes(bare48), 'proactiveRecall honors filters');
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;
