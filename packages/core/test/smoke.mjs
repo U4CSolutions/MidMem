@@ -1247,6 +1247,172 @@ try {
   const pr48 = await o.proactiveRecall('CINNABAR48', { filters: { site: 'terrace.example' }, force: true, minScore: 0 });
   ok(pr48.used.includes(art48) && !pr48.used.includes(news48) && !pr48.used.includes(bare48), 'proactiveRecall honors filters');
 
+  // 49. Library lane (roadmap #49): registered external library systems are asked for evidence at the
+  //     deep stage only, fused as their own lane, never stored, never renewed; module + HTTP transports.
+  const { makeProvider: mkProv49, startHttpProvider: startHttp49 } = await import('./helpers/fake-library.mjs');
+  const { parseLibraries: parseLib49 } = await import('../src/index.mjs');
+  const { pathToFileURL: toUrl49 } = await import('node:url');
+  const fx49 = JSON.parse(fs.readFileSync(new URL('./fixtures/library-provider.json', import.meta.url), 'utf8'));
+  // 49.0 — the fake provider itself honors the frozen contract fixture.
+  const fake49 = mkProv49(fx49, { libraryId: 'kb-fixture' });
+  for (const c of fx49.expected) {
+    const rows = await fake49.search(c.query, { limit: 5, filters: c.filters });
+    if (c.empty) { ok(rows.length === 0, `fake provider: "${c.name}" → []`); continue; }
+    ok(rows[0]?.docId === c.topDocId && (!c.topChunkId || rows[0]?.chunkId === c.topChunkId)
+      && (!c.mustNotContainDocId || !rows.some((r) => r.docId === c.mustNotContainDocId)), `fake provider: "${c.name}" → top ${c.topDocId}${c.topChunkId ? '/' + c.topChunkId : ''}`);
+  }
+  for (const g of fx49.getCases) {
+    let got = null, err = null;
+    try { got = await fake49.get(g.docId, g.locator); } catch (e) { err = e; }
+    ok(g.expectError ? (err && got === null) : got?.text === g.expectText, `fake provider: get ${g.docId} → ${g.expectError ? 'error' : 'exact text'}`);
+  }
+  // 49.1 — a module-transport library registered on the shared db.
+  const helperUrl49 = new URL('./helpers/fake-library.mjs', import.meta.url).href;
+  const fixtureUrl49 = new URL('./fixtures/library-provider.json', import.meta.url);
+  const mod49 = path.join(tmp, 'lib49-provider.mjs');
+  fs.writeFileSync(mod49, [
+    "import * as fs from 'node:fs';",
+    `import { makeProvider, makeCallCounter } from ${JSON.stringify(helperUrl49)};`,
+    `const fx = JSON.parse(fs.readFileSync(new URL(${JSON.stringify(fixtureUrl49.href)}), 'utf8'));`,
+    "const counted = makeCallCounter(makeProvider(fx, { libraryId: 'kb-fixture' }));",
+    'export const search = counted.search;',
+    'export const get = counted.get;',
+    'export const counts = counted.counts;',
+  ].join('\n'));
+  const bad49 = path.join(tmp, 'lib49-bad.mjs');
+  fs.writeFileSync(bad49, [
+    'export async function search() {',
+    "  return [{ libraryId: 'someone-else', docId: 'doc-bad', chunkId: 'bad-0', text: 'GARNET49 good row from the malformed provider', score: 0.5, locator: { docId: 'doc-bad', version: 1, charStart: 0, charEnd: 10 }, sourceUri: 'https://example.test/bad' },",
+    "    { docId: 'doc-bad', chunkId: 'bad-1', text: 'no score, no locator', score: 'high' }];",
+    '}',
+    "export async function get() { throw new Error('read-only fake'); }",
+  ].join('\n'));
+  const base49 = { dbPath: path.join(tmp, 'state.db'), vaultPath: path.join(tmp, 'vault'), llmEnabled: false, sourceRoots: [tmp], autoIngest: { enabled: false, onMaintain: false } };
+  const libs49 = (r) => r.results.filter((x) => x.kind === 'library');
+  let oL = null, oH = null, oB = null, srv49 = null;
+  try {
+    oL = new Orchestrator({ ...base49, libraries: [{ id: 'kb-fixture', transport: 'module', target: mod49 }] });
+    ok(oL.listLibraries()[0]?.id === 'kb-fixture' && oL.listLibraries()[0].transport === 'module' && oL.listLibraries()[0].lastError === null, 'listLibraries → the registered kb-fixture module library');
+    const counts49 = (await import(toUrl49(mod49).href)).counts;
+    const entries49 = () => o.db.prepare('SELECT count(*) n FROM entries').get().n;
+    const vectors49 = () => o.db.prepare('SELECT count(*) n FROM vectors').get().n;
+    const e0 = entries49(), v0 = vectors49();
+    // 49.2 — every fixture expectation through a deep query.
+    for (const c of fx49.expected) {
+      const r = await oL.query(c.query, { deep: true, filters: c.filters, limit: 5 });
+      const lr = libs49(r);
+      ok(r.sufficiency.library?.queried?.includes('kb-fixture') && r.sufficiency.library.returned === lr.length, `"${c.name}": sufficiency.library.queried lists kb-fixture (returned ${lr.length})`);
+      if (c.empty) { ok(lr.length === 0, `"${c.name}": the wrong-library filter yields no library rows`); continue; }
+      ok(lr[0]?.docId === c.topDocId && (!c.topChunkId || lr[0]?.chunkId === c.topChunkId) && lr[0].library === 'kb-fixture', `"${c.name}": top library row ${lr[0]?.docId}/${lr[0]?.chunkId}`);
+      if (c.mustNotContainDocId) ok(!lr.some((x) => x.docId === c.mustNotContainDocId), `"${c.name}": no ${c.mustNotContainDocId} library row`);
+      if (c.filters?.site) ok(lr.every((x) => new URL(x.sourceUri).hostname === c.filters.site), `"${c.name}": every library row is from ${c.filters.site}`);
+      if (c.filters?.capturedAfter) ok(lr.every((x) => Date.parse(x.capturedAt) >= Date.parse(c.filters.capturedAfter)), `"${c.name}": every library row captured after ${c.filters.capturedAfter}`);
+    }
+    const shape49 = libs49(await oL.query(fx49.expected[0].query, { deep: true, limit: 5 }))[0];
+    ok(shape49 && shape49.id === 'lib:kb-fixture:osprey-1-0' && shape49.type === 'library-chunk' && shape49.status === null && shape49.tier === null && shape49.trust === null
+      && shape49.rank.library === 1 && shape49.rank.providerScore === 0.5 && shape49.locator.charEnd === 79 && shape49.sourceUri === 'https://example.test/osprey-relay'
+      && shape49.score === Number((0.8 / (oL.cfg.rrfK + 0)).toFixed(6)), 'a library row carries its id, locator, provider score and the lane score weight/(rrfK + rank)');
+    // 49.3 — the cheap pass never asks a library; the deep pass asks once.
+    const gid49 = (await oL.storeMemory({ content: 'GARNET49 lexical fixture: the garnet lantern glows amber at dusk.', type: 'note' })).id;
+    const g49 = 'GARNET49 garnet lantern glows amber';
+    const s0 = counts49.search;
+    const cheap49 = await oL.query(g49, { limit: 5 });
+    ok(cheap49.sufficiency.stage === 'lexical' && counts49.search === s0 && libs49(cheap49).length === 0, 'a query answered at the lexical stage makes ZERO library calls');
+    const deep49 = await oL.query(g49, { deep: true, limit: 5 });
+    ok(counts49.search === s0 + 1 && deep49.sufficiency.stage === 'full', 'the same query with deep:true makes exactly one library call');
+    // 49.4 — libraries:false / libraries:[other] skip the lane.
+    const s1 = counts49.search;
+    const off49 = await oL.query(fx49.expected[0].query, { deep: true, libraries: false, limit: 5 });
+    ok(libs49(off49).length === 0 && counts49.search === s1 && off49.libraries === false && off49.sufficiency.library.queried.length === 0, 'libraries:false → no library rows, no call');
+    const other49 = await oL.query(fx49.expected[0].query, { deep: true, libraries: ['other'], limit: 5 });
+    ok(libs49(other49).length === 0 && counts49.search === s1 && other49.libraries[0] === 'other', "libraries:['other'] → kb-fixture is not called");
+    const dflt49 = await oL.query(g49, { limit: 5 });
+    ok(Array.isArray(dflt49.libraries) && dflt49.libraries.length === 1 && dflt49.libraries[0] === 'kb-fixture', 'query echoes the libraries asked (default: every registered library)');
+    // 49.5 — never stored, never renewed.
+    ok(entries49() === e0 + 1 && vectors49() === v0 + 1, `library queries store nothing (entries ${e0}→${entries49()} and vectors ${v0}→${vectors49()} moved only by the one GARNET49 memory)`);
+    ok(o.db.prepare("SELECT count(*) n FROM entries WHERE id LIKE 'lib:%'").get().n === 0 && oL.recall('lib:kb-fixture:osprey-1-0') == null, 'no entry id starts with lib:');
+    o.db.prepare('UPDATE entries SET expires_at = ? WHERE id = ?').run(new Date(Date.now() + 864e5).toISOString(), gid49);
+    const rc49 = o.recall(gid49).retrieval_count;
+    const mix49 = await oL.query('GARNET49 garnet lantern glows amber osprey relay', { deep: true, limit: 10 });
+    ok(libs49(mix49).length > 0 && mix49.results.some((x) => x.id === gid49 && x.kind === 'memory'), 'a deep query returns the GARNET49 memory row beside library rows');
+    ok(o.recall(gid49).retrieval_count === rc49 + 1 && Date.parse(o.recall(gid49).expires_at) > Date.now() + 20 * 864e5, 'the memory row retrieved beside library rows has its lease renewed');
+    ok(libs49(mix49).every((x) => x.status === null && x.tier === null), 'library rows carry status null (recordRetrieval never sees them)');
+    // Render paths: handoff brief + proactive recall tag library evidence.
+    const hb49 = await oL.handoffBrief({ task: 'heron drain rotation pinned worker', profile: 'frontier' });
+    ok(hb49.brief.includes('(library kb-fixture · evidence)') && hb49.brief.includes('heron --drain'), 'handoffBrief renders library rows with a (library kb-fixture · evidence) tag');
+    const hbl49 = await oL.handoffBrief({ task: 'heron drain rotation pinned worker', profile: 'local' });
+    ok(hbl49.brief.includes('(library kb-fixture · evidence)'), 'the local handoff profile tags library rows too');
+    const pr49 = await oL.proactiveRecall('heron drain rotation pinned worker', { force: true, minScore: 0, libraries: ['kb-fixture'] }); // pre-turn recall asks a library only when asked (49b)
+    ok(pr49.inject?.includes('[library:kb-fixture · evidence]') && pr49.inject.includes('_(src: https://docs.example.test/heron-scheduler)_'), 'proactiveRecall renders library rows as [library:<id> · evidence] lines with their source');
+    // 49.6 — linkedEntry: a MidMem entry summarizing the same source links the library row back.
+    const f49 = path.join(tmp, 'g49-osprey.md');
+    fs.writeFileSync(f49, fx49.libraries[0].documents[0].text);
+    const li49 = await oL.ingest({ path: f49, type: 'note', source: { docId: 'doc-osprey', canonicalUri: 'https://example.test/osprey-relay' } });
+    const lk49 = libs49(await oL.query(fx49.expected[0].query, { deep: true, limit: 5 }));
+    ok(lk49.length > 0 && lk49.filter((x) => x.docId === 'doc-osprey').every((x) => x.linkedEntry === li49.entry.id), 'the doc-osprey library row carries linkedEntry = the ingested entry');
+    ok(lk49.filter((x) => x.docId !== 'doc-osprey').every((x) => x.linkedEntry === null), 'library rows from other documents link to nothing');
+    // 49.7 / 49.8 — HTTP transport, malformed rows, libraryGet on both transports.
+    srv49 = await startHttp49(mkProv49(fx49, { libraryId: 'kb-http' }));
+    oH = new Orchestrator({ ...base49, libraries: [{ id: 'kb-http', transport: 'http', target: srv49.url }] });
+    const h49 = libs49(await oH.query(fx49.expected[0].query, { deep: true, limit: 5 }));
+    ok(h49[0]?.docId === 'doc-osprey' && h49[0].chunkId === 'osprey-1-0' && h49[0].library === 'kb-http' && h49[0].id === 'lib:kb-http:osprey-1-0', 'HTTP transport: the direct-match case returns doc-osprey/osprey-1-0 from kb-http');
+    const gc49 = fx49.getCases.find((g) => !g.expectError);
+    const miss49 = fx49.getCases.find((g) => g.expectError);
+    ok((await oL.libraryGet('kb-fixture', gc49.docId, gc49.locator)).text === gc49.expectText, 'libraryGet (module) returns the exact getCases text');
+    ok((await oH.libraryGet('kb-http', gc49.docId, gc49.locator)).text === gc49.expectText, 'libraryGet (HTTP) returns the exact getCases text');
+    let gm49 = null, gh49 = null;
+    try { await oL.libraryGet('kb-fixture', miss49.docId, miss49.locator); } catch (e) { gm49 = e; }
+    try { await oH.libraryGet('kb-http', miss49.docId, miss49.locator); } catch (e) { gh49 = e; }
+    ok(gm49 && gh49 && /unknown docId/.test(gh49.message), 'libraryGet throws for the missing doc on both transports');
+    await srv49.close(); srv49 = null;
+    let down49 = null, downErr49 = null;
+    try { down49 = await oH.query(fx49.expected[0].query, { deep: true, limit: 5 }); } catch (e) { downErr49 = e; }
+    ok(!downErr49 && down49.results.length > 0 && libs49(down49).length === 0 && down49.results.every((x) => x.kind === 'memory'), 'a closed HTTP library: no throw, memory rows still return, no library rows');
+    ok(typeof oH.listLibraries()[0].lastError === 'string' && oH.listLibraries()[0].lastError.length > 0, `the unreachable library records lastError (${oH.listLibraries()[0].lastError})`);
+    oB = new Orchestrator({ ...base49, libraries: [{ id: 'kb-bad', transport: 'module', target: bad49 }] });
+    const b49 = libs49(await oB.query('GARNET49 good row', { deep: true, limit: 5 }));
+    ok(b49.length === 1 && b49[0].chunkId === 'bad-0' && b49[0].library === 'kb-bad' && oB.listLibraries()[0].dropped === 1, 'a malformed row is dropped (dropped === 1); the good row returns under the answering provider id');
+    // 49.9 — MIDMEM_LIBRARIES parsing.
+    const pl49 = parseLib49('kb|module:~/x.mjs;h|http:http://127.0.0.1:1/p');
+    ok(pl49.length === 2 && pl49[0].id === 'kb' && pl49[0].transport === 'module' && pl49[0].target === path.join(os.homedir(), 'x.mjs')
+      && pl49[1].id === 'h' && pl49[1].transport === 'http' && pl49[1].target === 'http://127.0.0.1:1/p', 'parseLibraries: two entries, tilde expanded');
+    let pb49 = null;
+    try { parseLib49('kb|ftp:somewhere'); } catch (e) { pb49 = e; }
+    ok(pb49 && /bad MIDMEM_LIBRARIES entry 'kb\|ftp:somewhere'/.test(pb49.message) && parseLib49(undefined).length === 0, 'parseLibraries: a malformed entry throws; unset → []');
+    // 49.10 — default config: no library registered, retrieval as before.
+    const d49 = await o.query('vector cosine fusion retrieval', { limit: 5 });
+    ok(d49.results.length > 0 && d49.results.every((x) => x.kind === 'memory'), 'default config: every row is kind memory');
+    const dd49 = await o.query('vector cosine fusion retrieval', { deep: true, limit: 5 });
+    ok(JSON.stringify(dd49.sufficiency.library) === JSON.stringify({ queried: [], returned: 0 }) && dd49.libraries.length === 0, 'default config: a deep query reports sufficiency.library { queried: [], returned: 0 }');
+    ok(Array.isArray((await o.brief()).libraries) && (await o.brief()).libraries.length === 0 && oL.listLibraries().length === 1 && (await oL.brief()).libraries[0].id === 'kb-fixture', 'brief().libraries: [] by default, the registered library when one is set');
+  } finally {
+    await srv49?.close();
+    oL?.close(); oH?.close(); oB?.close();
+  }
+
+  // 49b. Pre-turn recall and libraries (orchestrator fix at the #49 gate): never asks a provider unless
+  //      asked or configured; library rows pass on the provider's score, not the RRF score.
+  const oP = new Orchestrator({ ...base49, libraries: [{ id: 'kb-fixture', transport: 'module', target: mod49 }] });
+  try {
+    const cnt = (await import(toUrl49(mod49).href)).counts;
+    const s0 = cnt.search;
+    const prD = await oP.proactiveRecall('how often does the osprey relay flush writes', { force: true, minScore: 0 });
+    ok(cnt.search === s0 && !/library:kb-fixture/.test(prD.inject || ''), 'default pre-turn recall makes no provider call and injects no library line');
+    const prL = await oP.proactiveRecall('how often does the osprey relay flush writes', { force: true, libraries: ['kb-fixture'] });
+    ok(cnt.search === s0 + 1 && /\[library:kb-fixture · evidence\]/.test(prL.inject || ''), 'explicit libraries → one provider call; the library line passes at the DEFAULT minScore (provider-score gate, not RRF)');
+    const prLow = await oP.proactiveRecall('alpha beta gamma delta epsilon osprey', { force: true, libraries: ['kb-fixture'] });
+    ok(!/library:kb-fixture/.test(prLow.inject || ''), 'a library row below libraryMinScore (provider score 1/6) is not injected');
+    const prLow2 = await oP.proactiveRecall('alpha beta gamma delta epsilon osprey', { force: true, libraries: ['kb-fixture'], libraryMinScore: 0.1 });
+    ok(/library:kb-fixture/.test(prLow2.inject || ''), 'lowering libraryMinScore admits it');
+    const oC = new Orchestrator({ ...base49, libraries: [{ id: 'kb-fixture', transport: 'module', target: mod49 }], proactiveRecall: { enabled: true, minScore: 0.02, maxTokens: 600, maxItems: 4, libraries: true, libraryMinScore: 0.2 } });
+    try {
+      const s1 = cnt.search;
+      const prC = await oC.proactiveRecall('how often does the osprey relay flush writes', { force: true });
+      ok(cnt.search === s1 + 1 && /library:kb-fixture/.test(prC.inject || ''), 'proactiveRecall.libraries=true (MIDMEM_RECALL_LIBRARIES=1) asks providers by default');
+      ok(oC.cfg.proactiveRecall.libraries === true && o.cfg.proactiveRecall.libraries === false, 'config default is off; the knob turns it on');
+    } finally { oC.close(); }
+  } finally { oP.close(); }
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;

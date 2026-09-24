@@ -28,6 +28,8 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_RECALL_MIN_SCORE` | `minScore: Number(env('RECALL_MIN_SCORE') \|\| 0.02),` |
 | `MIDMEM_RECALL_MAX_TOKENS` | `maxTokens: Number(env('RECALL_MAX_TOKENS') \|\| 600),` |
 | `MIDMEM_RECALL_MAX_ITEMS` | `maxItems: Number(env('RECALL_MAX_ITEMS') \|\| 4),` |
+| `MIDMEM_RECALL_LIBRARIES` | `libraries: env('RECALL_LIBRARIES') === '1',` |
+| `MIDMEM_RECALL_LIBRARY_MIN_SCORE` | `libraryMinScore: Number(env('RECALL_LIBRARY_MIN_SCORE') ?? 0.2),` |
 | `MIDMEM_MAINTENANCE` | `enabled: env('MAINTENANCE') !== '0',` |
 | `MIDMEM_MAINT_INTERVAL_MS` | `intervalMs: Number(env('MAINT_INTERVAL_MS') \|\| 3600e3), // lazy sweep ≤ 1/hour` |
 | `MIDMEM_RETENTION_DAYS` | `retentionDays: Number(env('RETENTION_DAYS') \|\| 90),` |
@@ -51,6 +53,11 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_PROGRESSIVE` | `enabled: env('PROGRESSIVE') !== '0',` |
 | `MIDMEM_PROGRESSIVE_MIN_HITS` | `minHits: Number(env('PROGRESSIVE_MIN_HITS') \|\| 1),` |
 | `MIDMEM_PROGRESSIVE_MIN_COVERAGE` | `minCoverage: Number(env('PROGRESSIVE_MIN_COVERAGE') ?? 0.6),` |
+| `MIDMEM_LIBRARIES` | `libraries: parseLibraries(env('LIBRARIES')),` |
+| `MIDMEM_LIBRARY_LANE` | `enabled: env('LIBRARY_LANE') !== '0',` |
+| `MIDMEM_LIBRARY_LIMIT` | `limit: Number(env('LIBRARY_LIMIT') ?? 8),` |
+| `MIDMEM_LIBRARY_TIMEOUT_MS` | `timeoutMs: Number(env('LIBRARY_TIMEOUT_MS') ?? 4000),` |
+| `MIDMEM_LIBRARY_WEIGHT` | `weight: Number(env('LIBRARY_WEIGHT') ?? 0.8),` |
 | `MIDMEM_AUTHORITY` | `enabled: env('AUTHORITY') !== '0',` |
 | `MIDMEM_AUTHORITY_BOOST` | `boost: Number(env('AUTHORITY_BOOST') ?? 0.002), // × (rank − doc) → operator +0.004 … web −0.002` |
 | `MIDMEM_DEFER_CONTRADICTORY` | `deferContradictory: env('DEFER_CONTRADICTORY') !== '0',` |
@@ -75,4 +82,4 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_PROJECT` | `project: normalizeProject(env('PROJECT')),` |
 | `MIDMEM_PROJECT_LIFT` | `liftOnCurated: env('PROJECT_LIFT') !== '0',` |
 
-_68 env knobs._
+_75 env knobs._

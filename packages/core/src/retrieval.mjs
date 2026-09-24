@@ -15,6 +15,10 @@ import { authorityRank, AUTHORITY_LEVELS } from './authority.mjs';
 import { projectClause, matchesProject } from './projectaxis.mjs';
 import { instructionLikeness, fidelityClass, selectBounded } from './recallpolicy.mjs';
 
+/** Library-lane report per result array (roadmap #49): which providers were asked and how many rows
+ *  came back. Kept off the array itself so result shapes stay unchanged; read by progressiveSearch. */
+const LIBRARY_REPORT = new WeakMap();
+
 /** One FTS lane (token or trigram), scope/tier/project filtered. Returns ranked entry ids.
  *  Expired leases are filtered here too — decay holds even between maintenance sweeps. */
 function ftsLane(db, table, expr, tiers, scoped, projects, statuses = ['active'], asOf = null, limit = 200) {
@@ -127,6 +131,17 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
     const vraw = await memory.vectorStore.search(qv, 400); // backend-ranked candidates (id+score)
     const vAllowed = filterActiveIds(db, vraw.map((r) => r.id), tiers, scoped, projects, statuses, asOf);
     lanes.vector = vraw.filter((r) => vAllowed.has(r.id)).slice(0, 200).map((r) => r.id);
+  }
+
+  // --- Library lane (roadmap #49): deep stage only. Registered external library systems are asked
+  //     for evidence here (never on the cheap lexical pass) and fused below as their own RRF lane.
+  //     Library rows are never stored, never tiered/trusted/promoted/decayed, never renewed. ---
+  let libRows = [];
+  let libQueried = [];
+  if (!lexicalOnly && opts.registry && cfg.library?.enabled !== false && opts.libraries !== false) {
+    const want = Array.isArray(opts.libraries) ? opts.libraries : null;
+    libQueried = opts.registry.list().map((l) => l.id).filter((id) => !want || want.includes(id));
+    libRows = await opts.registry.search(query, { limit: cfg.library?.limit ?? 8, filters: opts.filters || null, libraries: want });
   }
 
   // --- Reciprocal Rank Fusion ---
@@ -282,9 +297,10 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
     selected = cand.slice(0, limit);
   }
 
-  return selected.map((c) => {
+  const memoryRows = selected.map((c) => {
     const r = render(c.entry);
     return {
+      kind: 'memory',
       id: c.id,
       tier: c.entry.tier,
       type: c.entry.type,
@@ -301,6 +317,55 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
       provenance: includeProvenance ? c.entry.provenance ?? null : undefined,
     };
   });
+  if (!libRows.length) {
+    LIBRARY_REPORT.set(memoryRows, { queried: libQueried, returned: 0 });
+    return memoryRows;
+  }
+
+  // --- Library rows: ordered among memory rows by their lane score, but NOT counted against
+  //     `limit`, not part of the occupancy/budget selection, and never part of evidenceSufficient
+  //     (which runs on the lexical pass). linkedEntry points back at the active MidMem entry that
+  //     summarizes the same source (by docId or URI), one prepared lookup per distinct source. ---
+  const lw = cfg.library?.weight ?? 0.8;
+  const linkStmt = db.prepare(`
+    SELECT id FROM entries
+    WHERE status = 'active'
+      AND (json_extract(iif(json_valid(provenance), provenance, NULL), '$.source.docId') = ?
+        OR json_extract(iif(json_valid(provenance), provenance, NULL), '$.source.canonicalUri') = ?
+        OR json_extract(iif(json_valid(provenance), provenance, NULL), '$.source.sourceUri') = ?)
+    ORDER BY created_at DESC, id ASC LIMIT 1
+  `);
+  const links = new Map();
+  const linkFor = (docId, sourceUri) => {
+    const key = JSON.stringify([docId, sourceUri]);
+    if (!links.has(key)) links.set(key, linkStmt.get(docId, sourceUri, sourceUri)?.id ?? null);
+    return links.get(key);
+  };
+  const libraryRows = libRows.map((row, i) => ({
+    kind: 'library',
+    id: 'lib:' + row.libraryId + ':' + row.chunkId,
+    library: row.libraryId,
+    docId: row.docId,
+    chunkId: row.chunkId,
+    locator: row.locator,
+    sourceUri: row.sourceUri,
+    capturedAt: row.capturedAt ?? null,
+    content: row.text.slice(0, 600) + (row.text.length > 600 ? '…' : ''),
+    score: Number((lw * (1 / (k + i))).toFixed(6)),
+    rank: { library: i + 1, providerScore: row.score },
+    linkedEntry: linkFor(row.docId, row.sourceUri),
+    status: null,
+    tier: null,
+    type: 'library-chunk',
+    authority: null,
+    trust: null,
+    fidelity: 'compressible',
+    truncated: row.text.length > 600,
+    provenance: { source: { libraryId: row.libraryId, docId: row.docId, sourceUri: row.sourceUri } },
+  }));
+  const out = [...memoryRows, ...libraryRows].sort((a, b) => b.score - a.score);
+  LIBRARY_REPORT.set(out, { queried: libQueried, returned: libraryRows.length });
+  return out;
 }
 
 /** Deterministic evidence-sufficiency check (roadmap #11): the top hits must cover enough of the
@@ -329,13 +394,15 @@ export function evidenceSufficient(query, results, { minHits = 1, minCoverage = 
  */
 export async function progressiveSearch(db, memory, embedder, query, opts = {}) {
   const pc = memory.cfg.progressive || {};
+  // The library lane (#49) runs on the deep pass only; its report rides the sufficiency descriptor.
+  const libraryOf = (results) => LIBRARY_REPORT.get(results) ?? { queried: [], returned: 0 };
   if (pc.enabled === false || opts.deep) {
     const results = await hybridSearch(db, memory, embedder, query, opts);
-    return { results, sufficiency: { stage: 'full', gated: false, reason: opts.deep ? 'deep-requested' : 'progressive-disabled' } };
+    return { results, sufficiency: { stage: 'full', gated: false, reason: opts.deep ? 'deep-requested' : 'progressive-disabled', library: libraryOf(results) } };
   }
   const lexical = await hybridSearch(db, memory, embedder, query, { ...opts, lexicalOnly: true });
   const verdict = evidenceSufficient(query, lexical, { minHits: pc.minHits ?? 1, minCoverage: pc.minCoverage ?? 0.6 });
   if (verdict.sufficient) return { results: lexical, sufficiency: { stage: 'lexical', gated: true, ...verdict } };
   const results = await hybridSearch(db, memory, embedder, query, opts);
-  return { results, sufficiency: { stage: 'full', gated: true, expandedBecause: verdict } };
+  return { results, sufficiency: { stage: 'full', gated: true, expandedBecause: verdict, library: libraryOf(results) } };
 }

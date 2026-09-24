@@ -122,6 +122,13 @@ export function loadConfig(overrides = {}) {
       minScore: Number(env('RECALL_MIN_SCORE') || 0.02),
       maxTokens: Number(env('RECALL_MAX_TOKENS') || 600),
       maxItems: Number(env('RECALL_MAX_ITEMS') || 4),
+      /** Library lane (#49) in pre-turn recall: OFF by default — a pre-turn recall runs on every
+       *  message and would otherwise call every registered provider each time. Explicit `query` and
+       *  `handoff_brief` ask libraries by default; set MIDMEM_RECALL_LIBRARIES=1 (or pass
+       *  `libraries`) to include library evidence here too. Library rows are gated on the provider's
+       *  own score (libraryMinScore), not on the RRF score, which by construction sits below minScore. */
+      libraries: env('RECALL_LIBRARIES') === '1',
+      libraryMinScore: Number(env('RECALL_LIBRARY_MIN_SCORE') ?? 0.2),
     },
     /** Self-driving lifecycle (decay + promotion) — runs opportunistically on normal use
      *  (query/ingest/remember), throttled by intervalMs, plus an external daily timer.
@@ -191,6 +198,20 @@ export function loadConfig(overrides = {}) {
       enabled: env('PROGRESSIVE') !== '0',
       minHits: Number(env('PROGRESSIVE_MIN_HITS') || 1),
       minCoverage: Number(env('PROGRESSIVE_MIN_COVERAGE') ?? 0.6),
+    },
+    /** Library lane (roadmap #49): registered external library systems, asked for evidence at
+     *  the DEEP stage of retrieval only (never the cheap lexical pass). MIDMEM_LIBRARIES =
+     *  `id|module:<abs path to an ES module>;id2|http:<base url>`. Default empty: no provider is
+     *  loaded or called and retrieval is unchanged. A library is a separate system — MidMem never
+     *  stores its rows, never tiers, trusts, promotes, decays or renews them. */
+    libraries: parseLibraries(env('LIBRARIES')),
+    /** Library lane knobs: rows fused as their own RRF lane (weight × 1/(rrfK + rank)), at most
+     *  `limit` per query across providers, each provider call bounded by `timeoutMs`; never stored. */
+    library: {
+      enabled: env('LIBRARY_LANE') !== '0',
+      limit: Number(env('LIBRARY_LIMIT') ?? 8),
+      timeoutMs: Number(env('LIBRARY_TIMEOUT_MS') ?? 4000),
+      weight: Number(env('LIBRARY_WEIGHT') ?? 0.8),
     },
     /** Source authority (roadmap #10, arXiv 2607.29167): origin-assigned trust level
      *  (operator|stack|doc|web) that propagates through derived entries/claims and can never be
@@ -310,6 +331,32 @@ export function parseBridgeSources(spec) {
     out.push(src);
   }
   return out.length ? out : null;
+}
+
+/**
+ * Parse MIDMEM_LIBRARIES (roadmap #49): entries separated by `;`, fields by `|` —
+ * `id|module:<abs path to an ES module>` or `id|http:<base url>`. `~/` expands to $HOME for module
+ * paths. Returns [] when unset; a malformed entry throws — a misregistered library must be loud.
+ */
+export function parseLibraries(spec) {
+  if (!spec || !String(spec).trim()) return [];
+  const out = [];
+  for (const raw of String(spec).split(';')) {
+    const item = raw.trim();
+    if (!item) continue;
+    const bad = () => new Error(`bad MIDMEM_LIBRARIES entry '${item}' (expected id|module:<path> or id|http:<url>)`);
+    const fields = item.split('|').map((f) => f.trim());
+    if (fields.length !== 2) throw bad();
+    const [id, where] = fields;
+    const m = /^(module|http):(.+)$/.exec(where || '');
+    if (!id || !m) throw bad();
+    const transport = m[1];
+    let target = m[2].trim();
+    if (!target) throw bad();
+    if (transport === 'module' && target.startsWith('~/')) target = path.join(HOME, target.slice(2));
+    out.push({ id, transport, target });
+  }
+  return out;
 }
 
 export const REPO_ROOT = REPO;

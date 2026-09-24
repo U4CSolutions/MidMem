@@ -150,9 +150,13 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    and a provider switch (mock in every test: zero `execFile`); or import `Orchestrator` in-process
    for a Node caller on the same host. Both are governed identically.
 
-**Coming for this mode:** metadata filters on query (#48), the library lane that lets MidMem pull
-full-document evidence from the calling system's own index at the deep stage of retrieval (#49),
-and MidMem's Qdrant spin-up with a vector backfill (#50, #51). None changes the contract above.
+**Coming for this mode:** metadata filters on query (#48) and MidMem's Qdrant spin-up with a vector
+backfill (#50, #51). None changes the contract above. **Shipped (#49): the library lane** — MidMem
+asks a registered library system for full-document evidence at the deep stage of retrieval and fuses
+it as its own lane, never storing it; register one with
+`MIDMEM_LIBRARIES="kb|http:http://127.0.0.1:8790/provider"` (HTTP) or `kb|module:/abs/provider.mjs`
+(in-process ES module exporting `search` + `get`), per the frozen contract in
+`packages/core/test/fixtures/library-provider.json`.
 
 ## What stays constant across all modes
 - `state.db` is the single source of truth; the vault is a deterministic, regenerable projection.
@@ -169,6 +173,8 @@ and MidMem's Qdrant spin-up with a vector backfill (#50, #51). None changes the 
 | `MIDMEM_PROJECT_LIFT` | on | promotion into `wisdom` lifts a project entry to global (lineage kept in `provenance.liftedFrom`) |
 | `MIDMEM_BRIDGE_SOURCES` | built-in: OpenClaw/Hermes memory dirs + each agent vault folder split (the folder private, its `research/` + `reports/` bridged as `shared`) | `dir\|scope\|type\|project\|recursive\|exclude,…;…` — replaces the default bridge roots so any harness's memory dir or report folder registers with zero core change; the sixth field lists subfolders another source owns |
 | `MIDMEM_BRIDGE_RECURSIVE` | on | bridge walks subfolders (dot-dirs + `node_modules` skipped); `0` = flat walk |
+| `MIDMEM_LIBRARIES` | unset (no library) | `id\|module:<abs path>;id2\|http:<base url>` — registers external library systems (#49) asked for evidence at the deep stage of retrieval; their rows are fused, never stored |
+| `MIDMEM_LIBRARY_LANE` / `…_LIMIT` / `…_TIMEOUT_MS` / `…_WEIGHT` | on / 8 / 4000 / 0.8 | library lane (#49): on/off, max library rows per query, per-provider call timeout, RRF weight of the lane |
 | `MIDMEM_OCCUPANCY` / `…_CAP_STACK` `…_CAP_DOC` `…_CAP_WEB` `…_OPERATOR_SLOTS` `…_MIN_LINEAGES` | on / 0.6 / 0.6 / 0.25 / 2 / 2 | bounded-occupancy selection on budgeted reads (#39): per-authority caps that bind only against a waiting competitor, protected operator slots, lineage floor |
 | `MIDMEM_INSTRUCTION_FLAG` / `MIDMEM_INSTRUCTION_PENALTY` | on / 0.01 | instruction-likeness flag on results (#40); flagged rows demoted + labelled, never dropped |
 | `MIDMEM_FIDELITY` / `MIDMEM_VERBATIM_MAX_CHARS` | on / 4000 | fidelity class on results (#42); verbatim rows (operator / curated tier) uncut up to the ceiling |
