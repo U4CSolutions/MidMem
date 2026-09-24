@@ -9,6 +9,10 @@
  * Non-destructive by construction: packs ADD types/rules/edges; they cannot redefine
  * core work-event kinds or core edge types, and unknown/invalid packs are skipped with
  * a report rather than failing the orchestrator.
+ *
+ * A type may declare `ttlDays` (#47): its entries get that lease instead of the tier TTL
+ * (never on a curated-only tier). Pack versions are ledgered by the Orchestrator
+ * (`pack-registered` / `pack-migrated` ops). Authoring guide: docs/PACKS.md.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -29,7 +33,7 @@ export function loadPacks(cfg = {}) {
   for (const p of pc.paths || []) files.push(p);
 
   const packs = [];
-  const types = {};   // entryType -> { pack, tier, function, edge }
+  const types = {};   // entryType -> { pack, tier, function, edge, fields, ttlDays }
   const rules = [];   // [category, RegExp] prepended to the core categorizer
   const errors = [];
   for (const file of files) {
@@ -43,7 +47,14 @@ export function loadPacks(cfg = {}) {
         if (types[t]) { errors.push(`${raw.name}: type '${t}' already registered by pack '${types[t].pack}'`); continue; }
         const fn = def.function || 'procedural';
         if (!MEMORY_FUNCTIONS.includes(fn)) { errors.push(`${raw.name}: type '${t}' has unknown function '${fn}'`); continue; }
-        types[t] = { pack: raw.name, tier: def.tier || 'memory', function: fn, edge: def.edge || null, fields: def.fields || [] };
+        const tier = def.tier || 'memory';
+        // Pack-declared lease (#47): a type may shorten/lengthen its entries' lease (ttlDays)
+        // within an expiring tier. Never on a curated-only tier — permanence is earned by
+        // promotion, never declared by a pack.
+        const hasTtl = def.ttlDays !== undefined && def.ttlDays !== null;
+        if (hasTtl && !(typeof def.ttlDays === 'number' && Number.isFinite(def.ttlDays) && def.ttlDays > 0)) { errors.push(`${raw.name}: type '${t}' has invalid ttlDays`); continue; }
+        if (hasTtl && (cfg.tiers || []).find((x) => x.name === tier)?.curatedOnly) { errors.push(`${raw.name}: type '${t}' cannot set ttlDays on curated-only tier '${tier}'`); continue; }
+        types[t] = { pack: raw.name, tier, function: fn, edge: def.edge || null, fields: def.fields || [], ttlDays: hasTtl ? def.ttlDays : null };
         loadedTypes.push(t);
       }
       for (const [cat, re] of raw.categorizerRules || []) {
@@ -75,7 +86,7 @@ export async function recordPattern(o, { type, title, context, problem, solution
   if (evidence.length) parts.push(`Evidence: ${evidence.join(' · ')}`);
   const content = parts.join(' — ');
 
-  const res = await o.storeMemory({ content, type, tier: def.tier, scope, memFunction: def.function, concepts, ...(project !== undefined ? { project } : {}) });
+  const res = await o.storeMemory({ content, type, tier: def.tier, scope, memFunction: def.function, concepts, ...(def.ttlDays ? { ttlMs: def.ttlDays * 864e5 } : {}), ...(project !== undefined ? { project } : {}) });
   const prov = {
     category: type, recordedAt: new Date().toISOString(), pack: def.pack,
     pattern: { title, context: context ?? null, problem: problem ?? null, solution: solution ?? null, outcome: outcome ?? null, evidence },

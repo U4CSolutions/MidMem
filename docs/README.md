@@ -14,6 +14,7 @@ cannot drift, verified by `npm run verify`), and **design** (architecture + rese
   (standalone · OpenClaw · Hermes · bridge) + the Claude Code MCP recipe with its guardrails.
 - [`OPERATIONS.md`](OPERATIONS.md) — day-2: maintenance modes, the review queues, consistency
   cadence, health signals, backup/restore, upgrade contract.
+- [`PACKS.md`](PACKS.md) — capture-pack authoring guide: the JSON contract, validation, leases, version ledger.
 
 ## Reference (generated — `node scripts/gen-docs.mjs`; drift-checked in CI)
 

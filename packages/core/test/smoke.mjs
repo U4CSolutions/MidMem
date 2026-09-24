@@ -1112,6 +1112,75 @@ try {
   const ic46c = await o.ingestContent({ content: 'VITRIOL46 web capture revised: basalt columns form as thick lava cools slowly and cracks.', source: { canonicalUri: cu46 }, type: 'note', authority: 'web' });
   ok(!ic46c.skipped && o.recall(ic46.entry.id).status === 'archived' && o.recall(ic46c.entry.id).status === 'active' && o.recall(ic46c.entry.id).provenance.originalSource === mat46, 'changed content for the same source supersedes through the same content path');
 
+  // 47. Pack-declared leases + web-knowledge pack + pack version ledger (roadmap #47, #22)
+  const near47 = (iso, days) => !!iso && Math.abs(Date.parse(iso) - (Date.now() + days * 864e5)) <= 60e3;
+  const pk47 = o.listPacks();
+  ok(pk47.packs.some((p) => p.name === 'web-knowledge') && pk47.errors.length === 0, `web-knowledge pack loads with zero errors (${pk47.packs.map((p) => p.name).join(',')})`);
+  ok(o.packs.types['news']?.ttlDays === 45 && o.packs.types['technical-documentation']?.function === 'procedural', 'news leases 45 days; technical-documentation is procedural');
+  ok(o.packs.types['pattern']?.ttlDays === null, 'a type without ttlDays carries ttlDays null');
+
+  const f47n = path.join(tmp, 'l47-news.md');
+  fs.writeFileSync(f47n, 'LORICA47 news fixture: the harbour authority reopened the northern channel after dredging finished.');
+  const n47 = await o.ingest({ path: f47n, type: 'news' });
+  const ne47 = o.recall(n47.entry.id);
+  ok(ne47.type === 'news' && ne47.mem_function === 'semantic' && ne47.tier === 'memory', 'news ingest → type news, function semantic, tier memory');
+  ok(near47(ne47.expires_at, 45), `news entry leased for 45 days (expires ${ne47.expires_at})`);
+  const f47w = path.join(tmp, 'l47-article.md');
+  fs.writeFileSync(f47w, 'LORICA47 article fixture: terraced rice paddies hold monsoon water across stepped hillsides.');
+  const w47 = await o.ingest({ path: f47w, type: 'web-article' });
+  ok(near47(o.recall(w47.entry.id).expires_at, 90), 'web-article entry leased for 90 days');
+  const f47p = path.join(tmp, 'l47-note.md');
+  fs.writeFileSync(f47p, 'LORICA47 note fixture: the greenhouse vents open automatically above twenty eight degrees.');
+  const p47 = await o.ingest({ path: f47p, type: 'note' });
+  const pe47 = o.recall(p47.entry.id);
+  ok(pe47.type === 'ingest' && near47(pe47.expires_at, 30), 'a plain note ingest keeps type ingest + the memory tier TTL (30 days)');
+
+  const rp47 = await o.recordPattern({ type: 'pattern', title: 'LORICA47 tier-TTL pattern', context: 'packs without ttlDays', solution: 'fall back to the tier TTL' });
+  ok(near47(o.recall(rp47.id).expires_at, 30), 'recordPattern on a type without ttlDays uses the tier TTL');
+
+  const base47 = { dbPath: path.join(tmp, 'state.db'), vaultPath: path.join(tmp, 'vault'), llmEnabled: false, sourceRoots: [tmp], autoIngest: { enabled: false, onMaintain: false } };
+  const pdir47a = path.join(tmp, 'packs47a');
+  const pdir47b = path.join(tmp, 'packs47b');
+  fs.mkdirSync(pdir47a, { recursive: true });
+  fs.mkdirSync(pdir47b, { recursive: true });
+  fs.writeFileSync(path.join(pdir47a, 'lease47.json'), JSON.stringify({ name: 'lease47', version: 1, entryTypes: { leased47: { tier: 'memory', function: 'procedural', ttlDays: 7 } } }));
+  fs.writeFileSync(path.join(pdir47b, 'bad47.json'), JSON.stringify({ name: 'bad47', version: 1, entryTypes: { neg47: { tier: 'memory', ttlDays: -1 }, sealed47: { tier: 'wisdom', function: 'semantic', ttlDays: 30 }, fine47: { tier: 'memory' } } }));
+  let oa47 = null, ob47 = null;
+  try {
+    oa47 = new Orchestrator({ ...base47, capturePacks: { enabled: true, builtinDir: pdir47a, paths: [] } });
+    const lp47 = await oa47.recordPattern({ type: 'leased47', title: 'LORICA47 short-lease recipe', solution: 'expire in a week' });
+    ok(near47(oa47.recall(lp47.id).expires_at, 7), 'recordPattern on a ttlDays:7 type → entry leased for 7 days');
+    ob47 = new Orchestrator({ ...base47, capturePacks: { enabled: true, builtinDir: pdir47b, paths: [] } });
+    ok(ob47.packs.errors.some((e) => /neg47' has invalid ttlDays/.test(e)) && !ob47.packs.types.neg47, 'ttlDays -1 → invalid ttlDays error, type skipped');
+    ok(ob47.packs.errors.some((e) => /sealed47' cannot set ttlDays on curated-only tier 'wisdom'/.test(e)) && !ob47.packs.types.sealed47, 'ttlDays on a curated-only tier → error, type skipped');
+    ok(!!ob47.packs.types.fine47 && ob47.packs.packs.some((p) => p.name === 'bad47'), 'the rest of the pack still loads (a bad type is skipped, never fatal)');
+  } finally { oa47?.close(); ob47?.close(); }
+
+  ok(categorizeIngest({ type: 'note', content: 'see https://arxiv.org/abs/2609.09153 for the preprint' }, o.packs.rules) === 'research-paper', 'arxiv/preprint text categorizes as research-paper');
+  ok(categorizeIngest({ type: 'note', content: 'the source lives at github.com/u4c/kb-article-library' }, o.packs.rules) === 'github-project', 'a github.com/owner/repo text categorizes as github-project');
+  ok(categorizeIngest({ type: 'note', content: 'a step-by-step walkthrough of the setup' }, o.packs.rules) === 'tutorial', 'a step-by-step walkthrough categorizes as tutorial');
+
+  const pdir47v = path.join(tmp, 'packs47v');
+  fs.mkdirSync(pdir47v, { recursive: true });
+  const vfile47 = path.join(pdir47v, 'versioned47.json');
+  const vpack47 = (version) => fs.writeFileSync(vfile47, JSON.stringify({ name: 'versioned47', version, entryTypes: { vtype47: { tier: 'memory', function: 'semantic' } } }));
+  const vops47 = () => o.db.prepare("SELECT operation, detail FROM log WHERE operation IN ('pack-registered','pack-migrated') ORDER BY id").all()
+    .map((r) => ({ op: r.operation, ...JSON.parse(r.detail) })).filter((r) => r.pack === 'versioned47');
+  const ov47 = [];
+  try {
+    vpack47(1);
+    ov47.push(new Orchestrator({ ...base47, capturePacks: { enabled: true, builtinDir: pdir47v, paths: [] } }));
+    const v1ops47 = vops47();
+    ok(v1ops47.length === 1 && v1ops47[0].op === 'pack-registered' && v1ops47[0].version === 1, 'first sight of a pack logs pack-registered {pack, version}');
+    vpack47(2);
+    ov47.push(new Orchestrator({ ...base47, capturePacks: { enabled: true, builtinDir: pdir47v, paths: [] } }));
+    const v2ops47 = vops47();
+    ok(v2ops47.length === 2 && v2ops47[1].op === 'pack-migrated' && v2ops47[1].from === 1 && v2ops47[1].to === 2, 'a changed pack version logs pack-migrated {from: 1, to: 2}');
+    ok(o.db.prepare("SELECT value FROM meta WHERE key='pack_version:versioned47'").get()?.value === '2', 'meta pack_version:versioned47 now holds 2');
+    ov47.push(new Orchestrator({ ...base47, capturePacks: { enabled: true, builtinDir: pdir47v, paths: [] } }));
+    ok(vops47().length === 2, 'an unchanged version logs nothing');
+  } finally { for (const x of ov47) x.close(); }
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;

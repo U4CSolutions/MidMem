@@ -21,7 +21,7 @@ export class TieredMemory {
    * Store an entry (single transactional write to entries; vector set separately).
    * @returns {{id:string, rowid:number, tier:string}}
    */
-  store({ content, type = 'note', tier = 'memory', scope = 'shared', sourceId = null, provenance = null, concepts = null, memFunction = null, project = null }) {
+  store({ content, type = 'note', tier = 'memory', scope = 'shared', sourceId = null, provenance = null, concepts = null, memFunction = null, project = null, ttlMs = null }) {
     const tc = this.tier(tier);
     if (!tc) throw new Error(`unknown tier: ${tier}`);
     const fn = memFunction || functionForType(type);
@@ -30,6 +30,9 @@ export class TieredMemory {
     const id = genId(tier, content.slice(0, 80) + type + Date.now());
     const ts = nowISO();
     let expiresAt = tc.ttl ? new Date(Date.now() + tc.ttl).toISOString() : null;
+    // Pack-declared lease (#47): an explicit ttlMs replaces the tier TTL for this entry's first
+    // lease (promotion/renewal later apply the destination tier's TTL as usual).
+    if (typeof ttlMs === 'number' && Number.isFinite(ttlMs) && ttlMs > 0) expiresAt = new Date(Date.now() + ttlMs).toISOString();
     // Lifecycle class (#44): a `working` entry is context-assembly state — lease-bound to the
     // working TTL whatever its tier, so a transient note can never outlive the task that wrote it.
     if (fn === 'working') {

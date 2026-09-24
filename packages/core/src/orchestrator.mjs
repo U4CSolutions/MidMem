@@ -80,6 +80,22 @@ export class Orchestrator {
     // not take the orchestrator down.
     this.packs = loadPacks(this.cfg);
     this.graph.allowEdgeTypes(this.packs.edgeTypes || []);
+    this.#ledgerPackVersions();
+  }
+
+  /** Pack version ledger (#22/#47): meta `pack_version:<name>` holds the last-seen version.
+   *  First sight → `pack-registered`; a changed version → `pack-migrated {from,to}`; same → nothing. */
+  #ledgerPackVersions() {
+    const get = this.db.prepare('SELECT value FROM meta WHERE key=?');
+    const put = this.db.prepare('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+    const decode = (v) => { try { return JSON.parse(v); } catch { return v; } };
+    for (const p of this.packs.packs || []) {
+      const key = `pack_version:${p.name}`;
+      const cur = JSON.stringify(p.version);
+      const prev = get.get(key)?.value;
+      if (prev === undefined) { put.run(key, cur); this.db.logOp('pack-registered', { pack: p.name, version: p.version }); }
+      else if (prev !== cur) { put.run(key, cur); this.db.logOp('pack-migrated', { pack: p.name, from: decode(prev), to: p.version }); }
+    }
   }
 
   /** Loaded capture packs (name/version/types) + any load errors. */
@@ -168,7 +184,7 @@ export class Orchestrator {
         for (const id of superseded) sup.run(nowISO(), id);
         this.db.prepare('INSERT INTO sources(id,path,type,title,hash,ingested_at,metadata) VALUES(?,?,?,?,?,?,?)')
           .run(sourceId, path, type, title || null, hash, nowISO(), JSON.stringify(sourceMeta));
-        return this.memory.store({ content: ex.summary, type: entryType, tier: entryTier, scope, sourceId, provenance: prov, concepts: gc.grounded, memFunction: packDef ? packDef.function : null, project: proj });
+        return this.memory.store({ content: ex.summary, type: entryType, tier: entryTier, scope, sourceId, provenance: prov, concepts: gc.grounded, memFunction: packDef ? packDef.function : null, project: proj, ...(packDef?.ttlDays ? { ttlMs: packDef.ttlDays * 864e5 } : {}) });
       });
       await this.memory.upsertVector(stored.id, vector, model, mode);
 
@@ -208,7 +224,7 @@ export class Orchestrator {
   }
 
   /** The MCP `remember` op — store a memory directly. */
-  async storeMemory({ content, type = 'insight', tier = 'memory', scope = this.cfg.agentScope, source, concepts, curated = false, memFunction = null, authority, parentAuthority = null, project = this.cfg.project }) {
+  async storeMemory({ content, type = 'insight', tier = 'memory', scope = this.cfg.agentScope, source, concepts, curated = false, memFunction = null, authority, parentAuthority = null, project = this.cfg.project, ttlMs = null }) {
     if (authority !== undefined && !normalizeAuthority(authority)) throw new Error(`unknown authority: ${authority} (expected operator|stack|doc|web)`);
     // Direct agent writes are 'stack' by default; curation implies operator; a derived write
     // passes parentAuthority and is CLAMPED to it — consolidation can never raise authority.
@@ -216,7 +232,8 @@ export class Orchestrator {
     const proj = normalizeProject(project); // project axis (#18): null = global
     const r = await governed(this.gov, 'store', { tier, scope, curated, authority: auth, project: proj }, async () => {
       const prov = { authority: auth, ...(source ? { originalSource: source.path, extractedAt: nowISO(), chain: [{ step: 'remember', source: source.path }] } : {}) };
-      const stored = this.db.tx(() => this.memory.store({ content, type, tier, scope, provenance: prov, concepts, memFunction, project: proj }));
+      const lease = typeof ttlMs === 'number' && ttlMs > 0 ? { ttlMs } : {}; // pack-declared lease (#47)
+      const stored = this.db.tx(() => this.memory.store({ content, type, tier, scope, provenance: prov, concepts, memFunction, project: proj, ...lease }));
       const { vector, model, mode } = await this.embedder.embed(content);
       await this.memory.upsertVector(stored.id, vector, model, mode);
       if (concepts) for (const c of concepts) this.graph.upsertNode({ type: c.type || 'concept', label: c.name, source: 'remember' });

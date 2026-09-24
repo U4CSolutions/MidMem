@@ -1,0 +1,26 @@
+{
+  "name": "web-knowledge",
+  "version": 1,
+  "description": "Externally captured knowledge — web pages, papers, docs — from a capture/library system; typed and leased per kind, authority is set by the caller (web) never by the pack",
+  "entryTypes": {
+    "web-article":             { "tier": "memory", "function": "semantic",   "edge": "captured_from", "fields": ["source", "summary"], "ttlDays": 90 },
+    "news":                    { "tier": "memory", "function": "semantic",   "edge": "captured_from", "fields": ["source", "summary"], "ttlDays": 45 },
+    "blog":                    { "tier": "memory", "function": "semantic",   "edge": "captured_from", "fields": ["source", "summary"], "ttlDays": 90 },
+    "analysis":                { "tier": "memory", "function": "semantic",   "edge": "captured_from", "fields": ["source", "summary"], "ttlDays": 120 },
+    "research-paper":          { "tier": "memory", "function": "semantic",   "edge": "captured_from", "fields": ["source", "summary"], "ttlDays": 180 },
+    "reference":               { "tier": "memory", "function": "semantic",   "edge": "captured_from", "fields": ["source", "summary"], "ttlDays": 180 },
+    "technical-documentation": { "tier": "memory", "function": "procedural", "edge": "captured_from", "fields": ["source", "summary"], "ttlDays": 180 },
+    "tutorial":                { "tier": "memory", "function": "procedural", "edge": "captured_from", "fields": ["source", "summary"], "ttlDays": 120 },
+    "forum-thread":            { "tier": "memory", "function": "episodic",   "edge": "captured_from", "fields": ["source", "summary"], "ttlDays": 60 },
+    "github-project":          { "tier": "memory", "function": "semantic",   "edge": "captured_from", "fields": ["source", "summary"], "ttlDays": 180 }
+  },
+  "categorizerRules": [
+    ["research-paper",          "\\barxiv\\b|doi\\.org|\\bpreprint\\b|research paper"],
+    ["technical-documentation", "\\bapi reference\\b|\\bdocumentation\\b|\\bdocs\\b|\\breadthedocs\\b"],
+    ["github-project",          "github\\.com/[\\w.-]+/[\\w.-]+|\\brepository\\b.*\\breadme\\b"],
+    ["tutorial",                "\\btutorial\\b|\\bhow[- ]to\\b|step[- ]by[- ]step|\\bwalkthrough\\b"],
+    ["forum-thread",            "reddit\\.com/r/|news\\.ycombinator|stackoverflow\\.com|\\bforum thread\\b"],
+    ["news",                    "\\bbreaking\\b|\\breuters\\b|\\bassociated press\\b|\\bpress release\\b|\\bnews\\b"]
+  ],
+  "edgeTypes": ["captured_from"]
+}
