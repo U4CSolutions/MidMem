@@ -37,6 +37,19 @@ import { LibraryRegistry } from './libraries.mjs';
  * derived from the URI hostname when omitted. Deterministic; returns null for an absent/empty object.
  */
 const SOURCE_FIELDS = ['sourceUri', 'canonicalUri', 'libraryId', 'docId', 'captureMethod', 'capturedAt', 'site', 'author', 'publishedAt', 'language'];
+/** Secret-shaped query parameter names. A source URI is stored in provenance and echoed on every
+ *  recall row and brief, so a credential riding on it would reach agent prompts forever; the
+ *  boundary refuses it (fail-closed) rather than trusting every caller to have stripped it.
+ *  Found by the capture app's adversarial pass (2026-09-25). */
+const SECRET_PARAM_RE = /(^|[_-])(token|api[_-]?key|apikey|secret|password|passwd|pwd|auth|authorization|session(id)?|sid|jwt|bearer|signature|sig|access[_-]?key|private[_-]?key|credential)s?$/i;
+function refuseSecretsInUri(field, value) {
+  let u;
+  try { u = new URL(value); } catch { return; } // not a URL — nothing to check
+  if (u.username || u.password) throw new Error(`source field ${field} must not carry credentials (userinfo)`);
+  for (const k of u.searchParams.keys()) {
+    if (SECRET_PARAM_RE.test(k)) throw new Error(`source field ${field} carries a secret-shaped query parameter '${k}'; strip it before ingest`);
+  }
+}
 function normalizeSource(source) {
   if (source === undefined || source === null) return null;
   if (typeof source !== 'object' || Array.isArray(source)) throw new Error('source must be an object');
@@ -51,6 +64,7 @@ function normalizeSource(source) {
   for (const k of ['capturedAt', 'publishedAt']) {
     if (out[k] !== undefined && Number.isNaN(Date.parse(out[k]))) throw new Error(`source field ${k} is not a parseable date: ${out[k]}`);
   }
+  for (const k of ['sourceUri', 'canonicalUri']) if (out[k] !== undefined) refuseSecretsInUri(k, out[k]);
   if (out.site === undefined) {
     for (const k of ['canonicalUri', 'sourceUri']) {
       if (!out[k]) continue;

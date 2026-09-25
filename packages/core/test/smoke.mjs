@@ -1548,6 +1548,21 @@ try {
   const qHem = await o.query('HEMATITE50B decision keeps its authority', { limit: 3 });
   ok(qHem.results.find((r) => r.id === wkHem.id)?.authority === 'stack', 'recalled work event reports authority stack');
 
+  // 50c. Source URIs never carry secrets into provenance (boundary check; capture-app ADV-2 finding).
+  const s50c = path.join(tmp, 'secret50c.md');
+  fs.writeFileSync(s50c, 'CORUNDUM50C page whose source URI is checked for credentials before anything is stored.');
+  let sec1 = null; try { await o.ingest({ path: s50c, type: 'note', source: { sourceUri: 'https://user:pw@example.test/a' } }); } catch (e) { sec1 = e.message; }
+  ok(/must not carry credentials/.test(sec1 || ''), 'userinfo in sourceUri is refused');
+  let sec2 = null; try { await o.ingest({ path: s50c, type: 'note', source: { canonicalUri: 'https://example.test/a?access_token=abc' } }); } catch (e) { sec2 = e.message; }
+  ok(/secret-shaped query parameter 'access_token'/.test(sec2 || ''), 'a secret-shaped query parameter in canonicalUri is refused');
+  let sec3 = null; try { await o.ingest({ path: s50c, type: 'note', source: { sourceUri: 'https://example.test/a?x-api-key=abc' } }); } catch (e) { sec3 = e.message; }
+  ok(/secret-shaped query parameter/.test(sec3 || ''), 'an api-key style parameter is refused');
+  ok(o.db.prepare("SELECT COUNT(*) c FROM sources WHERE path=?").get(s50c).c === 0, 'a refused source leaves no sources row');
+  const secOk = await o.ingest({ path: s50c, type: 'note', source: { sourceUri: 'https://example.test/a?page=2&sort=asc' } });
+  ok(secOk.success && o.recall(secOk.entry.id).provenance.source.sourceUri.endsWith('?page=2&sort=asc'), 'ordinary query parameters pass unchanged');
+  let sec4 = null; try { await o.ingestContent({ content: 'CORUNDUM50C content path', source: { canonicalUri: 'https://example.test/b?token=zzz' } }); } catch (e) { sec4 = e.message; }
+  ok(/secret-shaped/.test(sec4 || ''), 'ingestContent applies the same boundary check');
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;
