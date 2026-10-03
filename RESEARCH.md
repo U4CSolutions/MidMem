@@ -26,6 +26,103 @@ what the marker at the top has not yet evaluated.
 
 ---
 
+## 2026-10-03 — Operator-named paper: a persistent wiki between raw experience and executable skills
+
+Named by the operator (`/midmem-ingest-review https://arxiv.org/abs/2608.27454`); not in the store or
+this ledger before. Staged from the HTML full text (`ingest-staging/arxiv-2608-27454/`, abs page kept
+beside it), ingested scope `shared` type `research` authority `doc` with source provenance
+(`canonicalUri` → the abs page): grounding 0.913, 6 concepts + 1 claim kept, 0 quarantined, real
+embedding (entry `memory-murmkpza-9e5104043699`). The one kept claim was read against the abstract
+and holds. No weekly digest covers this paper yet (submitted 2026-08-27; the 08-31 and 09-07 reports
+did not cite it).
+
+### BACKLOG (amends #22 · #27 · #31 · #32) + VALIDATION (#11 · #35 · #41 · #49) — WikiSkill
+- **Paper:** Liyan Tang, Cyrus Rashtchian, Chun-Sung Ferng, Andrew Tomkins, Da-Cheng Juan, Tu Vu
+  (Google Research), *WikiSkill: Compiling Agent Experience into Persistent Knowledge for Skill
+  Evolution* — arXiv [2608.27454](https://arxiv.org/abs/2608.27454) (submitted 2026-08-27; cs.AI, cs.CL).
+- **Finding:** skill evolution works better when what the agent learned is kept as a *separate,
+  persistent knowledge layer* rather than scattered through optimisation history. The workspace has
+  three layers — `raw/` (immutable execution traces), `wiki/` (pattern pages for failure modes and
+  successful strategies with workarounds, an `index.md`, an evolution log `logs.md`, and a
+  `skill-impact.md` written **programmatically by the outer harness**: proposal metadata, target skill,
+  unified diff, validation score, accept/reject), and `skills/` (`SKILL.md` + a `PURPOSE.md` mapping
+  each skill back to the wiki patterns that motivated it). Each iteration an Inference Agent runs the
+  training split with the active skills (wiki access *withheld*), a Wiki Maintainer consolidates
+  sampled traces into patterns with patch-based edits, a Skill Proposer reads the index + impact
+  tracker + an outcome summary and pulls pattern pages and traces on demand, and a gate accepts the
+  single atomic proposal only if validation score ≥ the running threshold, rolling the skill set back
+  otherwise — **the wiki is never rolled back**. Across LiveMath, SealQA, SpreadsheetBench, OfficeQA and
+  ALFWorld with Qwen-3.5-4B/9B, Qwen-3.6-27B, Gemma-4-31B and Gemini-3.5-Flash, WikiSkill beats the
+  strongest of Trace2Skill / EvoSkill / SkillOpt by 3.3 / 5.1 / 10.0 / 5.8 / 12.0 points per model.
+  Gains grow with scale (Qwen 4B/9B/27B: +12.3% / +17.5% / +23.9% average) yet skills compensate for
+  scale (Qwen-3.5-9B with skills 47.4% vs Qwen-3.6-27B without 39.4%). Evolved skills transfer across
+  models and can beat self-evolved ones (ALFWorld: 9B at 70.2% with the 27B-evolved skill vs 63.4% with
+  its own) — when they capture general procedures rather than model-specific workarounds. Ablation
+  (Gemini-3.5-Flash): giving the Proposer the persistent wiki lifts the average 48.7% → 63.7%; giving
+  the *Inference Agent* wiki access during training rollouts lowers it 63.7% → 60.9% (LiveMath 72.6% →
+  64.8%) — trajectories become less informative for skill development. 6.3–8.9 patterns created and
+  7.0–18.4 edited per model on average, all retained; 39–52% of accepted skill updates land in the
+  first two iterations and the rest continue through the middle and late stages.
+- **Decision (ground-checked 2026-10-03 against `workmemory.mjs`, `packs.mjs`, `graph.mjs`):**
+  - **VALIDATION of the layer split:** `sources` (hash-keyed, path-stable, never rewritten) / entries +
+    claims + graph projected into the vault wiki / pack-typed procedural entries are the paper's
+    raw / wiki / skills, and "the wiki is never rolled back while skills are" is the design already
+    encoded in `dead_end` events (the evidence of a rejected attempt stays and is retrieved as a
+    warning) and in **#41**'s cascade running only on *revoked evidence*, never on a rejected procedure.
+  - **#31 amended — `skill-impact.md` is the field spec for structured outcomes.** Today
+    `provenance.work` holds `kind · task · status · outcome (prose) · source · artifact · profile ·
+    related` (`workmemory.mjs:126`) — no score, no target, no verdict. #31's `metrics` object gains
+    the harness-written fields the paper shows carry the loop: `target` (the procedure/artifact
+    changed), `delta` (a diff reference, not the diff text), `score` (validation metric) and
+    `verdict` (`accepted|rejected`), all supplied by the consumer's harness, none by an LLM. The
+    `dead-end-avoided` bench slice then has a structured predicate (rejected verdict on the same
+    target) instead of a prose match.
+  - **#22 amended — `PURPOSE.md` is a `motivated_by` edge.** `recordPattern` writes its `evidence`
+    as free-string `source` nodes (`packs.mjs:98`), so a procedure cannot be traced to the *entries
+    or claims* that justified it — label-only provenance. The `procedures` pack's `relations` seam
+    (already specified) adds `motivated_by` from a procedure to pattern/evidence **entry ids**, and
+    `evidence` accepts entry ids that resolve to entry nodes. The 2026-10-02 audit of the 09-28 weekly
+    report found the same gap from the other side: report entries name papers but carry no arXiv id.
+  - **#32 amended — a superseded motivating claim flags its procedures.** With `motivated_by` edges,
+    `supersede()`'s HiGram pass flags dependent procedures `staleReview` the way it flags communities.
+    **Prerequisite:** the 2026-10-02 finding that `graph.findByText` (`orchestrator.mjs:919`) matches
+    any ≥3-char substring of any token with no stopword filter — one supersede flagged 196 nodes (99
+    via `agent`, 23 via `out` in "Router", 7 via `can` in "Canada"), one of them real. Until that pass
+    tokenizes with `grounding.contentWords` and matches whole label tokens, every flag it writes is
+    noise and #32's extension would multiply it.
+  - **#27 amended — both polarities.** The Wiki Maintainer's stated job includes "identify which
+    errors recur across iterations"; #27 detects only N *successful* attempts sharing a task label +
+    tool signature. Add the mirror: N `dead_end` / failed `task_attempt` events sharing a failure
+    signature → a suggested anti-pattern. Deterministic, same seam.
+  - **#31/#18 amended — record who evolved it.** Transferability depends on general-procedure vs
+    model-specific-workaround, and a consumer can only tell if the producing model/harness is on the
+    record. Work events and patterns gain an optional `agent: { model, harness }` provenance field
+    (today nothing in `provenance.work` identifies the producer beyond scope).
+  - **VALIDATION #35:** accept-iff-validation-≥-θ with a ratcheting θ and rollback on rejection is the
+    `PROMOTE / FLAG / REJECT` verdict + `.bench-last.json`; that 48–61% of accepted updates arrive
+    *after* the first two iterations is why the protected slices run every round, not once.
+  - **VALIDATION #11 / #49:** the Proposer receives index + impact tracker + outcome summary and pulls
+    pattern pages and raw traces on demand — progressive retrieval with the evidence layer behind the
+    sufficiency gate.
+  - **Consumer guidance, not core (the ablation):** withhold semantic recall from the acting agent
+    during *evaluation* rollouts so its trajectories measure the procedure, not the wiki. MidMem
+    already offers the knobs (`functions: ["procedural"]`, `tiers`, `types` on query / proactive
+    recall); the policy belongs in the orchestrator skills (`midmem-orchestrator`,
+    `hermes-build-orchestrator`), which should record it.
+  - **NOT ADOPTING in core:** the LLM Wiki Maintainer and Skill Proposer — pattern consolidation by an
+    LLM and skill proposal are the consumer's orchestrator loop; MidMem records the accepted patterns,
+    the rejected ones as `dead_end`, and the verdicts. Full-prompt injection of every active skill
+    (§3.2.1, chosen to remove retrieval as a confound) is the opposite of #39's bounded occupancy and
+    stays a benchmarking choice, not a design.
+- **Validation:** the paper reports numbers for five benchmarks × five models plus a four-way ablation
+  (Table 3) and a per-iteration acceptance breakdown (Appendix Table 5); the layer, gate and audit-trail
+  claims are read from §3.1–§3.2.4 of the staged full text. Our side: smoke assertions arrive with each
+  amended increment (#31 structured fields round-trip through `record_work` → `provenance.work`; #22
+  `motivated_by` resolves to an entry node; #27 fires on N failures sharing a signature; #32 a
+  supersede flags ≤ the claim's own concept count).
+
+---
+
 ## 2026-09-14 — Week of 2026-09-14: what is stored vs what is used; lifecycle at write time; summaries as cues
 
 Weekly report ingested (`ingest-staging/llmwiki-weekly-2026-09-14/report.md`, scope `shared`, type
@@ -493,6 +590,7 @@ Evidence: numbers (benchmark / controlled result) or prose (the source gives no 
 
 | Paper | Finding that matters | Candidate | Roadmap # | Effort | Evidence | Blocker / note |
 |---|---|---|---|---|---|---|
+| WikiSkill [2608.27454](https://arxiv.org/abs/2608.27454) | a persistent, never-rolled-back knowledge layer between immutable traces and executable skills lifts skill evolution (+15.0 avg with Proposer wiki access; beats the strongest baseline by 3.3–12.0 points per model); a harness-written impact ledger (target · diff · validation score · verdict) stops re-proposing rejected edits; `PURPOSE.md` traces each skill to its motivating patterns | #31 structured outcome fields `target · delta · score · verdict` + `agent:{model,harness}`; #22 `motivated_by` edges to entry ids; #27 recurring-*failure* signatures; #32 superseded motivating claim flags its procedures | **#31** (spec), **#22**, **#27**, **#32** (amend) | S each; #32 blocked | numbers (five benchmarks × five models, four-way ablation) | #32's extension waits on the `findByText` stale-path flagger fix (2026-10-02: 196 nodes flagged by one supersede); Maintainer/Proposer LLM loops stay consumer-side |
 | RD-Forget [2609.10263](https://arxiv.org/abs/2609.10263) | forgetting for answering ≠ deleting history; a query-conditioned view suppresses superseded values that stay historically retrievable | `statuses`/`asOf` through the lanes + a `historical` query mode (claims already have this split; entries hardcode `status='active'`) | **#43 ✅ 2026-09-16** | S | prose | shipped; no schema change |
 | LifeFuse-Mem [2609.12436](https://arxiv.org/abs/2609.12436) | transient context must not overwrite durable knowledge by recency; lifecycle is an axis beyond retention | enforce the declared `working` contract: lease-bound, never promoted, excluded from default reads, never supersedes a durable entry | **#44 ✅ 2026-09-16** | S–M | prose | shipped; the doc-vs-code discrepancy is closed |
 | CueMem [2609.12354](https://arxiv.org/abs/2609.12354) | compressed memory should be a cue mapping to source anchors, then expand locally | source excerpt locator + local expansion (second driver, raises rank) | **#34**, **#25** | S–M | prose (LoCoMo, LongMemEval; no figures quoted) | our `originalSource` is a file path, not a locator |
