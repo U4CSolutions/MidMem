@@ -5,6 +5,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
 import { Orchestrator, GovernanceError, checkGrounding, groundingScore, categorizeIngest, isOpaqueTaskLabel, WORK_EVENT_NAMES } from '../src/index.mjs';
 
 let pass = 0, fail = 0;
@@ -1562,6 +1563,204 @@ try {
   ok(secOk.success && o.recall(secOk.entry.id).provenance.source.sourceUri.endsWith('?page=2&sort=asc'), 'ordinary query parameters pass unchanged');
   let sec4 = null; try { await o.ingestContent({ content: 'CORUNDUM50C content path', source: { canonicalUri: 'https://example.test/b?token=zzz' } }); } catch (e) { sec4 = e.message; }
   ok(/secret-shaped/.test(sec4 || ''), 'ingestContent applies the same boundary check');
+
+  // 51. Capture-system verbs (INTEGRATION-MODES §6 amended 2026-10-04; KC v2 M1–M4): `feedback` on active
+  //     entries only, the read-only `entries` / MCP `entry_status` lifecycle view (never a recall),
+  //     `forget-source` (active + superseded history, sharedWith, unlink, idempotent) and the same-path
+  //     dedupe fix (identical text re-ingested after a forget is a fresh ingest, not 'unchanged').
+  const L51 = 'kc-51';
+  const src51 = (docId) => ({ libraryId: L51, docId, canonicalUri: `https://news.example.test/51/${docId}` });
+  const ing51 = (docId, content) => o.ingestContent({ content, source: src51(docId), type: 'web-article', authority: 'web' });
+  const raw51 = (id) => o.db.prepare('SELECT retrieval_count, expires_at, last_accessed_at, trust_score, helpful_count, updated_at FROM entries WHERE id=?').get(id);
+  const logN51 = () => o.db.prepare('SELECT COUNT(*) c FROM log').get().c;
+  const st51 = (docIds, extra = {}) => o.entryStatus({ libraryId: L51, docIds, ...extra });
+  const err51 = (fn) => { try { fn(); return null; } catch (e) { return e.message; } };
+  const tA51 = 'OBSIDIAN51 lead: the tidal observatory recorded the highest spring tide in forty years along the estuary. Engineers raised the flood barrier twice overnight. Residents near the quay moved their vehicles to higher ground.';
+  const iA51 = await ing51('doc-a', tA51);
+  const eA51 = iA51.entry.id;
+  ok(iA51.success && o.recall(eA51).tier === 'memory' && o.recall(eA51).type === 'web-article', 'fixture: a web-article capture ingests into the memory tier');
+
+  // 51.1 — entries: shape, thresholds read from this store's config, missing doc ids, claims only on request.
+  const s51 = st51(['doc-a', 'doc-zz']);
+  const v51 = s51.entries[0];
+  ok(s51.entries.length === 1 && s51.total === 1 && JSON.stringify(s51.missing) === '["doc-zz"]', 'entries --doc-ids → one head entry, total 1, unknown doc id listed in missing');
+  ok(v51.docId === 'doc-a' && v51.history === 1 && v51.linkedTo === null && v51.id === eA51 && v51.status === 'active' && v51.authority === 'web' && v51.source?.docId === 'doc-a' && v51.source?.libraryId === L51,
+    'head view carries docId, history 1, linkedTo null, id, status, authority web, source');
+  ok(near47(v51.expiresAt, 90) && v51.trustScore === 0.5 && v51.retrievalCount === 0 && v51.helpfulCount === 0 && v51.lastAccessedAt === null && v51.summary.length > 0 && v51.summary.length <= 600,
+    'lease (90-day web-article), counters and bounded summary reported');
+  ok(v51.concepts.length <= 32 && v51.concepts.every((c) => typeof c.name === 'string' && 'type' in c && 'confidence' in c && 'groundingScore' in c), `concepts carry name/type/confidence/groundingScore (${v51.concepts.length})`);
+  ok(v51.claims.total > 0 && v51.claims.active === v51.claims.total && !('items' in v51.claims) && typeof v51.grounding.summaryScore === 'number', 'claims counted (no items unless --claims); grounding.summaryScore reported');
+  const p51 = v51.promotion;
+  ok(p51.next === 'wisdom' && p51.rule === 'all' && p51.eligible === false && JSON.stringify(p51.blockers) === '["needs-retrievals","needs-trust","needs-helpful"]' && p51.runsIn === 'maintain' && p51.groundingGate.pass === true,
+    `fresh capture → next wisdom, rule all, blockers ${p51.blockers.join(',')}, runs in maintain`);
+  ok(p51.progress.retrievals.need === 5 && p51.progress.trust.need === 0.7 && p51.progress.helpful.need === 2 && p51.progress.trust.have === 0.5, 'progress reports have/need per criterion');
+  const th51 = s51.thresholds;
+  ok(JSON.stringify(th51.factPromote) === JSON.stringify(o.cfg.maintenance.factPromote) && JSON.stringify(th51.wisdomPromote) === JSON.stringify(o.cfg.maintenance.wisdomPromote)
+    && th51.promoteMinGrounding === o.cfg.transitions.promoteMinGrounding && th51.feedback.helpfulTrustDelta === 0.05 && th51.feedback.unhelpfulTrustDelta === -0.1 && th51.feedback.distrustBelow === o.cfg.maintenance.distrustBelow,
+    'thresholds = this store\'s factPromote / wisdomPromote / promoteMinGrounding + feedback deltas and distrustBelow');
+  const c51 = st51(['doc-a'], { claims: true }).entries[0].claims;
+  ok(Array.isArray(c51.items) && c51.items.length > 0 && c51.items.length <= 10 && c51.items.every((c) => typeof c.content === 'string' && c.content.length <= 500 && c.status === 'active'), '--claims adds ≤ 10 bounded claim items');
+  const byId51 = o.entryStatus({ ids: [eA51, 'memory-nope-000000000000'] });
+  ok(byId51.entries.length === 1 && byId51.entries[0].id === eA51 && byId51.entries[0].docId === 'doc-a' && JSON.stringify(byId51.missing) === '["memory-nope-000000000000"]', 'entries by entry id → the same view; unknown ids in missing');
+  const lib51 = o.entryStatus({ libraryId: L51 });
+  ok(lib51.entries.some((e) => e.docId === 'doc-a') && lib51.missing.length === 0, 'entries --library alone lists every doc of that library');
+  ok(/bad doc id/.test(err51(() => st51(['bad/doc'])) || '') && /bad entry id/.test(err51(() => o.entryStatus({ ids: ['x y'] })) || '') && /bad library id/.test(err51(() => o.entryStatus({ libraryId: '../x' })) || ''),
+    'malformed doc / entry / library ids are refused');
+  ok(/limit/.test(err51(() => st51(['doc-a'], { limit: 0 })) || '') && /limit/.test(err51(() => st51(['doc-a'], { limit: 5001 })) || '') && /--doc-ids needs --library/.test(err51(() => o.entryStatus({ docIds: ['doc-a'] })) || ''),
+    'limit outside 1..5000 and --doc-ids without --library are refused');
+
+  // 51.2 — reading is not a recall: no counter, lease or access-time change, no log row.
+  const before51 = raw51(eA51); const logs51 = logN51();
+  for (let i = 0; i < 3; i++) { st51(['doc-a'], { claims: true }); o.entryStatus({ ids: [eA51] }); }
+  ok(JSON.stringify(raw51(eA51)) === JSON.stringify(before51) && logN51() === logs51, 'entryStatus leaves retrieval_count / expires_at / last_accessed_at unchanged and writes nothing');
+
+  // 51.3 — M1 feedback: active → the agents' feedback loop; unknown / not-active → a JSON refusal, nothing moves.
+  const fb51 = o.feedbackIfActive(eA51, true);
+  ok(fb51.success === true && fb51.id === eA51 && fb51.helpful === true && fb51.trust_score === 0.55 && o.recall(eA51).helpful_count === 1, 'feedback on an active entry → {success, id, trust_score 0.55, helpful}');
+  ok(Number((fb51.trust_score - before51.trust_score).toFixed(3)) === th51.feedback.helpfulTrustDelta, 'measured helpful delta equals thresholds.feedback.helpfulTrustDelta');
+  const un51 = await o.storeMemory({ content: 'OBSIDIAN51 scratch entry for an unhelpful vote', tier: 'memory', type: 'note' });
+  const unr51 = o.feedbackIfActive(un51.id, false);
+  ok(unr51.success && unr51.helpful === false && Number((unr51.trust_score - 0.5).toFixed(3)) === th51.feedback.unhelpfulTrustDelta && o.recall(un51.id).helpful_count === 0, 'unhelpful → trust moves by thresholds.feedback.unhelpfulTrustDelta, helpful_count unchanged');
+  const nf51 = o.feedbackIfActive('memory-nope-000000000000', true);
+  ok(nf51.success === false && nf51.reason === 'not-found' && nf51.id === 'memory-nope-000000000000', 'unknown entry → {success:false, reason:not-found, id}');
+  await o.forget(un51.id, { soft: true });
+  const trustDel51 = raw51(un51.id).trust_score;
+  const na51 = o.feedbackIfActive(un51.id, true);
+  ok(na51.success === false && na51.reason === 'not-active' && na51.status === 'deleted' && raw51(un51.id).trust_score === trustDel51, 'deleted entry → {success:false, reason:not-active, status:deleted}, trust untouched');
+  ok(/bad entry id/.test(err51(() => o.feedbackIfActive('bad id', true)) || '') && /needs <entryId>/.test(err51(() => o.feedbackIfActive(undefined, true)) || ''), 'a malformed or missing entry id is an error');
+
+  // 51.4 — earned promotion: feedback alone never promotes; 4 helpful + 5 recalls + a forced maintain do.
+  const iv51 = o.cfg.maintenance.intervalMs;
+  o.cfg.maintenance.intervalMs = 3600e3; // no lazy pass may promote mid-test: only the forced maintain below
+  try {
+    for (let i = 0; i < 3; i++) o.feedbackIfActive(eA51, true);
+    const fbOnly51 = st51(['doc-a']).entries[0];
+    ok(fbOnly51.helpfulCount === 4 && fbOnly51.trustScore === 0.7 && JSON.stringify(fbOnly51.promotion.blockers) === '["needs-retrievals"]', `4 helpful → trust ${fbOnly51.trustScore}, only needs-retrievals remains`);
+    await o.maintain({ force: true });
+    ok(o.recall(eA51).tier === 'memory', 'forced maintain after feedback alone → still memory (feedback never promotes)');
+    let hits51 = 0;
+    for (let i = 0; i < 5; i++) { const q = await o.query('OBSIDIAN51 tidal observatory spring tide estuary flood barrier', { limit: 5 }); if (q.results.some((r) => r.id === eA51)) hits51++; }
+    const recalled51 = st51(['doc-a']).entries[0];
+    ok(hits51 === 5 && recalled51.retrievalCount === 5 && recalled51.promotion.eligible === true && recalled51.promotion.blockers.length === 0 && recalled51.tier === 'memory', '5 recalls → eligible, no blockers, still memory until maintain runs');
+    const m51 = await o.maintain({ force: true });
+    const w51 = st51(['doc-a']).entries[0];
+    ok(m51.promoted.some((p) => p.id === eA51 && p.to === 'wisdom') && w51.tier === 'wisdom' && w51.expiresAt === null, 'forced maintain promotes it to wisdom; the lease is gone (permanent)');
+    ok(JSON.stringify(w51.promotion.blockers) === '["top-tier"]' && w51.promotion.next === null && w51.promotion.permanent === true && w51.promotion.eligible === false, 'wisdom view → blockers [top-tier], permanent');
+  } finally { o.cfg.maintenance.intervalMs = iv51; }
+
+  // 51.5 — forget-source: active + superseded history, sharedWith, linked duplicates, dryRun, idempotent.
+  const tB51v1 = 'OBSIDIAN51 bulletin one: the ferry operator suspended the night crossing while the harbour wall is repaired.';
+  const tB51 = 'OBSIDIAN51 bulletin two: the ferry operator restored the night crossing after the harbour wall repair finished early.';
+  const bOld51 = await ing51('doc-b', tB51v1);
+  const bNew51 = await ing51('doc-b', tB51);
+  const lc51 = await ing51('doc-c', tB51); // identical text from a second capture → linked onto doc-b's entry
+  ok(o.recall(bOld51.entry.id).status === 'archived' && o.recall(bNew51.entry.id).status === 'active' && lc51.reason === 'linked-duplicate' && lc51.entry === bNew51.entry.id, 'fixture: doc-b superseded once; doc-c linked onto doc-b\'s live entry');
+  const sb51 = st51(['doc-b', 'doc-c']);
+  const vb51 = sb51.entries.find((e) => e.docId === 'doc-b'); const vc51 = sb51.entries.find((e) => e.docId === 'doc-c');
+  ok(vb51.id === bNew51.entry.id && vb51.history === 2 && vb51.linkedTo === null && JSON.stringify(vb51.alsoSources) === JSON.stringify([{ libraryId: L51, docId: 'doc-c' }]), 'doc-b head = the active entry, history 2, alsoSources names doc-c');
+  ok(vc51.linkedTo === bNew51.entry.id && vc51.id === bNew51.entry.id && vc51.history === 0 && sb51.missing.length === 0, 'doc-c → linkedTo doc-b\'s entry, history 0 (no entry of its own)');
+  const dry51 = await o.forgetSource({ libraryId: L51, docId: 'doc-b', dryRun: true });
+  ok(dry51.success && dry51.dryRun === true && dry51.matched === 2 && dry51.forgotten === 0 && JSON.stringify(dry51.sharedWith) === '["doc-c"]' && o.recall(bNew51.entry.id).status === 'active' && o.recall(bOld51.entry.id).status === 'archived',
+    'dryRun → matched 2 (active + archived), sharedWith [doc-c], nothing changed');
+  const fs51 = await o.forgetSource({ libraryId: L51, docId: 'doc-b' });
+  ok(fs51.success && fs51.libraryId === L51 && fs51.docId === 'doc-b' && fs51.matched === 2 && fs51.forgotten === 2 && fs51.unlinked === 0 && JSON.stringify(fs51.sharedWith) === '["doc-c"]' && fs51.dryRun === false,
+    'forget-source → matched 2, forgotten 2, sharedWith [doc-c]');
+  ok(o.recall(bOld51.entry.id).status === 'deleted' && o.recall(bNew51.entry.id).status === 'deleted' && fs51.cascade.claimsArchived > 0, `both the active and the superseded entry are soft-deleted; #41 cascade archived ${fs51.cascade.claimsArchived} claims`);
+  ok(o.db.prepare("SELECT COUNT(*) c FROM log WHERE operation='forget-source'").get().c === 1 && o.db.prepare("SELECT COUNT(*) c FROM log WHERE operation='forget' AND detail LIKE ?").get(`%${bOld51.entry.id}%`).c === 1, 'forget-source is logged; each entry went through the governed forget');
+  const again51 = await o.forgetSource({ libraryId: L51, docId: 'doc-b' });
+  ok(again51.success && again51.matched === 0 && again51.forgotten === 0 && again51.unlinked === 0 && again51.sharedWith.length === 0, 'second forget-source → matched 0 (idempotent)');
+  const gone51 = st51(['doc-b', 'doc-c']);
+  ok(gone51.entries.length === 1 && gone51.entries[0].docId === 'doc-b' && gone51.entries[0].status === 'deleted' && gone51.entries[0].history === 2 && JSON.stringify(gone51.missing) === '["doc-c"]',
+    'after the forget: doc-b head is deleted (history 2); doc-c has no live holder → missing');
+
+  // 51.6 — M4: identical text at the same path after a forget re-ingests afresh (was 'unchanged', no live entry).
+  const rb51 = await ing51('doc-b', tB51);
+  ok(rb51.success && !rb51.skipped && o.recall(rb51.entry.id).status === 'active' && o.recall(rb51.entry.id).provenance.source.docId === 'doc-b', 're-ingest after forget-source → a fresh active entry (not unchanged)');
+  const rbv51 = st51(['doc-b']).entries[0];
+  ok(rbv51.id === rb51.entry.id && rbv51.history === 3 && rbv51.retrievalCount === 0 && rbv51.helpfulCount === 0, 'the fresh entry is the head, history 3, counters start at zero');
+  const rc51 = await ing51('doc-c', tB51); // the sharedWith source re-ingested by its capture system
+  ok(rc51.reason === 'linked-duplicate' && rc51.entry === rb51.entry.id, 'the sharedWith source re-ingests → linked onto the live copy');
+  const n51 = o.recall(rb51.entry.id).provenance.alsoSources.length;
+  const uc51 = await ing51('doc-c', tB51);
+  ok(uc51.skipped && uc51.reason === 'unchanged' && o.recall(rb51.entry.id).provenance.alsoSources.length === n51, 'an unchanged linked duplicate is unchanged, not re-linked');
+  const fc51 = await o.forgetSource({ libraryId: L51, docId: 'doc-c' });
+  ok(fc51.matched === 0 && fc51.forgotten === 0 && fc51.unlinked === 1 && o.recall(rb51.entry.id).status === 'active' && !o.recall(rb51.entry.id).provenance.alsoSources.some((a) => a.source?.docId === 'doc-c'),
+    'forget-source of a linked duplicate → unlinked 1 from the holder\'s alsoSources, the holder stays active');
+  const rl51 = await ing51('doc-c', tB51);
+  ok(rl51.reason === 'linked-duplicate' && rl51.entry === rb51.entry.id, 'after its unlink, the same source re-ingests as a link again (not unchanged)');
+  const fa51 = await o.forgetSource({ libraryId: L51, docId: 'doc-a' });
+  const ra51 = await ing51('doc-a', tA51);
+  const rav51 = ra51.entry ? o.recall(ra51.entry.id) : null;
+  ok(fa51.forgotten === 1 && o.recall(eA51).status === 'deleted' && rav51?.status === 'active' && rav51.tier === 'memory' && rav51.helpful_count === 0 && rav51.retrieval_count === 0,
+    'a wisdom entry forgets the same way; re-ingest gives a fresh memory entry with reset counters');
+  const tE51 = 'OBSIDIAN51 plain note forgotten through forget-entries and ingested again with identical text.';
+  const fE51 = path.join(tmp, 'obsidian51-e.md');
+  fs.writeFileSync(fE51, tE51);
+  const ef51a = await o.ingest({ path: fE51, type: 'note' });
+  await o.forgetEntries({ ids: [ef51a.entry.id] });
+  const ef51b = await o.ingest({ path: fE51, type: 'note' });
+  ok(!ef51b.skipped && o.recall(ef51b.entry.id).status === 'active', 'forget-entries then the same file again → ingested afresh (the measured bug, fixed)');
+  const ef51c = await o.ingest({ path: fE51, type: 'note' });
+  ok(ef51c.skipped && ef51c.reason === 'unchanged', 'with a live entry standing, the same file is unchanged again');
+
+  // 51.7 — the CLI verbs (exit 0 for JSON results, exit 1 + ERROR: for errors) and the MCP entry_status tool.
+  const bin51 = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin');
+  const env51 = { ...process.env, MIDMEM_DB_PATH: path.join(tmp, 'state.db'), OBSIDIAN_VAULT_PATH: path.join(tmp, 'vault'), MIDMEM_SOURCE_ROOTS: tmp, MIDMEM_LLM_ENABLED: '0', MIDMEM_AUTO_INGEST: '0', MIDMEM_MAINTENANCE: '0', MIDMEM_EXPORT_ENABLED: '0' };
+  const cli51 = (...args) => {
+    const r = spawnSync(process.execPath, [path.join(bin51, 'cli.mjs'), ...args], { env: env51, encoding: 'utf8', timeout: 30000 });
+    let parsed = null; try { parsed = JSON.parse(r.stdout); } catch { /* not JSON */ }
+    return { code: r.status, out: parsed, err: r.stderr };
+  };
+  const live51 = rb51.entry.id;
+  const cr0 = raw51(live51);
+  const cf1 = cli51('feedback', live51);
+  ok(cf1.code === 0 && cf1.out?.success === true && cf1.out.id === live51 && cf1.out.helpful === true && cf1.out.trust_score === 0.55, 'CLI feedback <id> → exit 0, {success, id, trust_score, helpful}');
+  const cf2 = cli51('feedback', live51, '--unhelpful');
+  ok(cf2.code === 0 && cf2.out?.success === true && cf2.out.helpful === false && cf2.out.trust_score === 0.45, 'CLI feedback <id> --unhelpful → helpful false, trust −0.10');
+  const cf3 = cli51('feedback', 'memory-nope-000000000000');
+  ok(cf3.code === 0 && cf3.out?.success === false && cf3.out.reason === 'not-found', 'CLI feedback on an unknown id → exit 0, reason not-found');
+  const cf4 = cli51('feedback', bNew51.entry.id);
+  ok(cf4.code === 0 && cf4.out?.success === false && cf4.out.reason === 'not-active' && cf4.out.status === 'deleted', 'CLI feedback on a forgotten entry → exit 0, reason not-active, status deleted');
+  const cf5 = cli51('feedback', 'bad id!');
+  ok(cf5.code === 1 && /^ERROR: bad entry id/.test(cf5.err), 'CLI feedback with a malformed id → exit 1 + ERROR:');
+  const cr1 = raw51(live51);
+  const ce1 = cli51('entries', '--library', L51, '--doc-ids', 'doc-b,doc-zz', '--claims');
+  const cev = ce1.out?.entries?.[0];
+  ok(ce1.code === 0 && cev?.docId === 'doc-b' && cev.id === live51 && Array.isArray(cev.claims.items) && JSON.stringify(ce1.out.missing) === '["doc-zz"]' && ce1.out.thresholds?.feedback?.unhelpfulTrustDelta === -0.1 && ce1.out.total === 1,
+    'CLI entries --library --doc-ids --claims → head view, missing, thresholds');
+  ok(cr1.retrieval_count === cr0.retrieval_count && JSON.stringify(raw51(live51)) === JSON.stringify(cr1), 'CLI entries leaves retrieval_count / expires_at unchanged');
+  const ce2 = cli51('entries', '--library', L51, '--doc-ids', 'bad/doc');
+  ok(ce2.code === 1 && /^ERROR: bad doc id/.test(ce2.err), 'CLI entries with a malformed doc id → exit 1 + ERROR: bad doc id');
+  const ce3 = cli51('entries', '--library', L51, '--limit');
+  const ce4 = cli51('entries', '--library', L51, '--limit', '5001');
+  ok(ce3.code === 1 && /^ERROR: --limit needs a value/.test(ce3.err) && ce4.code === 1 && /^ERROR: limit must be an integer 1\.\.5000/.test(ce4.err), 'CLI entries refuses a bare --limit and a limit above 5000');
+  const ce5 = cli51('entries', '--library', L51, '--limit', '1', '--offset', '1');
+  ok(ce5.code === 0 && ce5.out.entries.length === 1 && ce5.out.total >= 3 && ce5.out.entries[0].docId === 'doc-b', `CLI entries pages by doc id (offset 1 of ${ce5.out?.total})`);
+  const cs1 = cli51('forget-source', '--library', L51, '--doc-id', 'doc-zz', '--dryRun');
+  ok(cs1.code === 0 && cs1.out?.success === true && cs1.out.matched === 0 && cs1.out.dryRun === true, 'CLI forget-source --dryRun on an unknown doc → exit 0, matched 0');
+  const cs2 = cli51('forget-source', '--library', L51);
+  ok(cs2.code === 1 && /^ERROR: forget-source needs --library <id> and --doc-id <docId>/.test(cs2.err), 'CLI forget-source without --doc-id → exit 1 + ERROR:');
+  const cs3 = cli51('forget-source', '--library', L51, '--doc-id', 'doc-b');
+  ok(cs3.code === 0 && cs3.out.forgotten === 1 && JSON.stringify(cs3.out.sharedWith) === '["doc-c"]' && o.recall(live51).status === 'deleted', 'CLI forget-source → exit 0, the live entry forgotten, sharedWith [doc-c]');
+  // MCP: entry_status is listed and read-only; the feedback tool is unchanged.
+  const mcp51 = await new Promise((resolve, reject) => {
+    const p = spawn(process.execPath, [path.join(bin51, 'mcp-server.mjs')], { env: env51, stdio: ['pipe', 'pipe', 'ignore'] });
+    const lines = []; let buf = '';
+    const timer = setTimeout(() => { p.kill(); reject(new Error('mcp-server timed out')); }, 30000);
+    p.stdout.on('data', (d) => {
+      buf += d;
+      let nl; while ((nl = buf.indexOf('\n')) >= 0) { lines.push(JSON.parse(buf.slice(0, nl))); buf = buf.slice(nl + 1); }
+      if (lines.length === 2) { clearTimeout(timer); p.kill(); resolve(lines); }
+    });
+    p.on('error', reject);
+    p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n');
+    p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'entry_status', arguments: { libraryId: L51, docIds: ['doc-b', 'doc-c'] } } }) + '\n');
+  });
+  const tools51 = mcp51.find((m) => m.id === 1).result.tools;
+  const call51 = JSON.parse(mcp51.find((m) => m.id === 2).result.content[0].text);
+  ok(tools51.some((t) => t.name === 'entry_status') && tools51.find((t) => t.name === 'feedback')?.inputSchema?.required?.[0] === 'entryId', 'MCP lists entry_status; the feedback tool keeps its schema');
+  ok(call51.entries.length === 1 && call51.entries[0].docId === 'doc-b' && call51.entries[0].status === 'deleted' && JSON.stringify(call51.missing) === '["doc-c"]' && call51.thresholds.wisdomPromote.minHelpful === 2, 'MCP entry_status → doc-b deleted, doc-c (its holder forgotten) missing, thresholds');
+  ok(!tools51.some((t) => t.name === 'forget_source'), 'forget-source stays CLI-only (no MCP tool)');
 
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {

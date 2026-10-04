@@ -57,6 +57,11 @@ const TOOLS = {
     schema: S({ content: { type: 'string' }, type: { type: 'string' }, tier: { type: 'string' }, scope: { type: 'string' }, ...PROJECT_W, curated: { type: 'boolean' }, memFunction: { type: 'string', description: 'memory function axis: working|episodic|semantic|procedural|prospective (default derived from type)' }, authority: { type: 'string', description: 'origin trust: operator|stack|doc|web (default stack; operator requires curated:true)' } }, ['content']),
     run: (a) => o.storeMemory({ content: a.content, type: a.type || 'insight', tier: a.tier || 'memory', scope: a.scope, curated: !!a.curated, memFunction: a.memFunction || null, authority: a.authority, ...(a.project !== undefined ? { project: a.project } : {}) }),
   },
+  entry_status: {
+    description: 'Read-only lifecycle view of entries (INTEGRATION-MODES §6 item 7): tier, lease (expiresAt), trust/retrieval/helpful counters, concepts, claims and promotion progress (next tier, rule, blockers, have/need, grounding gate; promotion runs only in maintain), plus the store\'s promotion thresholds and feedback trust deltas. Give entryIds, or libraryId (optionally docIds) for one head entry per source doc with history and linkedTo. Reading is NOT a recall: it never bumps retrieval_count or renews a lease.',
+    schema: S({ entryIds: { type: 'array', items: { type: 'string' } }, libraryId: { type: 'string' }, docIds: { type: 'array', items: { type: 'string' } }, claims: { type: 'boolean', description: 'include up to 10 claim items per entry' }, limit: { type: 'number', description: 'docs per page, 1..5000 (default 500)' }, offset: { type: 'number' } }),
+    run: (a) => o.entryStatus({ ids: a.entryIds ?? [], libraryId: a.libraryId ?? null, docIds: a.docIds ?? [], claims: !!a.claims, limit: a.limit ?? 500, offset: a.offset ?? 0 }),
+  },
   recall: { description: 'Retrieve a memory entry by id.', schema: S({ entryId: { type: 'string' } }, ['entryId']), run: (a) => o.recall(a.entryId) },
   brief: { description: 'Summary of knowledge state across tiers.', schema: S({}), run: () => o.brief() },
   audit: { description: 'Health check: contradictions, orphans, counts.', schema: S({}), run: () => o.lint() },

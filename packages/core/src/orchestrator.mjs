@@ -22,6 +22,7 @@ import { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, forgetNodes,
 import { verifyTransition, verifyPromotion, auditTransition } from './transitions.mjs';
 import { loadPacks, recordPattern } from './packs.mjs';
 import { exportKnowledge } from './export.mjs';
+import { entryStatus, forgetSource, feedbackIfActive } from './entrystatus.mjs';
 import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
 import { normalizeAuthority, clampAuthority, authorityRank } from './authority.mjs';
 import { checkConsistency } from './consistency.mjs';
@@ -156,7 +157,12 @@ export class Orchestrator {
       // new path gets its own sources row and is linked onto the live entry's provenance.alsoSources
       // instead of minting a duplicate entry. No live entry for that content → full ingest.
       const same = this.db.prepare('SELECT id, path FROM sources WHERE hash=? ORDER BY ingested_at, rowid').all(hash);
-      const samePath = same.find((row) => row.path === path);
+      // Same path + same hash is 'unchanged' only while a non-deleted entry still stands for that sources
+      // row — its own entry (source_id) or a live entry that links it in provenance.alsoSources. After an
+      // operator forget (§6 6c) the knowledge is gone, so the source falls through to link / full ingest.
+      const standing = this.db.prepare(`SELECT 1 FROM entries WHERE status != 'deleted' AND (source_id = ? OR (provenance LIKE '%alsoSources%'
+        AND json_valid(provenance) AND EXISTS (SELECT 1 FROM json_each(provenance, '$.alsoSources') a WHERE json_extract(a.value, '$.sourceId') = ?))) LIMIT 1`);
+      const samePath = same.find((row) => row.path === path && standing.get(row.id, row.id));
       if (samePath) { this.db.logOp('ingest-skip', { path, hash, sourceId: samePath.id }); return { success: true, skipped: true, reason: 'unchanged', sourceId: samePath.id }; }
       if (same.length) {
         const linked = this.db.tx(() => {
@@ -719,6 +725,18 @@ export class Orchestrator {
 
   /** Feedback loop — caller marks a recalled entry helpful/unhelpful (nudges trust_score). */
   feedback(id, helpful = true) { const r = this.memory.recordFeedback(id, helpful); this.db.logOp('feedback', { id, helpful }); return r; }
+
+  /** Operator feedback for a capture system (CLI `feedback`, §6 6b): refuses unknown / non-active entries
+   *  as a JSON result `{ success:false, reason }` instead of nudging a dead row. */
+  feedbackIfActive(id, helpful = true) { return feedbackIfActive(this, id, { helpful }); }
+
+  /** Lifecycle read (CLI `entries`, MCP `entry_status`, §6 item 7): tier, lease, counters, concepts, claims,
+   *  promotion progress + the thresholds. Never a recall — no recordRetrieval, no lease renewal, no writes. */
+  entryStatus(opts = {}) { return entryStatus(this, opts); }
+
+  /** Operator-initiated forget of one library source (CLI `forget-source`, §6 6c): governed soft forget of
+   *  every non-deleted entry it produced (+ #41 cascade) and unlink from other entries' alsoSources. */
+  async forgetSource(opts = {}) { return forgetSource(this, opts); }
 
   /** Hand-off memory gate (firstware) — build a brief to inject into an agent hand-off. */
   handoffBrief(opts = {}) { return buildHandoffBrief(this, opts); }

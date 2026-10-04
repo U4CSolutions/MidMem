@@ -29,3 +29,4 @@ export { canonicalConceptKey } from './util.mjs';
 export { AUTHORITY_LEVELS, normalizeAuthority, authorityRank, clampAuthority } from './authority.mjs';
 export { checkConsistency } from './consistency.mjs';
 export { runExpectedQueryProbes, probeQueryFor } from './evalprobes.mjs';
+export { entryStatus, forgetSource, feedbackIfActive, promotionThresholds, ENTRY_STATUS_ID_RE, FEEDBACK_TRUST_DELTAS, ENTRY_STATUS_MAX_LIMIT } from './entrystatus.mjs';
