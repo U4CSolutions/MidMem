@@ -98,7 +98,9 @@ Keep secrets out of it (no `*_KEY`, `*_TOKEN`, `*_SECRET`) while the capture sys
 see the privilege note below.
 
 **Timers.** Two systemd timers, both `User=midmem`, `UMask=0007`, `NoNewPrivileges`,
-`ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp`, `ReadWritePaths=/var/lib/midmem`:
+`ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp`. `midmem-maintain` has
+`ReadWritePaths=/var/lib/midmem`; `midmem-backup` also needs `/var/backups/midmem` there, because
+`ProtectSystem=strict` makes everything else read-only:
 
 - `midmem-maintain`: `ExecStart=/usr/local/bin/midmem maintain --force`, `Nice=10`, idle IO,
   `MemoryMax=1G`, `OnCalendar=*-*-* 04:15:00`, `Persistent`, `RandomizedDelaySec=10m`. It is the
@@ -127,8 +129,8 @@ the store's env) or any consumer off the host.
   hot), copy `state.db` — with `-wal`/`-shm` if the copy is hot and a backup was not used — then keep
   the owner/group/mode of the destination (`midmem:midmem`, state dir 2770). The wiki projection and
   the export are regenerable; never restore from them.
-- **The source path is identity.** An entry's `provenance.source` and its sources row are keyed by
-  the file path that was ingested, and re-ingest supersedes by path. Move the capture system's
+- **The source path is identity.** The sources row, and therefore supersede and dedup, are keyed by
+  the file path that was ingested; `provenance.source` carries the library/doc identity instead. Move the capture system's
   archive and the **path must not change** (mount it at the same location, or re-point nothing). A
   new path is a new source: the old entry is not superseded, and identical content only links as
   `alsoSources`. Keep `MIDMEM_SOURCE_ROOTS` listing the same root.
@@ -136,10 +138,15 @@ the store's env) or any consumer off the host.
 - **Collection naming.** A Qdrant collection holds one embedding space and is named
   `midmem_memory_<modelslug>_<dim>` (for example `midmem_memory_bgem3_1024`). A different embedding
   model or dimension is a different collection, never a reuse of the old one.
-- **Order after the move, if the embedding model changed:** `midmem reembed` first (it rewrites the
-  fallback/stale vectors in `state.db`), then `midmem vectors backfill`, then `midmem vectors
-  parity` before flipping `MIDMEM_VECTOR_BACKEND=qdrant`. Backfill copies stored vectors and does
-  not embed, so backfilling first would copy the wrong ones.
+- **Order after the move:** `midmem reembed` first, then `midmem vectors backfill`, then `midmem
+  vectors parity` before flipping `MIDMEM_VECTOR_BACKEND=qdrant`. `reembed` only replaces
+  `fallback` placeholder vectors (written while the embedder was offline) with real ones; backfill
+  skips placeholders, so an entry still holding one never reaches Qdrant and silently loses semantic
+  recall after the flip. This applies whether or not the model changed.
+- **A change of embedding model is not a `reembed` job.** `reembed` does not touch real vectors from
+  an older model, and backfill would push them into a collection named for the new model. Use a new
+  collection (`midmem_memory_<modelslug>_<dim>`) and a full re-embed or re-ingest, not a backfill of
+  the old vectors.
 - **After the Qdrant flip, Qdrant holds the only vectors** for the entries it serves. A `state.db`
   copy alone no longer restores semantic recall: **snapshot Qdrant** (its own snapshot API) alongside
   the db, and restore the two together.
