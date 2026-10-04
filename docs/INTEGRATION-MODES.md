@@ -121,6 +121,8 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    the source changes. Re-ingesting the same path with changed content archives the previous entry
    (path-keyed supersede); unchanged content is a no-op (hash dedup). The same content arriving at a
    second path is linked onto the existing entry (`provenance.alsoSources`), never duplicated.
+   A source whose entries were all forgotten re-ingests afresh at the same path; it is not
+   `unchanged`.
 2. **Register the archive root once.** `MIDMEM_SOURCE_ROOTS` **replaces** the default root list — set
    the full default list plus the archive root, never the archive root alone. Keep the archive
    outside every `bridgeSources` folder (or the bridge would auto-ingest it under that folder's
@@ -136,19 +138,36 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    row. `--type` may be a capture-pack type (`web-knowledge` pack: `web-article`, `news`,
    `research-paper`, `technical-documentation`, `tutorial`, …), which sets the entry's type, memory
    function and lease; any other type stores a plain `ingest` entry in the memory tier.
+   The capture system may set `--type` to any web-knowledge pack entryType it determines
+   deterministically on-box.
 4. **Text without a file:** `midmem ingest-content --source-uri <url> --stdin` (MCP `ingest_content`)
    materializes the text under `MIDMEM_CONTENT_INGEST_DIR` at a path keyed by the source identity and
    runs the same governed ingest — the same source always supersedes itself.
 5. **Authority is `web` for anything external.** Never `--curated`: it labels the source
    operator-authored and grants protected recall slots (#39) and verbatim returns (#42).
-6. **Never write memory for captures.** No `remember`, no `record_work`, no write to `state.db`.
-   The only write is the ingest above; retrieval renews leases on its own.
+6. **Never write memory for captures — except two operator-initiated writes (amended 2026-10-04).** No
+   `remember`, no `record_work`, no `promote`, never `--curated`, and no `ingest-content` from a system that
+   keeps files. A capture system may write only: **(a)** the ingest above; **(b) operator feedback**:
+   `midmem feedback <entryId> [--unhelpful]`, sent only when the operator, signed in to the capture system,
+   marks one of its entries helpful or not. It moves `helpful_count`/`trust_score` exactly as an agent's
+   feedback does. Promotion into `wisdom` still happens only in `maintain`, under the earned rule
+   (`retrieval_count ≥ 5`, `trust_score ≥ 0.7`, `helpful_count ≥ 2`, write-time grounding ≥ the promotion
+   floor), so feedback alone never promotes: agents must also recall the entry. The caller rate-limits votes
+   (one per entry per cooldown) and never sends a vote the operator did not cast. **(c) operator-initiated
+   forget**: `midmem forget-source --library <id> --doc-id <docId>`, sent only when the operator permanently
+   deletes that source in the capture system. It soft-forgets every entry from the source (#41 cascade) and
+   unlinks it from other entries' `alsoSources`, and the calling system logs each forget. Neither exception
+   changes an entry's authority (`web`), tier, scope or project.
 7. **Reads.** Any consumer: `midmem query "<q>" --projects library` (MCP `query` with
    `projects: ["library"]`), or unfiltered when the caller has no project set. Rows carry
    `authority`, `provenance.source`, `fidelity`, `status` and the instruction-likeness flag (#40).
+   `midmem entries --library <id> --doc-ids a,b [--claims]` (MCP `entry_status`) returns each
+   source's lifecycle view: tier, lease, counters, concepts, claims and promotion progress.
+   Reading it is not a recall; it never renews a lease or bumps `retrieval_count`.
 8. **Call shape.** Shell out to the `midmem` CLI through a durable queue with a frozen argv allowlist
    and a provider switch (mock in every test: zero `execFile`); or import `Orchestrator` in-process
    for a Node caller on the same host. Both are governed identically.
+   The allowlist names the verbs `ingest`, `feedback`, `forget-source` and `entries`.
 
 **Coming for this mode:** metadata filters on query (#48) and MidMem's Qdrant spin-up with a vector
 backfill (#50, #51). None changes the contract above. The Qdrant adapter's code half has landed: search
