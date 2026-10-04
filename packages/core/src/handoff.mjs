@@ -63,7 +63,7 @@ function format(p, task, results) {
     lines.push(`Task: ${oneLine(task)}`);
     lines.push('Known:');
     for (const r of [...clean, ...flagged]) lines.push(`  •${flagTag(r)} ${oneLine(r.content)}`);
-    for (const r of library) lines.push(`  • ${libTag(r)} ${oneLine(r.content)} — src:${r.sourceUri}`);
+    for (const r of library) lines.push(`  • ${libTag(r)}${flagTag(r)} ${oneLine(r.content)} — src:${r.sourceUri}`);
     lines.push('═══════════ (end memory — base your work on the above) ═══════════');
   } else {
     lines.push('## Retrieved memory for this hand-off (provenance-tagged — weigh by trust; pull more as needed)');
@@ -78,7 +78,7 @@ function format(p, task, results) {
     }
     for (const r of library) {
       const id = p.includeIds ? `[${r.id}] ` : '';
-      lines.push(`- ${id}${libTag(r)} ${oneLine(r.content)} — src:${r.sourceUri}`);
+      lines.push(`- ${id}${libTag(r)}${flagTag(r)} ${oneLine(r.content)} — src:${r.sourceUri}`);
     }
     if (p.invitePull) lines.push('\nThis is a brief, not the full record — call `recall <id>` or `query` for deeper context on any item.');
   }

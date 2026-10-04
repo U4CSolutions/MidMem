@@ -13,7 +13,7 @@ import { functionForType } from './workmemory.mjs';
 import { conceptSeedsFromVector } from './concepts.mjs';
 import { authorityRank, AUTHORITY_LEVELS } from './authority.mjs';
 import { projectClause, matchesProject } from './projectaxis.mjs';
-import { instructionLikeness, fidelityClass, selectBounded } from './recallpolicy.mjs';
+import { instructionLikeness, entryInstructionLikeness, fidelityClass, selectBounded } from './recallpolicy.mjs';
 
 /** Library-lane report per result array (roadmap #49): which providers were asked and how many rows
  *  came back. Kept off the array itself so result shapes stay unchanged; read by progressiveSearch. */
@@ -243,12 +243,16 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
 
   // --- Instruction-likeness (#40): flag injection-shaped rows and demote them by a fixed penalty.
   //     The flag and its matched pattern names travel in rank so a consumer can drop by name;
-  //     nothing is removed here. ---
+  //     nothing is removed here. A row flags when its content flags OR its ingest stored a
+  //     full-source verdict (provenance.instructionLike, 2026-10-04: an injection past the summary
+  //     window was recalled unflagged); matched = the union, the penalty applies once. ---
   const il = cfg.recall?.instructionLike || {};
-  if (il.enabled !== false) {
+  const ilOn = il.enabled !== false;
+  const ilPenalty = il.penalty ?? 0.01;
+  if (ilOn) {
     for (const c of cand) {
-      const v = instructionLikeness(c.entry.content);
-      if (v.flag) { c.score -= (il.penalty ?? 0.01); c.ranks.instructionLike = true; c.ranks.instructionMatched = v.matched; }
+      const v = entryInstructionLikeness(c.entry);
+      if (v.flag) { c.score -= ilPenalty; c.ranks.instructionLike = true; c.ranks.instructionMatched = v.matched; }
     }
   }
 
@@ -341,28 +345,35 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
     if (!links.has(key)) links.set(key, linkStmt.get(docId, sourceUri, sourceUri)?.id ?? null);
     return links.get(key);
   };
-  const libraryRows = libRows.map((row, i) => ({
-    kind: 'library',
-    id: 'lib:' + row.libraryId + ':' + row.chunkId,
-    library: row.libraryId,
-    docId: row.docId,
-    chunkId: row.chunkId,
-    locator: row.locator,
-    sourceUri: row.sourceUri,
-    capturedAt: row.capturedAt ?? null,
-    content: row.text.slice(0, 600) + (row.text.length > 600 ? '…' : ''),
-    score: Number((lw * (1 / (k + i))).toFixed(6)),
-    rank: { library: i + 1, providerScore: row.score },
-    linkedEntry: linkFor(row.docId, row.sourceUri),
-    status: null,
-    tier: null,
-    type: 'library-chunk',
-    authority: null,
-    trust: null,
-    fidelity: 'compressible',
-    truncated: row.text.length > 600,
-    provenance: { source: { libraryId: row.libraryId, docId: row.docId, sourceUri: row.sourceUri } },
-  }));
+  // Library rows carry FULL document evidence and are screened like memory rows (#40, 2026-10-04):
+  // the verdict runs on the provider's whole row text (not the 600-char cut), sets the same rank
+  // fields and the same one-time penalty — flag + demote, never drop.
+  const libraryRows = libRows.map((row, i) => {
+    const v = ilOn ? instructionLikeness(row.text) : { flag: false, matched: [] };
+    const base = lw * (1 / (k + i));
+    return {
+      kind: 'library',
+      id: 'lib:' + row.libraryId + ':' + row.chunkId,
+      library: row.libraryId,
+      docId: row.docId,
+      chunkId: row.chunkId,
+      locator: row.locator,
+      sourceUri: row.sourceUri,
+      capturedAt: row.capturedAt ?? null,
+      content: row.text.slice(0, 600) + (row.text.length > 600 ? '…' : ''),
+      score: Number((v.flag ? base - ilPenalty : base).toFixed(6)),
+      rank: { library: i + 1, providerScore: row.score, ...(v.flag ? { instructionLike: true, instructionMatched: v.matched } : {}) },
+      linkedEntry: linkFor(row.docId, row.sourceUri),
+      status: null,
+      tier: null,
+      type: 'library-chunk',
+      authority: null,
+      trust: null,
+      fidelity: 'compressible',
+      truncated: row.text.length > 600,
+      provenance: { source: { libraryId: row.libraryId, docId: row.docId, sourceUri: row.sourceUri } },
+    };
+  });
   const out = [...memoryRows, ...libraryRows].sort((a, b) => b.score - a.score);
   LIBRARY_REPORT.set(out, { queried: libQueried, returned: libraryRows.length });
   return out;
