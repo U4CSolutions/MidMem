@@ -421,6 +421,21 @@ try {
   o.db.prepare('UPDATE entries SET provenance=? WHERE id=?').run(JSON.stringify({ grounding: { summaryScore: 0.9 } }), tvEntry.id);
   ok((await o.promote(tvEntry.id, 'memory')).success !== false, 'well-grounded entry promotes normally');
 
+  // 12e'. Claim ids never collide inside one millisecond. Two claims sharing their first 50
+  //       characters, written in the same clock tick, used to get the same id and crash the
+  //       ingest (UNIQUE constraint failed: claims.id). Date.now is pinned so the tick IS shared.
+  {
+    const realNow = Date.now;
+    Date.now = () => 1790000000000;
+    try {
+      const prefix = 'The company said that its quarterly revenue rose sharply ';
+      const c1 = o.claims.add({ content: `${prefix}in Europe last year`, source: { path: '/x/collide.md' } });
+      const c2 = o.claims.add({ content: `${prefix}in Asia last year`, source: { path: '/x/collide.md' } });
+      ok(c1.id !== c2.id, 'same-prefix claims written in one millisecond get distinct ids');
+      ok(/^claim-[0-9a-z]+-[0-9a-f]{12}$/.test(c1.id), 'claim id keeps its claim-<base36 ms>-<12 hex> format');
+    } finally { Date.now = realNow; }
+  }
+
   // 12f. Write-path conflict tagging (MOSAIC): incoming claims are related to live neighbors
   //      at write time — contradictory/corroborating/superseding-candidate/additive/novel.
   //      (deferContradictory off here: this section tests TAGGING; the deferred ledger has its own §25.)
