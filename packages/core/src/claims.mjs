@@ -3,6 +3,7 @@
  * Round-trips losslessly (the scaffold serialized the chain to prose then
  * regex-parsed it back). Provenance + chain stored as JSON.
  */
+import { randomUUID } from 'node:crypto';
 import { genId, nowISO, json, tokenize } from './util.mjs';
 
 const STATUSES = new Set(['active', 'verified', 'contradicted', 'superseded', 'archived', 'deferred']);
@@ -11,7 +12,13 @@ export class ClaimStore {
   constructor(db, cfg = {}) { this.db = db; this.cfg = cfg; }
 
   add({ content, type = 'fact', source = {}, provenance = {}, metadata = {}, defer = false }) {
-    const id = genId('claim', content.slice(0, 50) + (source.path || ''));
+    // The id's hash part must not repeat within one millisecond: two claims that share their first
+    // 50 characters (common in news text: "The company said that ...") used to get the SAME id when
+    // written in one clock tick, and the INSERT then failed the ingest with
+    // 'UNIQUE constraint failed: claims.id'. The full content plus a random nonce keeps the id's
+    // format (claim-<base36 ms>-<12 hex>) and makes a collision negligible. Ids were never stable
+    // across runs (they carry the clock), so nothing depends on the old seed.
+    const id = genId('claim', `${content}\u0000${source.path || ''}\u0000${randomUUID()}`);
     const ts = nowISO();
     const prov = {
       extractedAt: provenance.extractedAt || ts,
