@@ -1693,6 +1693,33 @@ try {
   const rav51 = ra51.entry ? o.recall(ra51.entry.id) : null;
   ok(fa51.forgotten === 1 && o.recall(eA51).status === 'deleted' && rav51?.status === 'active' && rav51.tier === 'memory' && rav51.helpful_count === 0 && rav51.retrieval_count === 0,
     'a wisdom entry forgets the same way; re-ingest gives a fresh memory entry with reset counters');
+  // A link left on an ARCHIVED holder still counts as standing for M4, so forget-source unlinks it from
+  // every holder, not only active ones: otherwise the re-share stays 'unchanged' with no live entry.
+  const tD51 = 'OBSIDIAN51 shared notice: the lighthouse keeper logged a fog bank rolling in from the north channel.';
+  const dOld51 = await ing51('doc-d', tD51);
+  const le51 = await ing51('doc-e', tD51); // linked onto doc-d's entry
+  const dNew51 = await ing51('doc-d', 'OBSIDIAN51 shared notice, revised: the fog bank cleared before the ferry left the north channel.');
+  ok(le51.reason === 'linked-duplicate' && le51.entry === dOld51.entry.id && o.recall(dOld51.entry.id).status === 'archived' && o.recall(dNew51.entry.id).status === 'active'
+    && o.recall(dOld51.entry.id).provenance.alsoSources.some((a) => a.source?.docId === 'doc-e'), 'fixture: doc-e linked onto doc-d\'s entry, then doc-d re-captured → the holder is archived, the link stays');
+  const dryE51 = await o.forgetSource({ libraryId: L51, docId: 'doc-e', dryRun: true });
+  ok(dryE51.matched === 0 && dryE51.unlinked === 1 && o.recall(dOld51.entry.id).provenance.alsoSources.some((a) => a.source?.docId === 'doc-e'), 'dryRun counts the archived holder in unlinked, changes nothing');
+  const fE51s = await o.forgetSource({ libraryId: L51, docId: 'doc-e' });
+  ok(fE51s.matched === 0 && fE51s.unlinked === 1 && !o.recall(dOld51.entry.id).provenance.alsoSources.some((a) => a.source?.docId === 'doc-e') && o.recall(dOld51.entry.id).status === 'archived',
+    'forget-source unlinks the source from an archived holder too (unlinked 1, holder stays archived)');
+  const re51 = await ing51('doc-e', tD51);
+  ok(re51.success && !re51.skipped && o.recall(re51.entry.id)?.status === 'active' && o.recall(re51.entry.id).provenance.source.docId === 'doc-e' && st51(['doc-e']).entries[0]?.id === re51.entry.id,
+    're-share after forget-source of a source linked on an archived holder → a fresh active entry (not unchanged)');
+  ok((await o.forgetSource({ libraryId: L51, docId: 'doc-e', dryRun: true })).unlinked === 0, 'the unlink is idempotent: nothing links doc-e any more');
+  // sharedWith names only the caller's own library; another library's sources come back as sharedWithOther.
+  const tF51 = 'OBSIDIAN51 cross-library notice: the harbour master closed the slipway for resurfacing until Friday.';
+  const iF51 = await ing51('doc-f', tF51);
+  const xF51 = await o.ingestContent({ content: tF51, source: { libraryId: 'other-51', docId: 'zz-other', canonicalUri: 'https://other.example.test/51/zz' }, type: 'web-article', authority: 'web' });
+  const ing2F51 = await ing51('doc-g', tF51);
+  ok(xF51.reason === 'linked-duplicate' && xF51.entry === iF51.entry.id && ing2F51.reason === 'linked-duplicate', 'fixture: one other-library source and one own-library source linked onto doc-f');
+  const dF51 = await o.forgetSource({ libraryId: L51, docId: 'doc-f', dryRun: true });
+  ok(JSON.stringify(dF51.sharedWith) === '["doc-g"]' && JSON.stringify(dF51.sharedWithOther) === JSON.stringify([{ libraryId: 'other-51', docId: 'zz-other' }]),
+    'forget-source → sharedWith [doc-g] (own library only); the other library\'s source in sharedWithOther');
+  ok(Array.isArray(fs51.sharedWithOther) && fs51.sharedWithOther.length === 0, 'sharedWithOther is always present (empty when no other library shares the text)');
   const tE51 = 'OBSIDIAN51 plain note forgotten through forget-entries and ingested again with identical text.';
   const fE51 = path.join(tmp, 'obsidian51-e.md');
   fs.writeFileSync(fE51, tE51);

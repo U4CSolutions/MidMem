@@ -161,7 +161,7 @@ export class Orchestrator {
       // row — its own entry (source_id) or a live entry that links it in provenance.alsoSources. After an
       // operator forget (§6 6c) the knowledge is gone, so the source falls through to link / full ingest.
       const standing = this.db.prepare(`SELECT 1 FROM entries WHERE status != 'deleted' AND (source_id = ? OR (provenance LIKE '%alsoSources%'
-        AND json_valid(provenance) AND EXISTS (SELECT 1 FROM json_each(provenance, '$.alsoSources') a WHERE json_extract(a.value, '$.sourceId') = ?))) LIMIT 1`);
+        AND json_valid(provenance) AND EXISTS (SELECT 1 FROM json_each(provenance, '$.alsoSources') a WHERE a.type = 'object' AND json_extract(a.value, '$.sourceId') = ?))) LIMIT 1`);
       const samePath = same.find((row) => row.path === path && standing.get(row.id, row.id));
       if (samePath) { this.db.logOp('ingest-skip', { path, hash, sourceId: samePath.id }); return { success: true, skipped: true, reason: 'unchanged', sourceId: samePath.id }; }
       if (same.length) {

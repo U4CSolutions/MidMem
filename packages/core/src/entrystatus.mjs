@@ -196,16 +196,30 @@ export async function forgetSource(o, { libraryId, docId, dryRun = false } = {})
   checkId(docId, 'doc id');
   const rows = o.db.prepare(`SELECT id, provenance FROM entries WHERE status != 'deleted' AND json_valid(provenance)
     AND json_extract(provenance,'$.source.libraryId') = ? AND json_extract(provenance,'$.source.docId') = ? ORDER BY created_at, id`).all(libraryId, docId);
-  // Other sources whose identical text these entries hold: the caller re-ingests them so they keep a live entry.
-  const sharedWith = new Set();
+  // Other sources whose identical text these entries hold: the caller re-ingests them so they keep a live
+  // entry. `sharedWith` names only this library's doc ids (the caller reads them as its own); sources of
+  // other libraries that lose their entry too are reported apart as `sharedWithOther` [{libraryId, docId}].
+  const sharedWith = new Set(); const other = new Map();
   for (const r of rows) {
-    for (const a of json(r.provenance, {})?.alsoSources || []) {
+    const also = json(r.provenance, {})?.alsoSources;
+    for (const a of Array.isArray(also) ? also : []) {
       const s = a?.source;
-      if (s?.docId && !(s.libraryId === libraryId && s.docId === docId)) sharedWith.add(s.docId);
+      if (typeof s?.docId !== 'string' || (s.libraryId === libraryId && s.docId === docId)) continue;
+      const lib = typeof s.libraryId === 'string' ? s.libraryId : null;
+      if (lib === libraryId) sharedWith.add(s.docId);
+      else other.set(`${lib ?? ''}\u0000${s.docId}`, { libraryId: lib, docId: s.docId });
     }
   }
-  const holders = linkHolders(o, libraryId).filter((h) => h.docs.includes(docId));
-  const res = { success: true, libraryId, docId, matched: rows.length, forgotten: 0, unlinked: 0, sharedWith: [...sharedWith].sort(), cascade: { claimsArchived: 0, conceptsFlagged: 0 }, dryRun: !!dryRun };
+  const sharedWithOther = [...other.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, v]) => v);
+  // Every non-deleted entry that links this source, not only active ones: M4 counts a link on any
+  // non-deleted holder (an archived one included) as standing, so a link left on a superseded or expired
+  // holder would make the next re-ingest of the same text 'unchanged' with no live entry. Deleted holders
+  // stand for nothing and keep their provenance as an audit tombstone. Exact json_each match.
+  const holders = o.db.prepare(`SELECT id, provenance FROM entries WHERE status != 'deleted' AND provenance LIKE '%alsoSources%' AND json_valid(provenance)
+    AND EXISTS (SELECT 1 FROM json_each(provenance, '$.alsoSources') a WHERE a.type = 'object'
+      AND json_extract(a.value, '$.source.libraryId') = ? AND json_extract(a.value, '$.source.docId') = ?) ORDER BY updated_at DESC, id`)
+    .all(libraryId, docId).map((r) => ({ id: r.id, prov: json(r.provenance, {}) || {} })).filter((h) => Array.isArray(h.prov.alsoSources));
+  const res = { success: true, libraryId, docId, matched: rows.length, forgotten: 0, unlinked: 0, sharedWith: [...sharedWith].sort(), sharedWithOther, cascade: { claimsArchived: 0, conceptsFlagged: 0 }, dryRun: !!dryRun };
   if (dryRun) { res.unlinked = holders.length; return res; }
   for (const r of rows) {
     const f = await o.forget(r.id, { soft: true }); // governed; #41 cascade archives claims, flags orphaned concepts
@@ -220,6 +234,6 @@ export async function forgetSource(o, { libraryId, docId, dryRun = false } = {})
       res.unlinked++;
     }
   });
-  o.db.logOp('forget-source', { libraryId, docId, matched: res.matched, forgotten: res.forgotten, unlinked: res.unlinked, sharedWith: res.sharedWith.length, cascade: res.cascade, at: nowISO() });
+  o.db.logOp('forget-source', { libraryId, docId, matched: res.matched, forgotten: res.forgotten, unlinked: res.unlinked, sharedWith: res.sharedWith.length, sharedWithOther: sharedWithOther.length, cascade: res.cascade, at: nowISO() });
   return res;
 }
