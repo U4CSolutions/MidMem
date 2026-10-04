@@ -20,15 +20,20 @@
 import { authorityRank, AUTHORITY_LEVELS, normalizeAuthority } from './authority.mjs';
 
 /** Injection shapes. Each pattern is named so a flag can say WHY. Deterministic, anchored to
- *  prompt-attack phrasing; generic imperatives are deliberately not matched. */
+ *  prompt-attack phrasing; generic imperatives are deliberately not matched.
+ *  Linear time (2026-10-04, KC v2 real-MidMem finding): the verdict now runs over a FULL ingested
+ *  source, so every pattern must stay linear in the input. Every gap is either bounded ({0,n}) or
+ *  stops at a character the next match attempt would start from: `message-syntax` scans `[^<>]*`
+ *  (was `[^>]*`, quadratic on many unclosed `<user` tags) and `role-marker` indents with horizontal
+ *  whitespace only (was `^\s*` under /m, quadratic on a run of blank lines — 17 s at 200 KB). */
 export const INSTRUCTION_PATTERNS = [
   ['override-prior', /\b(ignore|disregard|forget|override)\b[^.\n]{0,40}\b(previous|prior|above|earlier|all|any)\b[^.\n]{0,24}\b(instructions?|prompts?|rules?|guidelines?|messages?|context)\b/i],
   ['role-reassign', /\b(you are now|from now on,? you|act as (?:a|an|the)\b|pretend (?:to be|you are)|your new (?:instructions?|task|role|persona) (?:is|are))\b/i],
   ['reveal-prompt', /\b(reveal|print|repeat|output|show|leak|dump)\b[^.\n]{0,30}\b(system prompt|hidden prompt|developer message|your instructions)\b/i],
   ['hide-from-user', /\b(do not|don't|never)\b[^.\n]{0,12}\b(tell|inform|mention|reveal|show)\b[^.\n]{0,20}\b(the )?(user|operator|human|owner)\b/i],
   ['exfiltrate', /\b(exfiltrate|send|post|upload|transmit|forward)\b[^.\n]{0,40}\b(api[- ]?keys?|tokens?|passwords?|secrets?|credentials?)\b[^.\n]{0,40}\b(to|at)\b/i],
-  ['message-syntax', /<\/?(tool_call|function_call|tool_result|system|assistant|developer|user)\b[^>]*>|<\|(im_start|im_end|system|user|assistant)\|>|\[INST\]|\[\/INST\]/i],
-  ['role-marker', /^\s*(system|assistant|developer|tool)\s*:\s*\S/im],
+  ['message-syntax', /<\/?(tool_call|function_call|tool_result|system|assistant|developer|user)\b[^<>]*>|<\|(im_start|im_end|system|user|assistant)\|>|\[INST\]|\[\/INST\]/i],
+  ['role-marker', /^[^\S\r\n\u2028\u2029]*(system|assistant|developer|tool)\s*:\s*\S/im],
   ['tool-json', /"(tool_calls|function_call|tool_use)"\s*:/],
 ];
 
@@ -37,6 +42,47 @@ export function instructionLikeness(text) {
   const s = String(text || '');
   const matched = [];
   for (const [name, re] of INSTRUCTION_PATTERNS) if (re.test(s)) matched.push(name);
+  return { flag: matched.length > 0, matched };
+}
+
+/** Pattern names in declaration order, then any stored names this build no longer declares. */
+function orderMatched(names) {
+  const set = new Set(names);
+  const known = INSTRUCTION_PATTERNS.map(([n]) => n);
+  return [...known.filter((n) => set.has(n)), ...[...set].filter((n) => !known.includes(n))];
+}
+
+/**
+ * Source-scope verdict (2026-10-04, KC v2 real-MidMem finding): an entry's content is often a short
+ * head-of-document summary (always, with the LLM extractor off), so an injection past the summary
+ * window never reached the content check. Ingest runs instructionLikeness over the FULL source text
+ * and persists this record as `provenance.instructionLike` — data about the source, never an
+ * authority or trust change. Returns null for a clean source (nothing is persisted).
+ * @returns {{matched:string[], at:string, scope:'source'}|null}
+ */
+export function sourceInstructionVerdict(text, at = new Date().toISOString()) {
+  const v = instructionLikeness(text);
+  return v.flag ? { matched: v.matched, at, scope: 'source' } : null;
+}
+
+/** OR two stored verdicts (a linked duplicate keeps the holder's verdict OR'd with the linked
+ *  source's): the union of matched names; the earlier `at` stays. Either side may be null. */
+export function mergeInstructionVerdicts(a, b) {
+  const ok = (v) => v && typeof v === 'object' && Array.isArray(v.matched) && v.matched.length > 0;
+  if (!ok(a)) return ok(b) ? b : null;
+  if (!ok(b)) return a;
+  const at = [a.at, b.at].filter((t) => typeof t === 'string').sort()[0] ?? b.at;
+  return { matched: orderMatched([...a.matched, ...b.matched].filter((n) => typeof n === 'string')), at, scope: 'source' };
+}
+
+/** Verdict for a stored entry: its own content OR its persisted source verdict; matched is the
+ *  de-duplicated union in pattern order. */
+export function entryInstructionLikeness(entry) {
+  const v = instructionLikeness(entry?.content);
+  const stored = entry?.provenance?.instructionLike;
+  const extra = stored && typeof stored === 'object' && Array.isArray(stored.matched) ? stored.matched.filter((n) => typeof n === 'string') : [];
+  if (!extra.length) return v;
+  const matched = orderMatched([...v.matched, ...extra]);
   return { flag: matched.length > 0, matched };
 }
 
