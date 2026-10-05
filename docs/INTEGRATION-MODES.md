@@ -202,7 +202,7 @@ it as its own lane, never storing it; register one with
 | `MIDMEM_STORE_ID` | `default` | tenant key (#51): written as payload `store_id` on every Qdrant point and filtered on every Qdrant search, so several stores can share one collection |
 | `MIDMEM_QDRANT_TIMEOUT_MS` / `MIDMEM_QDRANT_BATCH` | 5000 / 100 | per-request Qdrant timeout; points per upsert batch in `vectors backfill` |
 | `MIDMEM_OCCUPANCY` / `…_CAP_STACK` `…_CAP_DOC` `…_CAP_WEB` `…_OPERATOR_SLOTS` `…_MIN_LINEAGES` | on / 0.6 / 0.6 / 0.25 / 2 / 2 | bounded-occupancy selection on budgeted reads (#39): per-authority caps that bind only against a waiting competitor, protected operator slots, lineage floor |
-| `MIDMEM_INSTRUCTION_FLAG` / `MIDMEM_INSTRUCTION_PENALTY` | on / 0.01 | instruction-likeness flag on results (#40); flagged rows demoted + labelled, never dropped |
+| `MIDMEM_INSTRUCTION_FLAG` / `MIDMEM_INSTRUCTION_PENALTY` | on / 0.01 | instruction-likeness flag on results (#40): computed over the full source at ingest (kept as `provenance.instructionLike`) and on library-lane rows' full evidence text; flagged rows demoted + labelled, never dropped; `0` turns all of it off |
 | `MIDMEM_FIDELITY` / `MIDMEM_VERBATIM_MAX_CHARS` | on / 4000 | fidelity class on results (#42); verbatim rows (operator / curated tier) uncut up to the ceiling |
 | `MIDMEM_WORKING_TTL_MS` | 86400000 (24 h) | lease for `working`-function entries (#44); they never promote and are excluded from default reads |
 | `MIDMEM_FORGET_CASCADE` | on | dependency-aware forget (#41): archive sourced claims, flag sole-support concepts |
