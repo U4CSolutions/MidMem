@@ -1994,9 +1994,10 @@ try {
     sC53 = oSeed53.claims.add({ content: longC53, defer: true });
     oSeed53.cfg.claims.deferContradictory = false;
     sD53 = oSeed53.claims.add({ content: longD53 });
-    oSeed53.cfg.claims.deferContradictory = true;
+    // The judgment re-deferral: a live tagged claim a human parked. (Built active-then-defer, not
+    // accept-then-defer: since 2026-10-06 an accept is itself the judgment and clears the tag.)
     sE53 = oSeed53.claims.add({ content: longE53 });
-    await oSeed53.resolveDeferredClaim(sE53.id, 'accept');
+    oSeed53.cfg.claims.deferContradictory = true;
     await oSeed53.deferClaim(sE53.id, 'needs a source');
     const sG53 = oSeed53.claims.add({ content: gateX53 });
     sH53 = oSeed53.claims.add({ content: gateY53 });
@@ -2202,6 +2203,189 @@ try {
   ok(tl56.find((t) => t.name === 'archive')?.inputSchema?.properties?.ids?.type === 'array' && call56.archived?.[0] === n56.id && o.recall(n56.id).status === 'archived' && o.recall(n56.id).provenance.archivedBy.reason === 'mcp56',
     'MCP archive with ids archives by id');
   ok(typeof sweep56.archived === 'number' && /archived \d+ entries/.test(sweep56.message), 'MCP archive without ids keeps the age-based sweep');
+
+  // 57. Sectioned digest ingest (2026-10-06): a multi-paper digest is ingested whole AND once per
+  //     single-citation section, keyed by the canonical citation. Measured: a six-paper weekly report
+  //     ingested as one file kept one 430-char summary, 8 concepts, 1 claim. Own temp db (s57), so the
+  //     content dir and research-sources see only these fixtures.
+  const { canonicalizeCitation: cc57, splitDigestSections: sds57 } = await import('../src/index.mjs');
+  const { sha12: sha12_57 } = await import('../src/util.mjs');
+  const arxA57 = 'https://arxiv.org/abs/2610.05571';
+  const arxB57 = 'https://arxiv.org/abs/2610.05582';
+  ok(['https://arxiv.org/abs/2610.05571v2', 'https://www.arxiv.org/pdf/2610.05571.pdf', 'http://arxiv.org/abs/2610.05571v3'].map(cc57).every((c) => c?.canonicalUri === arxA57 && c.docId === 'arxiv:2610.05571'),
+    'canonicalizeCitation: abs v2, www pdf .pdf, http abs v3 → https://arxiv.org/abs/<id> + docId arxiv:<id>');
+  const doi57 = cc57('http://dx.doi.org/10.5555/Zentrovax.57');
+  ok(doi57?.canonicalUri === 'https://doi.org/10.5555/zentrovax.57' && doi57.docId === 'doi:10.5555/zentrovax.57', 'a dx.doi.org URL → https://doi.org/<doi lower-cased> + docId doi:<doi>');
+  const pl57 = cc57('https://blog.example.test/posts/zentrovax-57?ref=feed#methods).');
+  ok(pl57?.canonicalUri === 'https://blog.example.test/posts/zentrovax-57?ref=feed' && !('docId' in pl57), 'a plain URL keeps its path + query, drops #fragment and trailing punctuation, no docId');
+  ok(cc57('not a url') === null && cc57('ftp://files.example.test/z57') === null && cc57(undefined) === null, 'non-URLs → null');
+  const bodyA57 = 'Zentrovax57 trains a pillamore controller that writes quessling notes into a drabbet store after every episode. Across ten talvessen sessions the drabbet store kept 41 percent more morwick facts than a flat buffer of equal size, and recall latency stayed under 90 ms.';
+  const bodyB57 = 'Wimbrel57 places a small cache in front of each morwick shard and promotes entries that two consecutive sessions both read. On the oberlast benchmark the cache answered 72 percent of lookups locally and cut shard traffic by a third while the hessick index stayed consistent.';
+  const digest57 = [
+    'Weekly zentrovax57 digest. This intro paragraph frames the week before any heading appears.', '',
+    '## Key Papers', '', 'The craskel57 reviewers picked the papers below.', '',
+    '### **Zentrovax57**: pillamore control for _quessling_ notes', '', 'https://arxiv.org/abs/2610.05571v2', '', bodyA57, '',
+    '### Wimbrel57 caching across morwick shards', '', 'Paper: https://www.arxiv.org/pdf/2610.05582.pdf', '', bodyB57, '',
+    '### Fendigo57 versus Yorrible57', '', 'Fendigo57 is compared head to head with Yorrible57 (https://example.test/yorrible57) on the vandrel suite; see https://arxiv.org/abs/2610.05593 for the fendigo paper. Both systems store pouncet traces, and the comparison reports throughput, memory footprint and ruddleby accuracy side by side.', '',
+    '### Craskel57 short note', '', 'https://arxiv.org/abs/2610.05604', '', 'Craskel57 is brief.', '',
+    '### Talvessen57 open questions', '', 'Talvessen57 open questions from the reviewers: how skerrow memories should age, whether thimblon summaries drift across long runs, and which murrasq signals predict that a stored kelpwick fact will be used again. These questions carry over to next week.', '',
+  ].join('\n');
+  const split57 = sds57(digest57);
+  ok(JSON.stringify(split57.map((s) => [s.index, s.level, s.qualifies, s.reason ?? null])) === JSON.stringify([[0, 0, false, 'preamble'], [1, 2, false, 'no-citation'], [2, 3, true, null], [3, 3, true, null], [4, 3, false, 'multiple-citations'], [5, 3, false, 'too-short'], [6, 3, false, 'no-citation']]),
+    'splitDigestSections: preamble · parent heading · A, B qualify · multiple-citations · too-short · no-citation');
+  ok(split57[0].heading === null && split57[1].text === 'The craskel57 reviewers picked the papers below.' && split57[2].heading === 'Zentrovax57: pillamore control for quessling notes'
+    && JSON.stringify(split57[2].citations) === JSON.stringify([arxA57]) && JSON.stringify(split57[3].citations) === JSON.stringify([arxB57]) && split57[4].citations.length === 2,
+  'a parent heading keeps only its own preamble; heading emphasis is stripped; citations are canonical');
+  const fence57 = sds57('### Fenced57 notes\nhttps://example.test/fenced57\n```sh\n# a shell comment inside the fence\n```\nmore fenced57 text', { minChars: 10 });
+  ok(fence57.length === 1 && fence57[0].qualifies && fence57[0].text.includes('# a shell comment inside the fence'), 'a # line inside a fenced code block is not a heading');
+
+  const db57 = path.join(tmp, 's57', 'state.db');
+  const dir57 = path.join(tmp, 'digests57');
+  fs.mkdirSync(dir57, { recursive: true });
+  const body57 = (tok, n) => `${tok} keeps a ledger of ${n} vandrel batches and reports how each pouncet trace moved between ruddleby stages over the study. The ${tok} authors publish the batch counts, the stage timings and the scripts that rebuild every table from the raw traces.`;
+  const mkDigest57 = (title, papers) => `# ${title}\n\n` + papers.map(([h, url, body]) => `### ${h}\n\n${url}\n\n${body}\n`).join('\n');
+  const o57 = new Orchestrator(base53('s57'));
+  try {
+    const f57 = path.join(dir57, 'zentrovax57-weekly.md');
+    fs.writeFileSync(f57, digest57);
+    const canonF57 = fs.realpathSync(f57);
+    const r57 = await o57.ingestSections({ path: f57 });
+    const pe57 = r57.entry?.id;
+    const [sa57, sb57] = r57.sections;
+    ok(r57.success && !r57.skipped && pe57 && r57.sections.length === 2 && sa57.uri === arxA57 && sb57.uri === arxB57 && r57.sections.every((s) => s.entry && !s.skipped && s.grounding)
+      && r57.sectionsSummary.qualified === 2 && r57.sectionsSummary.ingested === 2, 'ingestSections stores the parent AND two section entries (A, B)');
+    ok(JSON.stringify(r57.sectionsSummary.skipped.map((s) => [s.index, s.reason])) === JSON.stringify([[0, 'preamble'], [1, 'no-citation'], [4, 'multiple-citations'], [5, 'too-short'], [6, 'no-citation']]), 'sectionsSummary.skipped lists the five non-qualifying sections with reasons');
+    const eA57 = o57.recall(sa57.entry), eB57 = o57.recall(sb57.entry);
+    ok(eA57.provenance.source?.canonicalUri === arxA57 && eA57.provenance.source.docId === 'arxiv:2610.05571' && eA57.provenance.source.captureMethod === 'digest-section' && eA57.provenance.source.site === 'arxiv.org'
+      && eB57.provenance.source?.canonicalUri === arxB57 && eB57.provenance.source.docId === 'arxiv:2610.05582' && eB57.provenance.source.captureMethod === 'digest-section', 'section entries carry provenance.source canonicalUri / docId / captureMethod digest-section');
+    ok(eA57.provenance.authority === 'doc' && eB57.provenance.authority === 'doc', "sections take the digest's effective authority (doc), not ingestContent's web default");
+    const srow57 = (id) => o57.db.prepare('SELECT s.title, s.type, s.metadata FROM sources s JOIN entries e ON e.source_id = s.id WHERE e.id=?').get(id);
+    const sA57 = srow57(eA57.id), mA57 = JSON.parse(sA57.metadata), mB57 = JSON.parse(srow57(eB57.id).metadata);
+    ok(sA57.title === 'Zentrovax57: pillamore control for quessling notes' && sA57.type === 'research' && srow57(eB57.id).title === 'Wimbrel57 caching across morwick shards'
+      && mA57.digest?.path === canonF57 && mA57.digest.heading === sA57.title && mA57.digest.index === 2 && mB57.digest?.path === canonF57 && mB57.digest.index === 3, 'sources.title is the heading; sources metadata carries digest.path (canonical) + heading + index');
+    ok(eA57.provenance.originalSource.startsWith(o57.cfg.contentIngestDir + path.sep) && fs.readFileSync(eA57.provenance.originalSource, 'utf8').startsWith('### **Zentrovax57**') && fs.readFileSync(eA57.provenance.originalSource, 'utf8').includes(bodyA57),
+      'the section (heading line + body) is materialized under contentIngestDir');
+    const ds57 = () => o57.recall(pe57).provenance.digestSections;
+    ok(JSON.stringify(ds57()) === JSON.stringify([{ entry: eA57.id, uri: arxA57, heading: sA57.title }, { entry: eB57.id, uri: arxB57, heading: 'Wimbrel57 caching across morwick shards' }]), "the parent's provenance.digestSections lists both sections");
+    const lg57 = o57.db.prepare("SELECT detail FROM log WHERE operation='ingest-sections'").all().map((r) => JSON.parse(r.detail));
+    ok(lg57.length === 1 && lg57[0].parent === pe57 && lg57[0].ingested === 2 && lg57[0].skipped === 5 && lg57[0].path === canonF57, 'the run is logged as ingest-sections');
+    const up57 = o57.recall(pe57).updated_at;
+    const r57b = await o57.ingestSections({ path: f57 });
+    ok(r57b.skipped === true && r57b.reason === 'unchanged' && r57b.sections.length === 2 && r57b.sections.every((s) => s.skipped && s.reason === 'unchanged') && r57b.sections[0].entry === eA57.id && r57b.sections[1].entry === eB57.id && r57b.sectionsSummary.unchanged === 2,
+      'a second run: the parent and both sections are unchanged (same live entries)');
+    ok(ds57().length === 2 && o57.recall(pe57).updated_at === up57, 'digestSections is replaced, not appended (still 2); the link is metadata-only (updated_at untouched)');
+
+    // A later digest citing A's paper (another version) with new text supersedes A's section; B stays.
+    // Its second A-citing sub-section is a duplicate citation and must not supersede its own sibling.
+    const bodyA2_57 = 'In the revised version Zentrovax57 adds a second pillamore head that ranks quessling notes before they reach the drabbet store. The talvessen sessions now keep 58 percent more morwick facts than the flat buffer, and the authors publish the ranking weights.';
+    const bodyA3_57 = 'The ablations take out one pillamore head at a time: ranking alone recovers most of the gain, the second head adds eleven points on long talvessen runs, and the drabbet store size matters less than the order in which quessling notes arrive.';
+    const bodyG57 = 'Glimmerick57 keeps an append-only ledger of every larramore update so an agent can replay how a belief changed. The ledger compresses old brisket entries into checkpoints and the replay cost grows with the number of checkpoints rather than updates.';
+    const f57b = path.join(dir57, 'zentrovax57-weekly-2.md');
+    fs.writeFileSync(f57b, ['# Zentrovax57 week two', '', '### Zentrovax57 revisited', '', 'https://arxiv.org/abs/2610.05571v3', '', bodyA2_57, '', '#### Zentrovax57 ablations', '', 'https://arxiv.org/abs/2610.05571', '', bodyA3_57, '', '### Glimmerick57 ledgers', '', 'https://arxiv.org/abs/2610.05615', '', bodyG57, ''].join('\n'));
+    const canonF57b = fs.realpathSync(f57b);
+    const r57c = await o57.ingestSections({ path: f57b });
+    const a2_57 = r57c.sections.find((s) => s.uri === arxA57 && !s.skipped);
+    ok(a2_57 && a2_57.superseded.includes(eA57.id) && o57.recall(eA57.id).status === 'archived' && o57.recall(a2_57.entry).status === 'active' && o57.recall(a2_57.entry).provenance.originalSource === eA57.provenance.originalSource,
+      "a second digest citing A's paper with new text supersedes A's section entry (the earlier one archived, same content path)");
+    ok(o57.recall(eB57.id).status === 'active' && o57.recall(eB57.id).updated_at === eB57.updated_at, "B's section entry is untouched");
+    const dup57 = r57c.sections.find((s) => s.reason === 'duplicate-citation');
+    ok(dup57?.index === 2 && dup57.duplicateOf === 1 && dup57.uri === arxA57 && !dup57.entry && r57c.sectionsSummary.duplicates === 1 && r57c.sectionsSummary.ingested === 2 && r57c.sectionsSummary.superseded === 1,
+      'a second section citing the same paper in ONE digest is skipped (duplicate-citation), never superseding its sibling');
+    ok(JSON.parse(srow57(a2_57.entry).metadata).digest?.path === canonF57b, "the superseding section records the later digest's path");
+
+    // A section whose only URL carries a secret-shaped parameter is refused; the others ingest.
+    const tok57 = 'https://x.test/p?token=abcdefgh1234';
+    const f57c = path.join(dir57, 'plovern57-weekly.md');
+    fs.writeFileSync(f57c, mkDigest57('Plovern57 digest', [['Plovern57 shard maps', 'https://arxiv.org/abs/2610.05626', body57('Plovern57', 40)], ['Sallowick57 replay', 'https://arxiv.org/abs/2610.05637', body57('Sallowick57', 6)], ['Ondrel57 mirror', `Mirror copy: ${tok57}`, body57('Ondrel57', 2)]]));
+    const canonF57c = fs.realpathSync(f57c);
+    const r57d = await o57.ingestSections({ path: f57c });
+    const sec57 = r57d.sections.find((s) => s.heading === 'Ondrel57 mirror');
+    ok(sec57?.skipped === true && /secret-shaped query parameter 'token'/.test(sec57.reason) && !sec57.reason.includes('abcdefgh1234') && !fs.existsSync(path.join(o57.cfg.contentIngestDir, sha12_57(tok57) + '.md')),
+      `a section citing a token-bearing URL is skipped with the guard's reason, no content file → ${sec57?.reason}`);
+    ok(r57d.sectionsSummary.ingested === 2 && r57d.sectionsSummary.refused === 1 && o57.recall(r57d.entry.id).provenance.digestSections.length === 2, 'the other two sections still ingest; the parent links those two');
+
+    // Governance first: a digest outside the allowed roots is denied before any section file is written.
+    const out57 = fs.mkdtempSync(path.join(os.tmpdir(), 'ocmw57-out-'));
+    try {
+      const fo57 = path.join(out57, 'hessick57-weekly.md');
+      fs.writeFileSync(fo57, mkDigest57('Hessick57 digest', [['Hessick57 one', 'https://arxiv.org/abs/2610.05648', body57('Hessick57', 3)], ['Hessick57 two', 'https://arxiv.org/abs/2610.05659', body57('Kelpwick57', 4)]]));
+      const ls57 = () => (fs.existsSync(o57.cfg.contentIngestDir) ? fs.readdirSync(o57.cfg.contentIngestDir).sort().join() : '');
+      const lsBefore57 = ls57();
+      let g57 = null;
+      try { await o57.ingestSections({ path: fo57 }); } catch (e) { g57 = e; }
+      ok(g57 instanceof GovernanceError && ls57() === lsBefore57 && !fs.existsSync(path.join(o57.cfg.contentIngestDir, sha12_57('https://arxiv.org/abs/2610.05648') + '.md')),
+        `a digest outside the allowed roots → the governance error propagates, contentIngestDir unchanged → ${g57?.message}`);
+    } finally { fs.rmSync(out57, { recursive: true, force: true }); }
+
+    // minSections above the distinct citation count → not a digest: the parent alone, no section entries.
+    const oN57 = new Orchestrator(base53('s57n'));
+    try {
+      const rN57 = await oN57.ingestSections({ path: f57, minSections: 3 });
+      ok(rN57.success && rN57.entry?.id && rN57.sections.length === 0 && rN57.sectionsSummary.reason === 'not-a-digest' && rN57.sectionsSummary.qualified === 2 && rN57.sectionsSummary.ingested === 0
+        && oN57.db.prepare("SELECT COUNT(*) n FROM sources WHERE json_valid(metadata) AND json_extract(metadata, '$.source.captureMethod') = 'digest-section'").get().n === 0
+        && !(fs.existsSync(oN57.cfg.contentIngestDir) && fs.readdirSync(oN57.cfg.contentIngestDir).length), 'minSections: 3 → sectionsSummary.reason not-a-digest, the parent stored, no section entries or files');
+    } finally { oN57.close(); }
+
+    // CLI + MCP surfaces.
+    const f57d = path.join(dir57, 'thimblon57-weekly.md');
+    fs.writeFileSync(f57d, mkDigest57('Thimblon57 digest', [['Thimblon57 cache', 'https://arxiv.org/abs/2610.05670', body57('Thimblon57', 12)], ['Murrasq57 traces', 'https://arxiv.org/abs/2610.05681', body57('Murrasq57', 19)]]));
+    const cl57 = cli53(db57, 'ingest', f57d, '--sections');
+    ok(cl57.code === 0 && cl57.out?.sections?.length === 2 && cl57.out.sectionsSummary.ingested === 2 && o57.recall(cl57.out.sections[0].entry)?.provenance.source.captureMethod === 'digest-section'
+      && o57.db.prepare('SELECT type FROM sources WHERE path=?').get(fs.realpathSync(f57d))?.type === 'research', 'CLI ingest <path> --sections → exit 0, two section entries, type defaults to research');
+    const cl57b = cli53(db57, 'ingest', f57d, '--sections', '--min-sections', '5');
+    const cl57c = cli53(db57, 'ingest', f57d, '--sections', '--min-chars');
+    ok(cl57b.code === 0 && cl57b.out?.skipped === true && cl57b.out.sectionsSummary.reason === 'not-a-digest' && cl57c.code === 1 && /^ERROR: --min-chars needs a value/.test(cl57c.err),
+      'CLI --min-sections 5 → not-a-digest; a bare --min-chars → exit 1 + ERROR:');
+    const f57e = path.join(dir57, 'skerrow57-weekly.md');
+    fs.writeFileSync(f57e, mkDigest57('Skerrow57 digest', [['Skerrow57 aging', 'https://arxiv.org/abs/2610.05692', body57('Skerrow57', 7)], ['Pouncet57 traces', 'https://arxiv.org/abs/2610.05703', body57('Pouncet57', 9)]]));
+    const mc57 = await mcp53(db57, [{ name: 'ingest', arguments: { path: f57e, sections: true, minChars: 150 } }]);
+    const tl57 = mc57.find((m) => m.id === 1).result.tools.find((t) => t.name === 'ingest');
+    const call57 = JSON.parse(mc57.find((m) => m.id === 2).result.content[0].text);
+    ok(tl57?.inputSchema?.properties?.sections?.type === 'boolean' && tl57.inputSchema.properties.minChars?.type === 'number' && tl57.inputSchema.properties.minSections?.type === 'number',
+      'MCP ingest lists sections (boolean), minChars and minSections (numbers)');
+    ok(call57.sections?.length === 2 && call57.sectionsSummary?.ingested === 2 && call57.sections.every((s) => s.entry && s.docId?.startsWith('arxiv:')), 'MCP ingest with sections:true → two section entries');
+
+    // research-sources: sections count on their digest's line; --include-sections lists them.
+    const script57 = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..', 'scripts', 'research-sources.mjs');
+    const rs57 = (...args) => spawnSync(process.execPath, [script57, '--all', ...args], { env: { ...process.env, MIDMEM_DB_PATH: db57 }, encoding: 'utf8', timeout: 30000 });
+    let rj57 = null; try { rj57 = JSON.parse(rs57('--json').stdout); } catch { rj57 = null; }
+    const row57 = (p) => rj57?.sources.find((s) => s.path === p);
+    ok(rj57 && rj57.count === rj57.sources.length && rj57.sources.every((s) => !s.section && !s.path.startsWith(o57.cfg.contentIngestDir + path.sep))
+      && row57(canonF57)?.sections === 1 && row57(canonF57b)?.sections === 2 && row57(canonF57c)?.sections === 2 && row57(fs.realpathSync(f57d))?.sections === 2,
+    'research-sources --json: sections are not listed as their own sources; each digest counts its live sections (A counts for the digest that superseded it)');
+    const rt57 = rs57().stdout.split('\n');
+    ok(rt57.some((l) => l.endsWith(`${canonF57} · 1 section`)) && rt57.some((l) => l.endsWith(`${canonF57b} · 2 sections`)), 'research-sources table: " · N sections" on the digest line');
+    let ri57 = null; try { ri57 = JSON.parse(rs57('--json', '--include-sections').stdout); } catch { ri57 = null; }
+    const secRows57 = ri57?.sources.filter((s) => s.section) || [];
+    ok(secRows57.length === 9 && secRows57.filter((s) => s.section.parentPath === canonF57).map((s) => s.section.canonicalUri).join() === arxB57
+      && secRows57.every((s) => s.live && s.type === 'research' && s.section.docId?.startsWith('arxiv:')), `--include-sections lists each live section with its parent path + citation (${secRows57.length})`);
+  } finally { o57.close(); }
+
+  // 58. Accepting a deferred contradictory claim IS the judgment (2026-10-06): the write tag becomes
+  //     additive (+ metadata.judged), the neighbour's contradictedBy drops it, lint stops counting it.
+  //     Reject keeps the tag (the row is archived; history). Own temp db.
+  const oJ58 = new Orchestrator(base53('c58'));
+  try {
+    const n58 = oJ58.claims.add({ content: 'the gorsefield58 valve opens pellanor sluices at noon' });
+    const d58 = oJ58.claims.add({ content: 'the gorsefield58 valve never opens pellanor sluices at noon' });
+    const d58b = oJ58.claims.add({ content: 'the gorsefield58 valve cannot open pellanor sluices at noon' });
+    ok(d58.status === 'deferred' && d58.metadata.writeRelation?.relation === 'contradictory' && d58b.status === 'deferred' && d58b.metadata.writeRelation?.neighborId === n58.id
+      && JSON.stringify(oJ58.claims.get(n58.id).metadata.contradictedBy) === JSON.stringify([d58.id, d58b.id]), 'fixture: two write-path contradictions of one neighbour land deferred, both recorded on it');
+    const acc58 = await oJ58.resolveDeferredClaim(d58.id, 'accept');
+    const a58 = oJ58.claims.get(d58.id);
+    ok(acc58.success && acc58.judged === true && a58.status === 'active' && a58.metadata.writeRelation.relation === 'additive' && a58.metadata.writeRelation.neighborId === n58.id
+      && a58.metadata.judged?.action === 'accept' && a58.metadata.judged.from === 'contradictory' && a58.metadata.judged.at === a58.metadata.deferredResolution?.at, 'accept → active, relation additive, metadata.judged {action, at, from}');
+    ok(JSON.stringify(oJ58.claims.get(n58.id).metadata.contradictedBy) === JSON.stringify([d58b.id]), "the neighbour's contradictedBy no longer lists the accepted claim (the other challenger stays)");
+    ok(!oJ58.lint().writeConflicts.some((c) => c.id === d58.id), 'lint writeConflicts does not count the accepted claim');
+    await oJ58.resolveDeferredClaim(d58b.id, 'accept');
+    ok(!('contradictedBy' in oJ58.claims.get(n58.id).metadata) && oJ58.claims.get(d58b.id).metadata.writeRelation.relation === 'additive', 'the last accepted challenger empties contradictedBy (the key is dropped)');
+    const m58 = oJ58.claims.add({ content: 'the quenwick58 bell rings ostler halls at dusk' });
+    const r58 = oJ58.claims.add({ content: 'the quenwick58 bell never rings ostler halls at dusk' });
+    const rej58 = await oJ58.resolveDeferredClaim(r58.id, 'reject');
+    const x58 = oJ58.claims.get(r58.id);
+    ok(rej58.success && !rej58.judged && x58.status === 'archived' && x58.metadata.writeRelation?.relation === 'contradictory' && !x58.metadata.judged && oJ58.claims.get(m58.id).metadata.contradictedBy?.includes(r58.id),
+      'reject → archived; the contradictory tag stays as history (no judged, neighbour evidence kept)');
+  } finally { oJ58.close(); }
 
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {

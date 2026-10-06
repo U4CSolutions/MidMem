@@ -134,16 +134,35 @@ export class ClaimStore {
   }
 
   /** TARL: resolve a deferred claim by judgment — accept (→ active) or reject (→ archived).
-   *  The resolution is recorded in metadata; the claim row is never deleted (ledger history). */
+   *  The resolution is recorded in metadata; the claim row is never deleted (ledger history).
+   *  Accepting a claim the write path tagged `contradictory` IS the judgment that tag queued: the
+   *  tag becomes `additive` (+ `metadata.judged`) and the claim leaves the neighbour's
+   *  `contradictedBy` — the same bookkeeping reclassifyWriteConflicts does — so lint stops
+   *  reporting a decided pair as a pending write conflict (2026-10-06). Reject keeps the tag: the
+   *  row is archived and the tag is its history. */
   resolveDeferred(id, action) {
     if (action !== 'accept' && action !== 'reject') return { success: false, message: `action must be accept|reject, got '${action}'` };
     const c = this.get(id);
     if (!c) return { success: false, message: `not found: ${id}` };
     if (c.status !== 'deferred') return { success: false, message: `not deferred: '${c.status}'` };
     const status = action === 'accept' ? 'active' : 'archived';
-    this.db.prepare('UPDATE claims SET status=?, metadata=?, updated_at=? WHERE id=?')
-      .run(status, JSON.stringify({ ...c.metadata, deferredResolution: { action, at: nowISO() } }), nowISO(), id);
-    return { success: true, id, status };
+    const at = nowISO();
+    const wr = c.metadata.writeRelation;
+    const judged = action === 'accept' && wr?.relation === 'contradictory';
+    const meta = {
+      ...c.metadata, deferredResolution: { action, at },
+      ...(judged ? { writeRelation: { ...wr, relation: 'additive' }, judged: { action: 'accept', at, from: 'contradictory' } } : {}),
+    };
+    this.db.tx(() => {
+      this.db.prepare('UPDATE claims SET status=?, metadata=?, updated_at=? WHERE id=?').run(status, JSON.stringify(meta), at, id);
+      const nb = judged && wr.neighborId ? this.get(wr.neighborId) : null;
+      if (nb && Array.isArray(nb.metadata.contradictedBy) && nb.metadata.contradictedBy.includes(id)) {
+        const { contradictedBy, ...rest } = nb.metadata;
+        const left = contradictedBy.filter((x) => x !== id);
+        this.db.prepare('UPDATE claims SET metadata=? WHERE id=?').run(JSON.stringify(left.length ? { ...rest, contradictedBy: left } : rest), nb.id);
+      }
+    });
+    return { success: true, id, status, ...(judged ? { judged: true } : {}) };
   }
 
   /** The pending ledger: deferred claims, oldest first (review queue order). */

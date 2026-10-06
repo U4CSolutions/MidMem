@@ -7,7 +7,7 @@ Parsed from `packages/core/bin/cli.mjs` (the wrapper `midmem <command>` in a dep
 | command | flags read |
 |---|---|
 | `init` | — |
-| `ingest` | `--type` `--title` `--scope` `--curated` `--authority` |
+| `ingest` | `--sections` `--type` `--title` `--scope` `--curated` `--authority` |
 | `ingest-content` | `--stdin` `--type` `--title` `--scope` `--authority` `--curated` |
 | `remember` | `--tier` `--type` `--scope` `--curated` `--function` `--authority` |
 | `query` | `--tiers` `--scopes` `--functions` `--limit` `--graph` `--minAuthority` `--deep` `--historical` `--statuses` `--asOf` `--bounded` `--includeWorking` |
@@ -64,6 +64,7 @@ Usage: ocmw <init|ingest <path>|ingest-content <text>|remember <text>|query <tex
   close-tasks selectors (at least one required): [labels…] | --task <label> | --match <regex> | --opaque | --olderThanDays <n>; preview with --dryRun
   forget-nodes (HARD delete, edges cascade) selectors: [node ids…] | --match <label regex> | --opaque; --types narrows; preview with --dryRun
   ingest source provenance: --source-uri --canonical-uri --library --doc-id --capture-method --captured-at --site --author --published-at --language
+  ingest <path> --sections [--min-chars <n, default 200>] [--min-sections <n, default 2>]: a multi-paper digest — the file is ingested whole, then every heading section citing exactly ONE URL (body ≥ min-chars) is ingested on its own, keyed by that citation (arXiv/DOI canonicalized; captureMethod digest-section), so a later digest citing the same paper supersedes it; fewer than min-sections distinct citations → the file alone (reason not-a-digest); --type defaults to research
   query / handoff / recall-check metadata filters (AND): --site --author --library --doc-id --capture-method --source-uri --canonical-uri --language --published-after --published-before --captured-after --captured-before <ISO> | --types a,b
   library lane (#49): libraries (list registered, MIDMEM_LIBRARIES) | library-get <libraryId> <docId> --locator <JSON {docId,version,charStart,charEnd}>; query / handoff / recall-check take --libraries a,b (ask only those) | --no-libraries (skip the lane)
   ingest-content <text> | --stdin: same source flags (one of --canonical-uri/--source-uri/--doc-id required) + --type --title --scope --authority (default web) --curated

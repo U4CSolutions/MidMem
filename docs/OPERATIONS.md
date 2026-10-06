@@ -56,6 +56,18 @@ claims deferred by judgment are never touched. Deterministic; the run is logged 
 - **Grounding numbers on every ingest** (`summaryScore`, quarantined counts) — a low score means
   the extraction drifted; triage before it poisons recall. The authoritative record is the `log`
   table row `operation='ingest'`.
+- **Multi-paper digests: ingest with `--sections`** (`midmem ingest <file> --sections`, MCP `ingest`
+  with `sections: true`). A good grounding score on a whole digest can still mean almost nothing
+  was kept (measured 2026-10-05: a six-paper weekly report scored 0.864 as one 430-character
+  summary, and no paper name was recallable). With `--sections` the file is ingested whole, then
+  every heading section that cites exactly one URL and has ≥ `--min-chars` (default 200) of body is
+  ingested on its own through the same grounded path, keyed by its citation (arXiv versions and
+  `/pdf/` links fold to `https://arxiv.org/abs/<id>`, DOIs to `https://doi.org/<doi>`), so the
+  same paper in a later digest supersedes its section instead of duplicating it. Sections take the
+  digest's authority (`doc` unless curated). The result lists each section and why the others were
+  skipped (`no-citation`, `multiple-citations`, `too-short`); fewer than `--min-sections` (default 2)
+  distinct citations → the file stands alone (`not-a-digest`). The parent's
+  `provenance.digestSections` links the sections; the run is logged as `ingest-sections`.
 - `maintain` summary: `projectionQA` (wiki completeness/fidelity), `queryProbes` (would future
   queries find their evidence?), `consistency`, and vector-dimension health.
 - Offline fallback: if the embed endpoint is down, ingest/query still work lexically and vectors

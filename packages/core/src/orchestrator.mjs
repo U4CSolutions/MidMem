@@ -32,6 +32,7 @@ import { genId, sha12, nowISO, json, cosine } from './util.mjs';
 import { normalizeProject, resolveProjects } from './projectaxis.mjs';
 import { LibraryRegistry } from './libraries.mjs';
 import { sourceInstructionVerdict, mergeInstructionVerdicts } from './recallpolicy.mjs';
+import { canonicalizeCitation, splitDigestSections } from './sections.mjs';
 
 /**
  * Source provenance passthrough (roadmap #46): the caller's own identity for a source — where it
@@ -327,6 +328,103 @@ export class Orchestrator {
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(filePath, content);
     return this.ingest({ path: filePath, type, title, source, scope, project, authority, curated, metadata });
+  }
+
+  /**
+   * Sectioned digest ingest (2026-10-06; sections.mjs has the measured problem): the digest file is
+   * ingested as itself (its own governed ingest, dedup and supersede), then every section that cites
+   * exactly ONE source becomes its own grounded content ingest keyed by that citation — the same
+   * paper in next week's digest supersedes its section entry instead of forking, and the paper's
+   * names and figures get a summary of their own. Each section rides the ordinary ingestContent →
+   * ingest path (grounding check, secret guards, #maybeMaintain), so nothing here bypasses them.
+   * Sections inherit the digest's EFFECTIVE authority (doc unless curated/explicit) — ingestContent's
+   * 'web' default does not apply to text the operator handed over as a file. Fewer than `minSections`
+   * distinct qualifying citations → the file is not a digest: the parent stands alone. `source`
+   * (optional) is the digest's own provenance and goes to the parent only.
+   */
+  async ingestSections({ path, type = 'research', title, scope, project, authority, curated = false, metadata = {}, source, minChars = 200, minSections = 2 } = {}) {
+    for (const [k, v] of [['minChars', minChars], ['minSections', minSections]]) {
+      if (!Number.isInteger(v) || v < 0) throw new Error(`ingestSections ${k} must be a non-negative integer`);
+    }
+    // 1. The digest first: governance (the path policy) and its own dedup/supersede. A denial
+    //    propagates from here, before any section file is materialized.
+    const parent = await this.ingest({ path, type, title, metadata, curated, scope, authority, project, source });
+    // 2. Split exactly what the governed ingest read: same canonical path, and the text must hash to
+    //    the parent's sources row — a file swapped or edited in between is refused, not sectioned.
+    const canon = canonicalPath(path);
+    const text = await fs.readFile(canon, 'utf8');
+    const parentSourceId = parent.sourceId || (parent.entry?.id ? this.db.prepare('SELECT source_id FROM entries WHERE id=?').get(parent.entry.id)?.source_id : null);
+    const parentHash = parentSourceId ? this.db.prepare('SELECT hash FROM sources WHERE id=?').get(parentSourceId)?.hash : null;
+    if (parentHash && parentHash !== sha12(text)) throw new Error(`digest ${canon} changed between its ingest and sectioning; re-run`);
+    const all = splitDigestSections(text, { minChars });
+    const qualifying = all.filter((s) => s.qualifies);
+    const skipped = all.filter((s) => !s.qualifies).map((s) => ({ index: s.index, heading: s.heading, reason: s.reason }));
+    const parentEntry = this.#entryIdOf(parent);
+    const summary = { qualified: qualifying.length, ingested: 0, unchanged: 0, linked: 0, superseded: 0, refused: 0, duplicates: 0, skipped };
+    const logIt = (extra = {}) => this.db.logOp('ingest-sections', { path: canon, parent: parentEntry, ...summary, skipped: skipped.length, ...extra });
+    // Distinct citations, not sections: one paper split over two cited sub-headings is not a digest.
+    if (new Set(qualifying.map((s) => s.citations[0])).size < minSections) {
+      logIt({ reason: 'not-a-digest' });
+      return { ...parent, sections: [], sectionsSummary: { ...summary, reason: 'not-a-digest' } };
+    }
+    // 3. One content ingest per qualifying section, in document order, each failure contained.
+    const auth = normalizeAuthority(authority) || (curated ? 'operator' : 'doc');
+    const sections = [];
+    const seen = new Map(); // canonicalUri → index of the section that carried it in THIS run
+    for (const sec of qualifying) {
+      const cit = canonicalizeCitation(sec.citations[0]);
+      const row = { index: sec.index, heading: sec.heading, uri: cit.canonicalUri, ...(cit.docId ? { docId: cit.docId } : {}) };
+      // Two sections citing one source would share one content path, and the later would supersede
+      // the earlier inside a single run — the first (document order) keeps the citation.
+      if (seen.has(cit.canonicalUri)) { summary.duplicates++; sections.push({ ...row, skipped: true, reason: 'duplicate-citation', duplicateOf: seen.get(cit.canonicalUri) }); continue; }
+      seen.set(cit.canonicalUri, sec.index);
+      try {
+        const r = await this.ingestContent({
+          content: `${sec.headingLine}\n\n${sec.text}\n`,
+          source: { canonicalUri: cit.canonicalUri, ...(cit.docId ? { docId: cit.docId } : {}), captureMethod: 'digest-section' },
+          type, title: sec.heading, scope, project, authority: auth, curated,
+          metadata: { ...metadata, digest: { path: canon, heading: sec.heading, index: sec.index } },
+        });
+        const entry = this.#entryIdOf(r);
+        if (r.skipped) {
+          if (r.reason === 'unchanged') summary.unchanged++; else if (r.reason === 'linked-duplicate') summary.linked++;
+          sections.push({ ...row, ...(entry ? { entry } : {}), skipped: true, reason: r.reason });
+        } else {
+          summary.ingested++;
+          summary.superseded += (r.superseded || []).length;
+          sections.push({ ...row, entry, superseded: r.superseded || [], grounding: r.grounding, claims: r.claims });
+        }
+      } catch (e) {
+        // A refused section (e.g. the secret-URI guard in normalizeSource) never stops the others.
+        summary.refused++;
+        sections.push({ ...row, skipped: true, reason: e.message });
+      }
+    }
+    // 4. Index → sections link on the live parent entry. REPLACED, not appended, so a re-run is
+    //    idempotent; metadata-only, so updated_at stays (the knowledge did not change).
+    if (parentEntry) {
+      const live = this.db.prepare("SELECT provenance FROM entries WHERE id=? AND status='active'").get(parentEntry);
+      if (live) {
+        const p = json(live.provenance, {}) || {};
+        p.digestSections = sections.filter((s) => s.entry).map((s) => ({ entry: s.entry, uri: s.uri, heading: s.heading }));
+        this.db.prepare('UPDATE entries SET provenance=? WHERE id=?').run(JSON.stringify(p), parentEntry);
+      }
+    }
+    // 5. The audit row; the per-section detail is in the return value.
+    logIt();
+    return { ...parent, sections, sectionsSummary: summary };
+  }
+
+  /** The live entry an ingest result stands for: the stored entry, the holder a linked duplicate was
+   *  attached to, or — for an 'unchanged' skip — the active entry standing for that sources row (its
+   *  own, or one that links it in provenance.alsoSources). Null when nothing live stands for it. */
+  #entryIdOf(r) {
+    if (typeof r?.entry === 'string') return r.entry;
+    if (r?.entry?.id) return r.entry.id;
+    if (!r?.sourceId) return null;
+    return this.db.prepare(`SELECT id FROM entries WHERE status='active' AND (source_id = ? OR (provenance LIKE '%alsoSources%'
+      AND json_valid(provenance) AND EXISTS (SELECT 1 FROM json_each(provenance, '$.alsoSources') a WHERE a.type = 'object' AND json_extract(a.value, '$.sourceId') = ?)))
+      ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(r.sourceId, r.sourceId)?.id || null;
   }
 
   /** The MCP `remember` op — store a memory directly. */

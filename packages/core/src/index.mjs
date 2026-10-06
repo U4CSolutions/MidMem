@@ -11,6 +11,7 @@ export { SigmaVerifier } from './verify.mjs';
 export { PolicyEvaluator, GovernanceError, governed, defaultPolicies } from './governance.mjs';
 export { hybridSearch, progressiveSearch, evidenceSufficient } from './retrieval.mjs';
 export { checkGrounding, groundingScore } from './grounding.mjs';
+export { canonicalizeCitation, splitDigestSections } from './sections.mjs';
 export { projectVault } from './project.mjs';
 export { bridgeMemory, walkMarkdown } from './bridge.mjs';
 export { normalizeProject, resolveProjects, projectClause, matchesProject } from './projectaxis.mjs';

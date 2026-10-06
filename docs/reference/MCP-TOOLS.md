@@ -18,6 +18,9 @@ Compile a source file into the knowledge store (extract → tier-store → embed
 | `authority` | string |  | origin trust: operator\|stack\|doc\|web (default doc; operator requires curated:true; never raised downstream) |
 | `source` | object |  | source provenance: sourceUri, canonicalUri, libraryId, docId, captureMethod, capturedAt, site, author, publishedAt, language (strings) |
 | `project` | string |  | project slug this entry belongs to (default: this process's MIDMEM_PROJECT; omit/empty = global) |
+| `sections` | boolean |  | multi-paper digest: ingest the file whole, then every heading section citing exactly one URL (body >= minChars) as its own entry keyed by that citation (arXiv/DOI canonicalized), so a later digest citing the same paper supersedes it; type defaults to research; fewer than minSections distinct citations → the file alone (sectionsSummary.reason not-a-digest) |
+| `minChars` | number |  | sections only: minimum section body length (default 200) |
+| `minSections` | number |  | sections only: minimum distinct single-citation sections for the file to count as a digest (default 2) |
 
 ## `ingest_content`
 
