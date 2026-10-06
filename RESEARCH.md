@@ -1,4 +1,4 @@
-<!-- research-tracker: evaluated-through=2026-09-14T13:05:00Z -->
+<!-- research-tracker: evaluated-through=2026-10-06T00:18:24.870Z -->
 # RESEARCH — midmem-kb-store
 
 Research and architecture decisions behind **midmem-kb-store**, grounded in published work we
@@ -71,7 +71,11 @@ validates one design and opens a gap in another is counted once, under the entry
   supersedes, a secret-shaped citation URL skipped while the rest proceed, a path outside the allowed
   roots denied before any section file is written); the 10-05 digest re-ingested with `--sections` and
   the store searched for "MemAgent" and "URAM" afterwards (the check the `midmem-ingest-review` skill now
-  requires after every digest ingest).
+  requires after every digest ingest). Landed 2026-10-06 as `92ac9e7` (smoke 629 → 667); the 10-05 digest
+  re-ingested with `--sections`: 6 of 6 cited sections became entries (grounding 0.60–0.90, one claim
+  each, `provenance.digestSections` on the index entry); "MemAgent", "URAM", "Error Book" and the
+  61,210 figure are now findable; "Ansatz" still is not (the section summary kept the memory's name,
+  not the agent's) — the index remains an index, the source file remains the evidence.
 
 ### VALIDATION — confirmed by these weeks, no change
 - **Agent Zero Memory** (09-21, carried 09-28) — Ming Wu, Pengyuan Zhu, *Agent Zero Memory:
