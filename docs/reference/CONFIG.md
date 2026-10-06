@@ -64,6 +64,7 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_AUTHORITY` | `enabled: env('AUTHORITY') !== '0',` |
 | `MIDMEM_AUTHORITY_BOOST` | `boost: Number(env('AUTHORITY_BOOST') ?? 0.002), // × (rank − doc) → operator +0.004 … web −0.002` |
 | `MIDMEM_DEFER_CONTRADICTORY` | `deferContradictory: env('DEFER_CONTRADICTORY') !== '0',` |
+| `MIDMEM_CLAIM_CONTRADICTION_MIN_CONTAINMENT` | `contradictionMinContainment: Number(env('CLAIM_CONTRADICTION_MIN_CONTAINMENT') ?? 0.6),` |
 | `MIDMEM_DEFER_AGE_DAYS` | `deferAgeDays: Number(env('DEFER_AGE_DAYS') \|\| 14),` |
 | `MIDMEM_WORK_MEMORY` | `enabled: env('WORK_MEMORY') !== '0',` |
 | `MIDMEM_GUARD_OPAQUE_TASK_LABELS` | `guardOpaqueTaskLabels: env('GUARD_OPAQUE_TASK_LABELS') !== '0',` |
@@ -81,8 +82,9 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_VERBATIM_MAX_CHARS` | `fidelity: { enabled: env('FIDELITY') !== '0', verbatimMaxChars: Number(env('VERBATIM_MAX_CHARS') ?? 4000) },` |
 | `MIDMEM_WORKING_TTL_MS` | `lifecycle: { workingTtlMs: Number(env('WORKING_TTL_MS') \|\| 24 * 3600e3) },` |
 | `MIDMEM_FORGET_CASCADE` | `forget: { cascade: env('FORGET_CASCADE') !== '0' },` |
+| `MIDMEM_SECRET_TEXT_GUARD` | `ingest: { secretTextGuard: env('SECRET_TEXT_GUARD') !== '0' },` |
 | `MIDMEM_AGENT_SCOPE` | `agentScope: env('AGENT_SCOPE') \|\| 'shared',` |
 | `MIDMEM_PROJECT` | `project: normalizeProject(env('PROJECT')),` |
 | `MIDMEM_PROJECT_LIFT` | `liftOnCurated: env('PROJECT_LIFT') !== '0',` |
 
-_78 env knobs._
+_80 env knobs._
