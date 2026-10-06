@@ -2101,13 +2101,13 @@ try {
   const key55a = 'https://docs.example.test/pellumite55-a';
   const before55 = counts55();
   let e55a = null;
-  try { await o.ingestContent({ content: 'The pellumite55 furnace notes list every smelt with its slag weight.', source: { canonicalUri: key55a }, title: 'see https://x.test/a?token=abcdefgh1234' }); } catch (e) { e55a = e; }
+  try { await o.ingestContent({ content: 'The pellumite55 furnace notes list every smelt with its slag weight.', source: { canonicalUri: key55a }, title: 'see https://x.test/a?token=xxxxxxxxxxxx' }); } catch (e) { e55a = e; }
   ok(e55a && e55a.message === 'ingest field title carries a secret-shaped value (credential-bearing url); strip it before ingest' && !fs.existsSync(path.join(o.cfg.contentIngestDir, sha12_55(key55a) + '.md')) && counts55() === before55,
     'a title carrying a token-bearing URL is refused (ingestContent): no content file, no sources row, no entry');
   const file55 = path.join(tmp, 'pellumite55.md');
   fs.writeFileSync(file55, 'The pellumite55 crucible log records the pour temperature of every batch.');
   let e55f = null;
-  try { await o.ingest({ path: file55, type: 'note', title: 'https://x.test/a?token=abcdefgh1234' }); } catch (e) { e55f = e; }
+  try { await o.ingest({ path: file55, type: 'note', title: 'https://x.test/a?token=xxxxxxxxxxxx' }); } catch (e) { e55f = e; }
   ok(e55f && !(e55f instanceof GovernanceError) && /title carries a secret-shaped value/.test(e55f.message) && counts55() === before55, 'the same title through ingest() is refused before governance — nothing written');
   const tok55 = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghijkl';
   const key55b = 'https://docs.example.test/pellumite55-b';
@@ -2117,7 +2117,7 @@ try {
     && !fs.existsSync(path.join(o.cfg.contentIngestDir, sha12_55(key55b) + '.md')) && counts55() === before55, 'source.author "Bearer <jwt>" is refused through ingestContent; the error does not echo the token');
   const probe55 = async (title) => { try { await o.ingestContent({ content: `The pellumite55 probe page for one title check: ${title.length}.`, source: { canonicalUri: 'https://docs.example.test/pellumite55-probe' }, title }); return null; } catch (e) { return e.message; } };
   const refused55 = {
-    'client_secret=Zq8vW2mN4pL6': 'secret-named key=value', 'password=eightchr': 'secret-named key=value', 'https://deploy:hunter22@x.test/a': 'credential-bearing url',
+    'client_secret=xxxxxxxxxxxx': 'secret-named key=value', 'password=eightchr': 'secret-named key=value', 'https://deploy:hunter22@x.test/a': 'credential-bearing url',
     ['ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8']: 'github token', ['github_pat_' + '11ABCDEFG0123456789abcdefghijk']: 'github token', ['xoxb-' + '123456789012-abcdef']: 'slack token',
     ['AKIA' + 'IOSFODNN7EXAMPLE']: 'aws access key id', ['sk-' + 'Abc123Def456Ghi789Jkl012']: 'sk- api key', [tok55]: 'jwt',
   };
@@ -2136,7 +2136,7 @@ try {
     process.env.MIDMEM_SECRET_TEXT_GUARD = '0';
     oOff55 = new Orchestrator({ dbPath: path.join(tmp, 'state.db'), vaultPath: path.join(tmp, 'vault'), llmEnabled: false, sourceRoots: [tmp], autoIngest: { enabled: false, onMaintain: false } });
     if (prev55 === undefined) delete process.env.MIDMEM_SECRET_TEXT_GUARD; else process.env.MIDMEM_SECRET_TEXT_GUARD = prev55;
-    const off55 = await oOff55.ingestContent({ content: 'The pellumite55 off-switch page keeps the furnace roster.', source: { canonicalUri: key55a }, title: 'see https://x.test/a?token=abcdefgh1234' });
+    const off55 = await oOff55.ingestContent({ content: 'The pellumite55 off-switch page keeps the furnace roster.', source: { canonicalUri: key55a }, title: 'see https://x.test/a?token=xxxxxxxxxxxx' });
     ok(oOff55.cfg.ingest.secretTextGuard === false && off55.success && !off55.skipped, 'MIDMEM_SECRET_TEXT_GUARD=0 → the token-bearing title passes');
     oCfg55 = new Orchestrator({ dbPath: path.join(tmp, 'state.db'), vaultPath: path.join(tmp, 'vault'), llmEnabled: false, sourceRoots: [tmp], autoIngest: { enabled: false, onMaintain: false }, ingest: { secretTextGuard: false } });
     const offA55 = await oCfg55.ingestContent({ content: 'The pellumite55 cfg-off page lists the ore lots.', source: { canonicalUri: key55b, author: `Bearer ${tok55}` } });
@@ -2294,7 +2294,7 @@ try {
     ok(JSON.parse(srow57(a2_57.entry).metadata).digest?.path === canonF57b, "the superseding section records the later digest's path");
 
     // A section whose only URL carries a secret-shaped parameter is refused; the others ingest.
-    const tok57 = 'https://x.test/p?token=abcdefgh1234';
+    const tok57 = 'https://x.test/p?token=xxxxxxxxxxxx';
     const f57c = path.join(dir57, 'plovern57-weekly.md');
     fs.writeFileSync(f57c, mkDigest57('Plovern57 digest', [['Plovern57 shard maps', 'https://arxiv.org/abs/2610.05626', body57('Plovern57', 40)], ['Sallowick57 replay', 'https://arxiv.org/abs/2610.05637', body57('Sallowick57', 6)], ['Ondrel57 mirror', `Mirror copy: ${tok57}`, body57('Ondrel57', 2)]]));
     const canonF57c = fs.realpathSync(f57c);
