@@ -26,6 +26,129 @@ what the marker at the top has not yet evaluated.
 
 ---
 
+## 2026-10-05 — Weeks of 2026-09-21, 2026-09-28 and 2026-10-05: write cheaply and keep the evidence; evolve policy only behind gates; route across memories instead of unifying them
+
+Three weekly reports evaluated together (none has a vault digest; the digest step was skipped):
+`ingest-staging/llmwiki-weekly-2026-09-21/report.md` (ingested 2026-09-23, grounding 0.917, 0 quarantined),
+`…-2026-09-28/report.md` (2026-10-02, grounding 0.69 — the lowest of the series, above the 0.4 re-ingest
+line) and `…-2026-10-05/report.md` (2026-10-05, grounding 0.864, 0 quarantined; entry
+`memory-muv91862-06e277892ce6`). Fourteen papers are cited; every arXiv id was fetched from the arXiv
+API and the digests' figures were read against the abstracts. Five already carry a verdict and keep it:
+RippleMem [2608.13334](https://arxiv.org/abs/2608.13334) (#25), Procedural Graphs
+[2609.09153](https://arxiv.org/abs/2609.09153) (2026-09-11 entry), LLM-Wiki
+[2605.25480](https://arxiv.org/abs/2605.25480) (the founding bet, 2026-08-10), WikiSkill
+[2608.27454](https://arxiv.org/abs/2608.27454) (2026-10-03 entry), and the LLM-Wiki carry-over in all
+three reports. Two store facts shaped this evaluation: (1) the 09-28 ingest's RRSI claim had inverted the
+paper ("reducing out-of-distribution performance by up to 4.7 points"; the abstract reports *gains* of
+up to 4.7 points out of distribution) and was superseded on 2026-10-02 by a claim read from the abstract
+(`claim-muq83sv7-551db3205192`) — the digest is a paraphrase, the abstract is the source; (2) the six-paper
+10-05 report produced one 430-character summary, eight concepts and one claim, and the name MemAgent
+appeared nowhere in the store while the grounding score read 0.864 — the ADOPT NOW entry below.
+Verdicts: 1 ADOPT NOW · 7 VALIDATION · 5 BACKLOG · 3 NOT ADOPTING (one paper, one verdict; a paper that
+validates one design and opens a gap in another is counted once, under the entry that names both).
+
+### ADOPT NOW — a multi-paper digest is ingested per cited section, so paper-level facts survive the summary
+- **Paper (2026-10-05 report):** Mitchell Piehl, Muchao Ye, *MemFit: Efficient Long-Term Agentic Memory* —
+  arXiv [2610.00872](https://arxiv.org/abs/2610.00872) (submitted 2026-10-01; cs.AI).
+- **Finding:** every turn is stored verbatim in an append-only store with LLM-free insertion, and segment
+  summaries *index* the turns rather than replace them; retrieval is LLM-free too (lexical + semantic
+  signals, cross-encoder reranking over caption-augmented episodes). State of the art on LoCoMo,
+  MemGallery and LongMemEval-S while memory construction time and cost fall "several-fold" (the abstract
+  gives no finer number). The lesson that matters to us: a summary written at ingest is an index, and an
+  index that *replaces* its source loses exactly the facts a later question asks for.
+- **Decision:** measured on 2026-10-05, MidMem's ingest keeps a summary, grounded concepts and grounded
+  claims plus the source path — for a six-paper digest that was 430 characters, eight concepts and one
+  claim; "MemAgent", "URAM", "Ansatz", "Error Book" and DyadMem's sizes were retrievable by neither stack.
+  Adopted (`midmem-dev`, 2026-10-05): `midmem ingest <path> --sections` (orchestrator `ingestSections`, MCP
+  `ingest` with `sections:true`): a deterministic split on markdown headings, every section that cites
+  exactly one URL is ingested through the same grounded path as its own entry, keyed by the canonical
+  citation (arXiv ids normalised to `https://arxiv.org/abs/<id>`, versions stripped) so a paper cited by a
+  later week supersedes its earlier section entry instead of duplicating it, and the digest entry stays as
+  the index with links to its sections. Not adopted: MidMem as the verbatim evidence archive — that is the
+  library's job (#49, the KB Article Library); the core keeps the index and the path to the file.
+- **Validation:** smoke assertions for the split (one-citation sections ingested, two-citation and short
+  sections skipped with a reason, re-run skipped as unchanged, a later digest citing the same id
+  supersedes, a secret-shaped citation URL skipped while the rest proceed, a path outside the allowed
+  roots denied before any section file is written); the 10-05 digest re-ingested with `--sections` and
+  the store searched for "MemAgent" and "URAM" afterwards (the check the `midmem-ingest-review` skill now
+  requires after every digest ingest).
+
+### VALIDATION — confirmed by these weeks, no change
+- **Agent Zero Memory** (09-21, carried 09-28) — Ming Wu, Pengyuan Zhu, *Agent Zero Memory:
+  Provenance-Aware Long-Term Memory for LLM Agents* — arXiv [2608.29606](https://arxiv.org/abs/2608.29606).
+  Three parallel memories (an episodic events timeline, an entity-event graph, a curated, citation-locked
+  documentary memory), every learned item a provenanced item with origin, timestamp and evidence pointer,
+  and every answer read under a citation lock so it can cite only evidence its reader opened; 95.60%
+  LongMemEval and 93.60% LoCoMo (+0.73 / +1.10 over the strongest prior systems); across eight backbones
+  accuracy varies by 3.4 points while cost varies ~30×. Validates the design MidMem already runs: entries +
+  claims + concept graph + work events + the projected wiki as parallel views of one `state.db`, the
+  provenance chain on every entry and claim (#10 authority at origin), grounding-before-persist, and
+  the sufficiency gate as the intent gate (#19). The "memory-driven, not model-driven, quality" result is
+  the argument for the small-model extraction path we run.
+- **ScrubJay-MEM** (09-21) — Kartikey Singh Bhandari, Aarya Wadhwani, Dhruv Kumar, Pratik Narang, *Caching
+  for the Future: Scrub Jay Episodic Memory Principles for Agent Memory Systems* — arXiv
+  [2608.04746](https://arxiv.org/abs/2608.04746). Per-memory, type-conditioned temporal decay (a
+  perishability coefficient and a utility horizon per memory) is *necessary* for temporal generalisation:
+  only retrieval system with substantially positive GenGap (+0.108) on their Temporal Generalization
+  Test, F1 +2.66 over Mem0 and +3.09 over Qwen3-Embedding-4B on EventQA-64k, and a decay ablation collapses
+  GenGap 5.7×; gains narrow under stronger backbones and reverse on fact-consolidation tasks. Validates
+  #47 (pack-declared lease per entry type: a research paper keeps a 180-day lease, a work event a short
+  one) together with the P3 temporal boosts and retrieval-renewed leases — decay by type, refreshed by
+  use, history never deleted (#43). Their scoping caveat is ours too: the lease is a retrieval signal,
+  never a judgment.
+- **MemRL** (09-21) — Shengtao Zhang, Jiaqian Wang, Ruiwen Zhou et al., *MemRL: Self-Evolving Agents via
+  Runtime Reinforcement Learning on Episodic Memory* — arXiv [2601.03192](https://arxiv.org/abs/2601.03192).
+  Similarity-matched episodic memory retrieves noise; a second phase selects by utility learned from
+  environmental feedback (HLE, BigCodeBench, ALFWorld, Lifelong Agent Bench; the abstract gives no numbers).
+  Validates the lifecycle rule that promotion is earned by use and feedback (`retrieval_count`,
+  `helpful_count`, `trust_score`, the `feedback` op), never by similarity alone. The RL part is the
+  NOT ADOPTING item below.
+- **Harness as a Language (JAZ)** (09-28) — Zhening Li, Joshua Liu, Mateja Vukelic et al., *Harness as a
+  Language: A Minimalist Agent Framework With Maximal Expressivity* — arXiv
+  [2609.26891](https://arxiv.org/abs/2609.26891). A single recursive `invoke` primitive with runtime
+  variables as the only state beats Letta (MemGPT) by 8% at half the cost on the recall-heavy part of
+  StuLife and ACE by 4% at lower cost on AppWorld. The lesson the digest draws — execution-local state
+  belongs in runtime variables and checkpoints, durable memory only for what must survive a session, a
+  model or a host — is #44 (the `working` function never promotes and expires on its own lease) and the
+  reason the hook seam records work *events*, not transcripts.
+- **RRSI** (09-28) — Peng Xia, Rujun Han, Zifeng Wang et al. (Google Research), *RRSI: Regularized Recursive
+  Self-Improvement of Agent Harnesses* — arXiv [2609.24972](https://arxiv.org/abs/2609.24972). Unregularised
+  harness evolution memorises its training split; a budgeted proposer plus a critic and pruner keep
+  reusable mechanisms: up to +14.1 points on the evolution split, up to +4.7 on five out-of-distribution
+  benchmarks, 30% fewer policy tokens. Validates #35 — a retrieval or ranking change ships only through
+  the protected bench slices and the PROMOTE/FLAG/REJECT verdict — and the rule that policy lives in
+  `MIDMEM_*` knobs and pack versions, separately from content. The out-of-distribution half amends #37
+  (backlog table): the bench has no held-out slice yet, so a policy can still overfit the fixtures it is
+  gated on.
+- **Continual Graph Memory / Ansatz** (10-05) — Junyi Zhang, Jinxi Yu, Eric Hanchen Jiang et al.,
+  *Continual Graph Memory for Mathematical Research Agents* — arXiv
+  [2610.02945](https://arxiv.org/abs/2610.02945). A graph of facts, plans, counterexamples, intermediate
+  results, dependencies and lessons; dependency-aware retrieval; an evidence-sensitive curator; and
+  *scoped recall* that surfaces earlier statements and negative findings "for local re-proving rather than
+  uncritical reuse" — closure on all ten First Proof Second Batch problems (prose for our purposes).
+  Validates negative knowledge as first-class in MidMem: `dead_end` work events, the `dead-end-avoided`
+  bench slice, Failed Attempts in the record skill, and labelled historical reads (#43) as the scoped-recall
+  discipline ("previously observed; verify locally").
+- **MemAgent** (10-05) — Yongxian Wei, Yilin Zhao, Runxi Cheng et al., *MemAgent: Learning to Manage
+  Heterogeneous Memory Providers for LLM Agents* — arXiv [2609.32521](https://arxiv.org/abs/2609.32521).
+  Thirteen memory methods evaluated; none generalises across benchmarks; routing across providers
+  (content-aware probing before retrieval, short-term gating, selective multi-provider storage) lifts
+  average accuracy by 10.0% on GAIA, WebWalkerQA and xBench-DS with under 0.3% routing overhead and 12%
+  fewer task steps. Validates the rule-based router MidMem already has — sufficiency-gated stages, the
+  library lane asked only at the deep stage (#49), pre-turn recall never calling a provider unless
+  configured — and the decision to keep the library a separate system rather than one universal store.
+  The learned router is the NOT ADOPTING item below.
+
+### BACKLOG and NOT ADOPTING from these weeks → the tables at the end
+DyadMem [2610.03020](https://arxiv.org/abs/2610.03020) (relational memory function; delete / suppress
+bench slice; **#52**), LAM [2610.02488](https://arxiv.org/abs/2610.02488) (memory economics in the op log;
+amends **#23**), LycheeMemory V2 [2608.12990](https://arxiv.org/abs/2608.12990) (episode-boundary
+consolidation of working memory; **#53**), RSIAgent [2609.15364](https://arxiv.org/abs/2609.15364)
+(verify-then-freeze procedures by version; amends **#27**), RRSI's held-out slice (amends **#37**).
+Not adopting: a learned memory-management policy (AgeMem [2601.01885](https://arxiv.org/abs/2601.01885),
+MemRL, MemAgent's trained router), MidMem as the verbatim evidence archive (MemFit), and a "Memory Harness
+Registry" as a new subsystem (the 09-28 recommendation).
+
 ## 2026-10-03 — Operator-named paper: a persistent wiki between raw experience and executable skills
 
 Named by the operator (`/midmem-ingest-review https://arxiv.org/abs/2608.27454`); not in the store or
@@ -590,6 +713,11 @@ Evidence: numbers (benchmark / controlled result) or prose (the source gives no 
 
 | Paper | Finding that matters | Candidate | Roadmap # | Effort | Evidence | Blocker / note |
 |---|---|---|---|---|---|---|
+| DyadMem [2610.03020](https://arxiv.org/abs/2610.03020) | memory about *how this agent works with this user* is a category of its own (URAM); Gold-Memory QA strong, Full-Pipeline QA drops sharply across 16 open-weight + 4 proprietary models; low capture recall and unsafe deletion even in frontier LLMs; 3,065 episodes / 50,961 sessions / 61,210 QA | a `relational` value on the function axis (today: working · episodic · semantic · procedural · prospective) with its own lease and inject framing; a delete / suppress bench slice (forget must not leave a derived claim live — #41's cascade, measured) | **#52** | M | numbers | none; the capture side already records per-user events, the axis value and the slice are core work |
+| LAM [2610.02488](https://arxiv.org/abs/2610.02488) | harness resources are the cost: context–memory traffic, access pattern, stored state vs recomputation, verification, checkpoint interval (a resource theory with tight bounds; experiments on chained MATH tasks) | the op log records ingest duration + extraction tokens and per-query retrieval cost; `brief` reports recomputation avoided (dedup skips, linked duplicates) beside the fallback share | **#23** (ledger half, amended) | S | theory + controlled experiments; prose for our metrics | none |
+| LycheeMemory V2 [2608.12990](https://arxiv.org/abs/2608.12990) | consolidating semantic segments instead of every turn keeps 89.22% LoCoMo / 92.20% LongMemEval-S while cutting construction tokens 86.0% / 75.9% vs A-Mem, with no extra query-time tokens | `consolidateWork` batches working entries at an episode boundary (session end, project transition) instead of per event; boundary detection deterministic (event kinds + time gap), no LLM | **#53** | M | numbers | depends on #18's episode boundary |
+| RSIAgent [2609.15364](https://arxiv.org/abs/2609.15364) | reusable causal rules (action, condition, consequence) are built by explore → verify → freeze and reused without weight updates (OSWorld-v2, Agent's Last Exam; the abstract gives no numbers) | procedure candidates (#27) carry a verification record before promotion and are superseded by version, never mutated in place (entries already supersede on re-ingest; claims already `supersede`) | **#27** (amended) | S | prose | none |
+| RRSI [2609.24972](https://arxiv.org/abs/2609.24972) (held-out half) | harness evolution overfits its evolution split (+14.1 in-distribution vs +4.7 out of distribution) | a held-out bench slice the PROMOTE verdict must also pass, beside the K seeded permutations | **#37** (amended) | S | numbers | none |
 | WikiSkill [2608.27454](https://arxiv.org/abs/2608.27454) | a persistent, never-rolled-back knowledge layer between immutable traces and executable skills lifts skill evolution (+15.0 avg with Proposer wiki access; beats the strongest baseline by 3.3–12.0 points per model); a harness-written impact ledger (target · diff · validation score · verdict) stops re-proposing rejected edits; `PURPOSE.md` traces each skill to its motivating patterns | #31 structured outcome fields `target · delta · score · verdict` + `agent:{model,harness}`; #22 `motivated_by` edges to entry ids; #27 recurring-*failure* signatures; #32 superseded motivating claim flags its procedures | **#31** (spec), **#22**, **#27**, **#32** (amend) | S each; #32 blocked | numbers (five benchmarks × five models, four-way ablation) | #32's extension waits on the `findByText` stale-path flagger fix (2026-10-02: 196 nodes flagged by one supersede); Maintainer/Proposer LLM loops stay consumer-side |
 | RD-Forget [2609.10263](https://arxiv.org/abs/2609.10263) | forgetting for answering ≠ deleting history; a query-conditioned view suppresses superseded values that stay historically retrievable | `statuses`/`asOf` through the lanes + a `historical` query mode (claims already have this split; entries hardcode `status='active'`) | **#43 ✅ 2026-09-16** | S | prose | shipped; no schema change |
 | LifeFuse-Mem [2609.12436](https://arxiv.org/abs/2609.12436) | transient context must not overwrite durable knowledge by recency; lifecycle is an axis beyond retention | enforce the declared `working` contract: lease-bound, never promoted, excluded from default reads, never supersedes a durable entry | **#44 ✅ 2026-09-16** | S–M | prose | shipped; the doc-vs-code discrepancy is closed |
@@ -641,3 +769,14 @@ Evidence: numbers (benchmark / controlled result) or prose (the source gives no 
   carries the same-slot replacement link.
 - **Feature flags as a new mechanism** — D²ACCI [2608.17756](https://arxiv.org/abs/2608.17756): `MIDMEM_*`
   env already gates every behavior.
+- **A learned memory-management policy** — AgeMem [2601.01885](https://arxiv.org/abs/2601.01885) (memory ops as
+  agent actions under a GRPO-trained policy), MemRL [2601.03192](https://arxiv.org/abs/2601.03192) (utility
+  learned by runtime RL), MemAgent [2609.32521](https://arxiv.org/abs/2609.32521) (a trained router): MidMem
+  exposes the same operations as tools (46 MCP tools) and routes by deterministic rules; promotion is earned
+  by use and feedback, never by a learned or LLM judgment (the founding discipline, DELEGATE-52).
+- **MidMem as the verbatim evidence archive** — MemFit [2610.00872](https://arxiv.org/abs/2610.00872): the
+  core stays light; verbatim text lives in the library system (#49) and the source file, the core keeps the
+  index (summary, concepts, claims, per-section entries) and the path.
+- **A "Memory Harness Registry" as a new subsystem** — the 2026-09-28 digest's recommendation: `MIDMEM_*`
+  knobs, the pack version ledger (#47) and the bench verdict (#35) already version policy apart from
+  content and gate its promotion; a registry object would duplicate them.
