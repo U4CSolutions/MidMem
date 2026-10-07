@@ -735,6 +735,14 @@ export class Orchestrator {
    * Curated knowledge is never rewritten: an entry in a curated-only tier (wisdom) or with operator
    * authority is `skipped.denied` (the run is uncurated, and the gate is told so), as is a source path
    * the gate refuses — checked BEFORE the file is opened.
+   * The ingest boundary guards (2026-10-05) hold here too: a row whose stored identity a fresh ingest
+   * would refuse — a secret-shaped `title` (sources row) or `provenance.source.author` (the free-text
+   * guard, MIDMEM_SECRET_TEXT_GUARD=0 disables) or a credential-bearing source/canonical URI — is
+   * `skipped.denied`, so reextract never re-writes (claims carry the title) what ingest now refuses.
+   * The source is read through its canonical path (resolved + realpath'd, as ingest records it) and
+   * every row this writes (claims, graph nodes/edges, the chain step, the log) records that form; the
+   * sources row itself is not rewritten (identity stays what ingest stored). An entry archived by id
+   * (or superseded) is no longer active and is never selected.
    *
    * It writes ONLY when the extractor really answered (mode 'lmstudio') and the embedder did too —
    * otherwise the entry is left exactly as it was and counted `skipped.fallback`. A model that is DOWN
@@ -813,7 +821,14 @@ export class Orchestrator {
     // Never curated: an uncurated run cannot satisfy a curated-only tier or operator authority.
     const gateCtx = (e, s) => ({ path: s.path, type: s.type, scope: e.scope, curated: false, authority: normalizeAuthority(e.provenance?.authority) || 'doc', project: e.project ?? null, tier: e.tier, reextract: e.id });
     const curatedRow = (e) => !!this.memory.tier(e.tier)?.curatedOnly || normalizeAuthority(e.provenance?.authority) === 'operator';
-    const allowed = (e, s) => !curatedRow(e) && this.gov.evaluator.evaluate('ingest', gateCtx(e, s)).allow;
+    // The ingest boundary guards on the stored identity (secret-shaped title / author / source URIs).
+    const guardText = this.cfg.ingest?.secretTextGuard !== false;
+    const secretRow = (e, s) => {
+      const src = e.provenance?.source || {};
+      for (const k of ['sourceUri', 'canonicalUri']) { if (typeof src[k] === 'string') { try { refuseSecretsInUri(k, src[k]); } catch { return true; } } }
+      return guardText && !!(secretTextKind(s.title) || secretTextKind(src.author));
+    };
+    const allowed = (e, s) => !curatedRow(e) && !secretRow(e, s) && this.gov.evaluator.evaluate('ingest', gateCtx(e, s)).allow;
     // Per-entry failures (the last one per entry, newer than its last extraction) from the log.
     const lastFail = new Map();
     for (const r of this.db.prepare("SELECT json_extract(detail,'$.entry') entry, MAX(ts) ts FROM log WHERE operation='reextract-attempt' AND json_valid(detail) GROUP BY 1").all()) {
@@ -831,7 +846,7 @@ export class Orchestrator {
       if (!allowed(e, s)) { skipped.denied++; continue; }
       const failed = failedAt(e);
       if (failed && !retryFailed && now - Date.parse(failed) < REEXTRACT_RETRY_MS) { skipped.retryLater++; continue; }
-      const r = await readSource(s.path);
+      const r = await readSource(canonicalPath(s.path));
       if (r.error) { skipped[r.error]++; continue; }
       if (sha12(r.text) !== s.hash) { skipped.changed++; continue; }
       eligible.push({ id, failed: failed || '' });
@@ -852,7 +867,8 @@ export class Orchestrator {
       const s = e?.source_id ? srcRow.get(e.source_id) : null;
       if (!s) { out.remaining--; skipped[e ? 'missing' : 'deleted']++; continue; } // hard-deleted meanwhile
       if (!allowed(e, s)) { out.remaining--; skipped.denied++; continue; } // gate first, then the re-read
-      const r = await readSource(s.path); // re-read: the file may have moved on since classification
+      const canon = canonicalPath(s.path); // resolved after the gate, as ingest does
+      const r = await readSource(canon); // re-read: the file may have moved on since classification
       if (r.error || sha12(r.text) !== s.hash) { out.remaining--; skipped[r.error || 'changed']++; continue; }
       calls++;
       const ex = await this.extractor.extract(r.text, s.type);
@@ -865,11 +881,11 @@ export class Orchestrator {
       if (reason) {
         out.remaining--; skipped.fallback++;
         if (reextractModelDown(reason)) { out.stopped = { id, reason }; break; }
-        this.db.logOp('reextract-attempt', { entry: id, path: s.path, reason, model: this.cfg.extractModel ?? null });
+        this.db.logOp('reextract-attempt', { entry: id, path: canon, reason, model: this.cfg.extractModel ?? null });
         continue;
       }
       let res;
-      try { res = await this.#reextractOne(id, { text: r.text, source: s, ex, emb, ctx: gateCtx(e, s), all }); }
+      try { res = await this.#reextractOne(id, { text: r.text, source: s, canon, ex, emb, ctx: gateCtx(e, s), all }); }
       catch (err) {
         if (err instanceof GovernanceError) res = { skip: 'denied' };
         else { out.stopped = { id, reason: 'error', message: String(err?.message || err).slice(0, 300) }; break; } // stays in `remaining`
@@ -887,8 +903,8 @@ export class Orchestrator {
 
   /** One in-place re-extraction (see `reextract`): the governed write. Re-checks the row inside the
    *  transaction (another process may have forgotten, superseded or re-extracted it meanwhile). */
-  async #reextractOne(id, { text, source: s, ex, emb, ctx, all }) {
-    const path = s.path;
+  async #reextractOne(id, { text, source: s, canon, ex, emb, ctx, all }) {
+    const path = canon; // canonical source identity: what every row written here records
     const gcfg = this.cfg.grounding || {};
     const minOverlap = gcfg.enabled === false ? 0 : (gcfg.minOverlap ?? 0.5);
     const gc = checkGrounding(text, ex.concepts, (c) => c.name, minOverlap);
@@ -952,8 +968,10 @@ export class Orchestrator {
           for (const x of star(cs)) keepEdges.add(x);
         }
         let edgesRemoved = 0, nodesRemoved = 0, conceptsFlagged = 0;
-        const delEdge = this.db.prepare('DELETE FROM edges WHERE id=? AND source=?');
-        for (const x of new Set(star(oldC))) if (!keepEdges.has(x)) edgesRemoved += delEdge.run(x, path).changes;
+        // Old edges carry the spelling their ingest stored (the sources row's path) or, after an earlier
+        // reextract, the canonical one.
+        const delEdge = this.db.prepare('DELETE FROM edges WHERE id=? AND source IN (?, ?)');
+        for (const x of new Set(star(oldC))) if (!keepEdges.has(x)) edgesRemoved += delEdge.run(x, s.path, path).changes;
         for (const nodeId of new Set(oldC.map(nid))) {
           if (keepNodes.has(nodeId)) continue;
           const n = this.graph.node(nodeId);

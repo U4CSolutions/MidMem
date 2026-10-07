@@ -2734,6 +2734,127 @@ try {
     }
   }
 
+  // 59c. Re-extraction under main's review guards (2026-10-07 reconcile of main — canonical source
+  //      identity, the title/author secret guard, archive by id, ingest --sections — with the KC
+  //      reextract line): the source is read and recorded through its canonical path (a legacy row
+  //      stored under a symlink alias keeps its sources row; its alias edges are replaced); a row whose
+  //      stored title / author / source URI a fresh ingest would refuse is skipped.denied and left
+  //      untouched (MIDMEM_SECRET_TEXT_GUARD=0 lifts the text guard, never the URI one); an entry
+  //      archived by id is not selected, also when archived during the model call; archiving a
+  //      reextracted entry by id cascades to the claims reextract wrote; a sectioned digest keeps its
+  //      digestSections link and its sections keep captureMethod digest-section.
+  {
+    const { startFakeOpenAI } = await import('./helpers/fake-openai.mjs');
+    const fake = await startFakeOpenAI({ dim: 16 });
+    fake.state.grounded = (t) => [...new Set(t.toLowerCase().match(/\b[a-z]{8,}\b/g) || [])].slice(0, 2);
+    const dirC = path.join(tmp, 'r59c');
+    fs.mkdirSync(path.join(dirC, 'real'), { recursive: true });
+    fs.symlinkSync(path.join(dirC, 'real'), path.join(dirC, 'alias'));
+    const LC = 'kc-59c';
+    let oC = null;
+    try {
+      oC = new Orchestrator({ dbPath: path.join(dirC, 'state.db'), vaultPath: path.join(dirC, 'vault'), contentIngestDir: path.join(dirC, 'content'), llmEnabled: false, llmEndpoint: fake.url, embedModel: 'stub-embed', extractModel: 'stub/extract-1', llmTimeoutMs: 5000, sourceRoots: [dirC], autoIngest: { enabled: false, onMaintain: false } });
+      const off = async (fn) => { oC.cfg.llmEnabled = false; try { return await fn(); } finally { oC.cfg.llmEnabled = true; } };
+      const ingC = (docId, text, extra = {}) => off(async () => (await oC.ingestContent({ content: text, source: { libraryId: LC, docId, canonicalUri: `https://news.example.test/59c/${docId}`, ...extra }, type: 'web-article', authority: 'web' })).entry.id);
+      const knowC = (id) => JSON.stringify(oC.db.prepare('SELECT content, concepts, provenance, updated_at FROM entries WHERE id=?').get(id));
+      const claimsOf = (id) => oC.db.prepare("SELECT id, status, source, provenance, metadata FROM claims WHERE json_extract(source,'$.sourceId') = (SELECT source_id FROM entries WHERE id=?) ORDER BY id").all(id)
+        .map((c) => ({ ...c, source: JSON.parse(c.source), provenance: JSON.parse(c.provenance || '{}'), metadata: JSON.parse(c.metadata || '{}') }));
+
+      // Canonical identity: a legacy row stored under the symlink alias (as ingest did before main's
+      // 2026-10-05 guard — simulated by rewriting the canonical spellings back to the alias).
+      const realDir = fs.realpathSync(path.join(dirC, 'real'));
+      const aliasFile = path.join(dirC, 'alias', 'harbour.md'), realFile = path.join(realDir, 'harbour.md');
+      fs.writeFileSync(realFile, 'Gullmarsh Harbour Pilots and Tidewater Dredgers widened the northern channel during spring. Pilots reported smoother container approaches afterwards. The dredging contract runs until autumn.');
+      const canonIng = await off(() => oC.ingest({ path: aliasFile, type: 'note' }));
+      const H = canonIng.entry.id;
+      const hSrc = oC.db.prepare('SELECT s.id, s.path FROM entries e JOIN sources s ON s.id = e.source_id WHERE e.id=?').get(H);
+      ok(hSrc.path === realFile, 'fixture: ingest through a symlink alias records the canonical path');
+      oC.db.prepare('UPDATE sources SET path=? WHERE id=?').run(aliasFile, hSrc.id);
+      oC.db.prepare('UPDATE edges SET source=? WHERE source=?').run(aliasFile, realFile);
+      oC.db.prepare('UPDATE nodes SET source=? WHERE source=?').run(aliasFile, realFile);
+      oC.db.prepare("UPDATE claims SET source=json_set(source,'$.path',?) WHERE json_extract(source,'$.sourceId')=?").run(aliasFile, hSrc.id);
+      const aliasEdges0 = oC.db.prepare('SELECT COUNT(*) c FROM edges WHERE source=?').get(aliasFile).c;
+      ok(aliasEdges0 > 0 && claimsOf(H).length > 0, `fixture: the legacy row's edges (${aliasEdges0}) and claims carry the alias spelling`);
+
+      // Secret guard on the stored identity: a title, an author, a source URI a fresh ingest would refuse.
+      const S1 = await ingC('sec-title', 'Brindlecombe orchard cooperative pressed a record cider harvest this October. Growers credited the mild spring for heavier fruit.');
+      oC.db.prepare('UPDATE sources SET title=? WHERE id=(SELECT source_id FROM entries WHERE id=?)').run('deploy notes client_secret=xxxxxxxxxxxx', S1);
+      const S2 = await ingC('sec-author', 'Saltcombe wetland rangers counted migrating godwits along the tidal flats. Volunteers logged every flock at dawn.', { author: 'Ann Example' });
+      oC.db.prepare("UPDATE entries SET provenance=json_set(provenance,'$.source.author',?) WHERE id=?").run('Ann password=xxxxxxxxxxxx', S2);
+      const S3 = await ingC('sec-uri', 'Marrowford library extended its weekday opening hours for exam season. Students welcomed quieter study rooms upstairs.');
+      oC.db.prepare("UPDATE entries SET provenance=json_set(provenance,'$.source.sourceUri',?) WHERE id=?").run('https://news.example.test/59c/sec-uri?token=xxxxxxxxxxxx', S3);
+      // Archive by id: one entry archived before the run, one archived while its model call is in flight.
+      const A1 = await ingC('arch-before', 'Copperford railway museum restored a steam locomotive built for mountain freight. Volunteers rebuilt the boiler over three summers.');
+      const A2 = await ingC('arch-during', 'Thistleford ferry operators trialled a battery hybrid crossing between the islands. Passengers noticed quieter engines.');
+      const P = await ingC('plain', 'Lanternmoor observatory catalogued fourteen variable stars during the winter campaign. Astronomers compared brightness curves.');
+      const arA1 = await oC.archiveEntries({ ids: [A1], reason: 'misfiled' });
+      ok(arA1.archived.length === 1 && oC.recall(A1).status === 'archived', 'fixture: arch-before archived by id');
+      const secretsBefore = [S1, S2, S3].map(knowC);
+
+      const dryC = await oC.reextract({ libraryId: LC, dryRun: true });
+      ok(dryC.skipped.denied === 3 && dryC.skipped.notSelected === 1 && JSON.stringify(dryC.entries.map((e) => e.docId).sort()) === '["arch-during","plain"]',
+        `secret-shaped stored title / author / source URI → skipped.denied; an archived entry → notSelected (${JSON.stringify(dryC.skipped)})`);
+      oC.cfg.ingest = { ...(oC.cfg.ingest || {}), secretTextGuard: false };
+      const dryOff = await oC.reextract({ libraryId: LC, dryRun: true });
+      ok(dryOff.skipped.denied === 1 && JSON.stringify(dryOff.entries.map((e) => e.docId).sort()) === '["arch-during","plain","sec-author","sec-title"]',
+        'MIDMEM_SECRET_TEXT_GUARD=0 lifts the title/author guard for reextract as for ingest; the credential-bearing URI stays denied');
+      oC.cfg.ingest = { ...oC.cfg.ingest, secretTextGuard: true };
+
+      // The real run; arch-during is archived by id while its extraction is in flight.
+      const ext = oC.extractor.extract.bind(oC.extractor);
+      oC.extractor.extract = async (text, type) => { const r = await ext(text, type); if (text.startsWith('Thistleford')) await oC.archiveEntries({ ids: [A2], reason: 'race' }); return r; };
+      const a2Before = oC.db.prepare('SELECT content, concepts FROM entries WHERE id=?').get(A2);
+      const runC = await oC.reextract({ libraryId: LC });
+      oC.extractor.extract = ext;
+      ok(runC.reextracted === 1 && runC.entries[0].docId === 'plain' && runC.skipped.denied === 3 && runC.skipped.notSelected === 2
+        && runC.examined === runC.reextracted + Object.values(runC.skipped).reduce((a, b) => a + b, 0) + runC.remaining,
+        `the run rewrites only the plain entry; the one archived mid-call counts notSelected (${JSON.stringify(runC.skipped)})`);
+      const a2 = oC.recall(A2);
+      ok(a2.status === 'archived' && a2.provenance.archivedBy?.reason === 'race' && JSON.stringify(oC.db.prepare('SELECT content, concepts FROM entries WHERE id=?').get(A2)) === JSON.stringify(a2Before) && a2.provenance.extraction?.mode === 'fallback',
+        'an entry archived by id during its model call is left exactly as archived (no in-place rewrite)');
+      ok(JSON.stringify([S1, S2, S3].map(knowC)) === JSON.stringify(secretsBefore), 'denied secret-shaped rows are untouched (content, concepts, provenance, updated_at)');
+
+      // Archive by id after a reextract: the cascade reaches the claims reextract wrote.
+      const pClaims = claimsOf(P).filter((c) => c.status === 'active' || c.status === 'verified');
+      ok(pClaims.length > 0 && pClaims.every((c) => c.metadata.reextractOf?.entry === P), 'fixture: the plain entry\'s live claims are the reextracted ones');
+      const arP = await oC.archiveEntries({ ids: [P], reason: 'obsolete' });
+      const pAfter = claimsOf(P).filter((c) => pClaims.some((x) => x.id === c.id));
+      ok(arP.cascade.claimsArchived === pClaims.length && pAfter.every((c) => c.status === 'archived' && c.metadata.archivedBy?.reason === 'source-archived' && c.metadata.reextractOf?.entry === P),
+        'archive by id of a reextracted entry cascades to the claims reextract wrote (reason source-archived, lineage kept)');
+
+      // Canonical identity on the legacy alias row (no library: every active ingested entry).
+      const runH = await oC.reextract({});
+      const h = oC.recall(H);
+      const hClaims = claimsOf(H).filter((c) => c.status === 'active' || c.status === 'verified');
+      const hLog = oC.db.prepare("SELECT detail FROM log WHERE operation='reextract' AND json_extract(detail,'$.entry')=?").get(H);
+      ok(runH.entries.some((e) => e.id === H) && h.provenance.extraction?.mode === 'lmstudio' && h.provenance.chain.at(-1).step === 'reextract' && h.provenance.chain.at(-1).source === realFile
+        && hClaims.length > 0 && hClaims.every((c) => c.source.path === realFile && c.provenance?.chain?.[0]?.source === realFile) && JSON.parse(hLog.detail).path === realFile,
+        'reextract of a legacy alias row reads and records the canonical path (chain step, claims, log)');
+      ok(oC.db.prepare('SELECT path FROM sources WHERE id=?').get(hSrc.id).path === aliasFile && oC.db.prepare('SELECT COUNT(*) c FROM edges WHERE source=?').get(aliasFile).c === 0
+        && oC.db.prepare('SELECT COUNT(*) c FROM edges WHERE source=?').get(realFile).c > 0,
+        'the sources row keeps its stored identity; the old alias star edges are replaced by canonical ones');
+      ok(!runH.entries.some((e) => [S1, S2, S3].includes(e.id)) && JSON.stringify([S1, S2, S3].map(knowC)) === JSON.stringify(secretsBefore), 'the unscoped selection denies the secret-shaped rows too');
+
+      // ingest --sections, then reextract: the digest keeps its index → sections link.
+      const bodyX = 'Quorrelwick trains a pillamore controller that writes quessling notes into a drabbet store after every episode. Across ten sessions the drabbet store kept 41 percent more morwick facts than a flat buffer of equal size.';
+      const bodyY = 'Brannowick places a small cache in front of each morwick shard and promotes entries that two consecutive sessions both read. On the oberlast benchmark the cache answered 72 percent of lookups locally.';
+      const digestFile = path.join(realDir, 'digest.md');
+      fs.writeFileSync(digestFile, ['Weekly quorrelwick digest.', '', '### Quorrelwick pillamore control', '', 'https://arxiv.org/abs/2610.09001', '', bodyX, '', '### Brannowick morwick caching', '', 'https://arxiv.org/abs/2610.09002', '', bodyY, ''].join('\n'));
+      const dg = await off(() => oC.ingestSections({ path: digestFile }));
+      const dgId = dg.entry.id;
+      const links0 = JSON.stringify(oC.recall(dgId).provenance.digestSections);
+      ok(dg.sectionsSummary.ingested === 2 && oC.recall(dgId).provenance.digestSections.length === 2, 'fixture: a two-paper digest ingested with --sections (model off)');
+      const runD = await oC.reextract({});
+      const secIds = oC.recall(dgId).provenance.digestSections.map((s) => s.entry);
+      ok(runD.entries.some((e) => e.id === dgId) && secIds.every((id) => runD.entries.some((e) => e.id === id)) && JSON.stringify(oC.recall(dgId).provenance.digestSections) === links0
+        && secIds.every((id) => { const r = oC.recall(id); return r.status === 'active' && r.provenance.source.captureMethod === 'digest-section' && r.provenance.extraction?.mode === 'lmstudio'; }),
+        'reextract of a sectioned digest keeps provenance.digestSections; its sections stay digest-section entries, now model-extracted');
+    } finally {
+      oC?.close();
+      await fake.close();
+    }
+  }
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;
