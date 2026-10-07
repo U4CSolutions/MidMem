@@ -17,7 +17,7 @@ below assume a `midmem` wrapper (see [GETTING-STARTED.md](GETTING-STARTED.md)).
 | queue | what it means | your action |
 |---|---|---|
 | `deferredClaims` | contradictory evidence parked pending judgment | `claim-resolve <id>` accept/reject (`claims-deferred` lists oldest-first) |
-| `writeConflicts` | live claims tagged contradictory at write (legacy/accepted) | supersede the stale side, or defer |
+| `writeConflicts` | live claims tagged contradictory at write (legacy/accepted) | supersede the stale side, or defer; tags written before the containment floor → `claims-reclassify` (below) |
 | `stalePaths` | concepts + community parents touched by a superseded claim | review, then `stale-clear <ids>` |
 | `dupeConcepts` | near-duplicate concept candidates | `merge-concepts "<variant>" "<canonical>"` if truly the same |
 | `lowTrustWisdom` | curated entries the feedback loop buried | re-verify or forget — wisdom never auto-archives |
@@ -33,12 +33,41 @@ contradiction review with `--minShared 5`–`7`** — the tight default (3) is a
 setting and gets noisy over a large corpus (measured: 1295 pairs at minShared 3 vs 39 at 7 on a
 ~4.4k-node store).
 
+## Correcting misplaced rows and false conflict tags
+
+Reclassification is governed, never hand-edited: `rescope` moves rows to the right scope and
+`lower-authority` corrects an over-labelled origin (both need a selector; preview with `--dryRun`).
+**A row that should not be in the default read at all** — misfiled, obsolete, ingested by mistake —
+is retired with `midmem archive <entry id…> [--reason <text>] [--dryRun]` (MCP `archive` with `ids`).
+Ids are required; the row becomes `archived` with `provenance.archivedBy`, stays readable through
+`query --historical`, and the claims its ingest produced are archived too (reason `source-archived`).
+A stack scope may archive only its own and `shared` rows. Prefer it to `forget` when the history matters.
+
+**Write-time `contradictory` tags** need a containment floor since 2026-10-05: a differing-polarity
+pair counts as a contradiction only when shared tokens / the smaller claim's tokens reach
+`MIDMEM_CLAIM_CONTRADICTION_MIN_CONTAINMENT` (default 0.6). Tags written before (or under a lower
+floor) are re-judged by `midmem claims-reclassify --dryRun`, then without `--dryRun`: below-floor
+tags become `additive`, the claims the write path deferred for them are released to `active`, and
+claims deferred by judgment are never touched. Deterministic; the run is logged as `claims-reclassify`.
+
 ## Health signals worth watching
 
 - `midmem brief` — tier counts, claim stats, vector health, recent ops.
 - **Grounding numbers on every ingest** (`summaryScore`, quarantined counts) — a low score means
   the extraction drifted; triage before it poisons recall. The authoritative record is the `log`
   table row `operation='ingest'`.
+- **Multi-paper digests: ingest with `--sections`** (`midmem ingest <file> --sections`, MCP `ingest`
+  with `sections: true`). A good grounding score on a whole digest can still mean almost nothing
+  was kept (measured 2026-10-05: a six-paper weekly report scored 0.864 as one 430-character
+  summary, and no paper name was recallable). With `--sections` the file is ingested whole, then
+  every heading section that cites exactly one URL and has ≥ `--min-chars` (default 200) of body is
+  ingested on its own through the same grounded path, keyed by its citation (arXiv versions and
+  `/pdf/` links fold to `https://arxiv.org/abs/<id>`, DOIs to `https://doi.org/<doi>`), so the
+  same paper in a later digest supersedes its section instead of duplicating it. Sections take the
+  digest's authority (`doc` unless curated). The result lists each section and why the others were
+  skipped (`no-citation`, `multiple-citations`, `too-short`); fewer than `--min-sections` (default 2)
+  distinct citations → the file stands alone (`not-a-digest`). The parent's
+  `provenance.digestSections` links the sections; the run is logged as `ingest-sections`.
 - `maintain` summary: `projectionQA` (wiki completeness/fidelity), `queryProbes` (would future
   queries find their evidence?), `consistency`, and vector-dimension health.
 - Offline fallback: if the embed endpoint is down, ingest/query still work lexically and vectors

@@ -3,6 +3,7 @@
  * all state lives in state.db; retrieval is hybrid; the vault is a projection.
  */
 import * as fs from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import * as nodePath from 'node:path';
 import { StateDB } from './db.mjs';
 import { loadConfig } from './config.mjs';
@@ -31,6 +32,7 @@ import { genId, sha12, nowISO, json, cosine } from './util.mjs';
 import { normalizeProject, resolveProjects } from './projectaxis.mjs';
 import { LibraryRegistry } from './libraries.mjs';
 import { sourceInstructionVerdict, mergeInstructionVerdicts } from './recallpolicy.mjs';
+import { canonicalizeCitation, splitDigestSections } from './sections.mjs';
 
 /** `reextract` (2026-10-07): a per-entry failure (unparseable answer, an HTTP 4xx for that text) is
  *  not retried for this long, so a poison entry cannot stall "repeat until remaining is 0". */
@@ -50,8 +52,10 @@ const SOURCE_FIELDS = ['sourceUri', 'canonicalUri', 'libraryId', 'docId', 'captu
 /** Secret-shaped query parameter names. A source URI is stored in provenance and echoed on every
  *  recall row and brief, so a credential riding on it would reach agent prompts forever; the
  *  boundary refuses it (fail-closed) rather than trusting every caller to have stripped it.
- *  Found by the capture app's adversarial pass (2026-09-25). */
-const SECRET_PARAM_RE = /(^|[_-])(token|api[_-]?key|apikey|secret|password|passwd|pwd|auth|authorization|session(id)?|sid|jwt|bearer|signature|sig|access[_-]?key|private[_-]?key|credential)s?$/i;
+ *  Found by the capture app's adversarial pass (2026-09-25). The word list is one source string so
+ *  the query-parameter rule and the free-text `name=value` rule below can never drift apart. */
+const SECRET_NAME_WORDS = '(token|api[_-]?key|apikey|secret|password|passwd|pwd|auth|authorization|session(id)?|sid|jwt|bearer|signature|sig|access[_-]?key|private[_-]?key|credential)s?';
+const SECRET_PARAM_RE = new RegExp(`(^|[_-])${SECRET_NAME_WORDS}$`, 'i');
 function refuseSecretsInUri(field, value) {
   let u;
   try { u = new URL(value); } catch { return; } // not a URL — nothing to check
@@ -60,7 +64,48 @@ function refuseSecretsInUri(field, value) {
     if (SECRET_PARAM_RE.test(k)) throw new Error(`source field ${field} carries a secret-shaped query parameter '${k}'; strip it before ingest`);
   }
 }
-function normalizeSource(source) {
+/** Free-text secret shapes for `title` and `source.author` (2026-10-05; the capture app: "--title and
+ *  --author are where it would show"). Both are stored and echoed (sources.title in the export,
+ *  provenance.source.author on every recall row), so a pasted credential would live forever.
+ *  Deterministic and NARROW — prose about tokens must pass: a `name=value` needs a secret-shaped
+ *  name glued to a ≥ 8-char value, and the two prefixes that also start ordinary words (`Bearer …`,
+ *  `sk-…`) need a token-like tail (a digit or an uppercase letter), so "bearer authentication-schemes"
+ *  or "sk-learn-compatible-estimators" pass. The other prefixes are distinctive on their own. */
+const SECRET_ASSIGN_RE = new RegExp(`(?<![A-Za-z0-9_-])(?:[A-Za-z0-9]+[_-])*${SECRET_NAME_WORDS}=[^\\s&"']{8,}`, 'i');
+const TOKEN_LIKE = (s) => /[0-9A-Z]/.test(s);
+const SECRET_TEXT_SHAPES = [
+  ['bearer token', /\bbearer\s+([A-Za-z0-9\-._~+/]{16,}=*)/gi, TOKEN_LIKE],
+  ['sk- api key', /\bsk-([A-Za-z0-9_-]{20,})/g, TOKEN_LIKE],
+  ['github token', /\bgh[pousr]_[A-Za-z0-9]{30,}/g],
+  ['github token', /\bgithub_pat_[A-Za-z0-9_]{30,}/g],
+  ['slack token', /\bxox[abprs]-[A-Za-z0-9-]{10,}/g],
+  ['aws access key id', /\bAKIA[A-Z0-9]{16}\b/g],
+  ['jwt', /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g],
+];
+/** The kind of secret a text carries, or null. Never returns (or throws with) the value itself. */
+function secretTextKind(value) {
+  if (typeof value !== 'string' || !value) return null;
+  for (const url of value.match(/https?:\/\/[^\s<>"'`]+/gi) || []) {
+    try { refuseSecretsInUri('text', url); } catch { return 'credential-bearing url'; }
+  }
+  if (SECRET_ASSIGN_RE.test(value)) return 'secret-named key=value';
+  for (const [kind, re, tailOk] of SECRET_TEXT_SHAPES) {
+    for (const m of value.matchAll(re)) if (!tailOk || tailOk(m[1] ?? m[0])) return kind;
+  }
+  return null;
+}
+function refuseSecretsInText(field, value, label = 'source field') {
+  const kind = secretTextKind(value);
+  if (kind) throw new Error(`${label} ${field} carries a secret-shaped value (${kind}); strip it before ingest`);
+}
+/** Canonical form of an ingest path: absolute, symlinks resolved. Fail-soft — an unresolvable path
+ *  keeps its resolved form (the read that follows reports it); a non-string is returned as given. */
+function canonicalPath(p) {
+  if (typeof p !== 'string' || !p) return p;
+  const abs = nodePath.resolve(p);
+  try { return realpathSync(abs); } catch { return abs; }
+}
+function normalizeSource(source, { secretTextGuard = true } = {}) {
   if (source === undefined || source === null) return null;
   if (typeof source !== 'object' || Array.isArray(source)) throw new Error('source must be an object');
   for (const k of Object.keys(source)) if (!SOURCE_FIELDS.includes(k)) throw new Error(`unknown source field: ${k}`);
@@ -75,6 +120,7 @@ function normalizeSource(source) {
     if (out[k] !== undefined && Number.isNaN(Date.parse(out[k]))) throw new Error(`source field ${k} is not a parseable date: ${out[k]}`);
   }
   for (const k of ['sourceUri', 'canonicalUri']) if (out[k] !== undefined) refuseSecretsInUri(k, out[k]);
+  if (secretTextGuard && out.author !== undefined) refuseSecretsInText('author', out.author);
   if (out.site === undefined) {
     for (const k of ['canonicalUri', 'sourceUri']) {
       if (!out[k]) continue;
@@ -146,7 +192,18 @@ export class Orchestrator {
     if (authority !== undefined && !normalizeAuthority(authority)) throw new Error(`unknown authority: ${authority} (expected operator|stack|doc|web)`);
     const auth = normalizeAuthority(authority) || (curated ? 'operator' : 'doc');
     const proj = normalizeProject(project); // project axis (#18): null = global
-    const src = normalizeSource(source); // source provenance passthrough (#46): validated before any write
+    const guardText = this.cfg.ingest?.secretTextGuard !== false;
+    const src = normalizeSource(source, { secretTextGuard: guardText }); // source provenance passthrough (#46): validated before any write
+    // The title is stored (sources.title, the export) — refused before governance, so nothing is written.
+    if (guardText && typeof title === 'string') refuseSecretsInText('title', title, 'ingest field');
+    // Canonical source identity (2026-10-05): the path is resolved and realpath'd ONCE and that form
+    // is what every row records (sources, provenance, chain, claims, graph, log). The same file
+    // reached through a symlinked mount and through its real mount used to become two sources that
+    // never superseded each other; relative paths were stored relative. ctx.path stays the caller's
+    // literal, so governance (which realpaths independently) denies an unresolvable path naming the
+    // path it was GIVEN. The realpath itself runs inside the governed callback — AFTER the policy
+    // check, as the old read did — so a symlink swapped between resolve and check gains nothing new.
+    const given = path;
     // Pack-typed ingest (#46): a capture-pack entry type stores as itself, with the pack's tier +
     // memory function; anything else stays a plain 'ingest' entry in the memory tier. A pack type
     // aimed at a curated-only tier needs explicit curation — checked here, before any write.
@@ -158,7 +215,8 @@ export class Orchestrator {
     }
     const ctx = { path, type, scope, curated, authority: auth, project: proj, tier: entryTier, ...(src ? { source: Object.keys(src) } : {}) };
     const r = await governed(this.gov, 'ingest', ctx, async () => {
-      const text = await fs.readFile(path, 'utf8');
+      const canon = canonicalPath(given);
+      const text = await fs.readFile(canon, 'utf8');
       const hash = sha12(text);
       const sourceMeta = src ? { ...metadata, source: src } : metadata;
       // Instruction-likeness over the FULL source (#40; 2026-10-04 KC v2 real-MidMem finding: an
@@ -176,26 +234,28 @@ export class Orchestrator {
       // operator forget (§6 6c) the knowledge is gone, so the source falls through to link / full ingest.
       const standing = this.db.prepare(`SELECT 1 FROM entries WHERE status != 'deleted' AND (source_id = ? OR (provenance LIKE '%alsoSources%'
         AND json_valid(provenance) AND EXISTS (SELECT 1 FROM json_each(provenance, '$.alsoSources') a WHERE a.type = 'object' AND json_extract(a.value, '$.sourceId') = ?))) LIMIT 1`);
-      const samePath = same.find((row) => row.path === path && standing.get(row.id, row.id));
-      if (samePath) { this.db.logOp('ingest-skip', { path, hash, sourceId: samePath.id }); return { success: true, skipped: true, reason: 'unchanged', sourceId: samePath.id }; }
+      // Identity matches the canonical path OR the given literal: a row stored before canonical paths
+      // (under a symlink alias or a relative spelling) still counts when reached by the same spelling.
+      const samePath = same.find((row) => (row.path === canon || row.path === given) && standing.get(row.id, row.id));
+      if (samePath) { this.db.logOp('ingest-skip', { path: canon, hash, sourceId: samePath.id }); return { success: true, skipped: true, reason: 'unchanged', sourceId: samePath.id }; }
       if (same.length) {
         const linked = this.db.tx(() => {
           const active = this.db.prepare("SELECT id, provenance FROM entries WHERE source_id=? AND status='active'");
           let live = null;
           for (const row of same) { live = active.get(row.id); if (live) break; }
           if (!live) return null;
-          const newSourceId = genId('src', path);
+          const newSourceId = genId('src', canon);
           this.db.prepare('INSERT INTO sources(id,path,type,title,hash,ingested_at,metadata) VALUES(?,?,?,?,?,?,?)')
-            .run(newSourceId, path, type, title || null, hash, nowISO(), JSON.stringify(sourceMeta));
+            .run(newSourceId, canon, type, title || null, hash, nowISO(), JSON.stringify(sourceMeta));
           const p = json(live.provenance, {}) || {};
-          p.alsoSources = [...(Array.isArray(p.alsoSources) ? p.alsoSources : []), { sourceId: newSourceId, path, source: src, at: nowISO() }];
+          p.alsoSources = [...(Array.isArray(p.alsoSources) ? p.alsoSources : []), { sourceId: newSourceId, path: canon, source: src, at: nowISO() }];
           // The holder keeps its verdict OR'd with the linked source's (#40): covers a holder stored
           // before full-source screening, or with the flag off.
           const il = mergeInstructionVerdicts(p.instructionLike, ilVerdict);
           if (il) p.instructionLike = il;
           // Metadata-only: updated_at stays untouched (the knowledge did not change).
           this.db.prepare('UPDATE entries SET provenance=? WHERE id=?').run(JSON.stringify(p), live.id);
-          this.db.logOp('ingest-link', { path, entry: live.id, sourceId: newSourceId });
+          this.db.logOp('ingest-link', { path: canon, entry: live.id, sourceId: newSourceId });
           return { success: true, skipped: true, reason: 'linked-duplicate', entry: live.id, sourceId: newSourceId };
         });
         if (linked) return linked;
@@ -214,7 +274,7 @@ export class Orchestrator {
         claimsKept: gcl.grounded.length, claimsQuarantined: gcl.ungrounded.length,
       };
       const { vector, model, mode } = await this.embedder.embed(ex.summary);
-      const sourceId = genId('src', path);
+      const sourceId = genId('src', canon);
       // Deterministic category tag so the store tracks ongoing requests by kind (research/build/...).
       const category = categorizeIngest({ type, content: ex.summary, title }, this.packs?.rules || []);
       // A superseding version carries only its own text's verdict: a cleaned page clears the flag.
@@ -222,35 +282,36 @@ export class Orchestrator {
       // claims, so a capture system can tell model-extracted entries from fallback ones (`entries`) and
       // `reextract` can select the fallback ones. Legacy entries have no record.
       const extractedAt = nowISO();
-      const prov = { originalSource: path, extractedAt, category, authority: auth, grounding, extraction: { mode: ex.mode, model: ex.model ?? null, at: extractedAt }, chain: [{ step: 'ingest', source: path }], ...(src ? { source: src } : {}), ...(ilVerdict ? { instructionLike: ilVerdict } : {}) };
+      const prov = { originalSource: canon, extractedAt, category, authority: auth, grounding, extraction: { mode: ex.mode, model: ex.model ?? null, at: extractedAt }, chain: [{ step: 'ingest', source: canon }], ...(src ? { source: src } : {}), ...(ilVerdict ? { instructionLike: ilVerdict } : {}) };
       // Sources row (the dedup hash) commits WITH the entry: a failed ingest must not
       // leave the hash behind, or re-ingests would be skipped as 'unchanged' forever.
       // Supersede-on-reingest: a changed file replaces its earlier ingests — archive
       // every active entry from a prior source row for the same path, whatever its
       // tier (a stale wisdom copy is still stale). Same tx, so the old entries can't
-      // be archived without the replacement landing.
+      // be archived without the replacement landing. "Same path" = canonical OR the given
+      // literal, so pre-canonical rows stored under that spelling are superseded too.
       let superseded = [];
       const stored = this.db.tx(() => {
         superseded = this.db.prepare(
-          "SELECT e.id FROM entries e JOIN sources s ON e.source_id = s.id WHERE s.path = ? AND e.status = 'active'",
-        ).all(path).map((r) => r.id);
+          "SELECT e.id FROM entries e JOIN sources s ON e.source_id = s.id WHERE s.path IN (?, ?) AND e.status = 'active'",
+        ).all(canon, given).map((r) => r.id);
         const sup = this.db.prepare("UPDATE entries SET status='archived', updated_at=? WHERE id=?");
         for (const id of superseded) sup.run(nowISO(), id);
         this.db.prepare('INSERT INTO sources(id,path,type,title,hash,ingested_at,metadata) VALUES(?,?,?,?,?,?,?)')
-          .run(sourceId, path, type, title || null, hash, nowISO(), JSON.stringify(sourceMeta));
+          .run(sourceId, canon, type, title || null, hash, nowISO(), JSON.stringify(sourceMeta));
         return this.memory.store({ content: ex.summary, type: entryType, tier: entryTier, scope, sourceId, provenance: prov, concepts: gc.grounded, memFunction: packDef ? packDef.function : null, project: proj, ...(packDef?.ttlDays ? { ttlMs: packDef.ttlDays * 864e5 } : {}) });
       });
       await this.memory.upsertVector(stored.id, vector, model, mode);
 
-      const nodeIds = gc.grounded.map((c) => this.graph.upsertNode({ type: c.type || 'concept', label: c.name, source: path, properties: { confidence: c.confidence, grounding: c.groundingScore } }));
-      for (let i = 1; i < nodeIds.length; i++) this.graph.upsertEdge({ from: nodeIds[0], to: nodeIds[i], type: 'relates', source: path });
+      const nodeIds = gc.grounded.map((c) => this.graph.upsertNode({ type: c.type || 'concept', label: c.name, source: canon, properties: { confidence: c.confidence, grounding: c.groundingScore } }));
+      for (let i = 1; i < nodeIds.length; i++) this.graph.upsertEdge({ from: nodeIds[0], to: nodeIds[i], type: 'relates', source: canon });
       // Claims inherit the source's authority — summarization/extraction must not raise it.
       // sourceId on the claim's source (#41): lets a forget cascade find exactly the claims this
       // entry's ingest produced, even after the same path was re-ingested.
-      for (const cl of gcl.grounded) this.claims.add({ content: cl.content, type: 'fact', source: { path, type, title, sourceId }, provenance: { extractor: ex.mode, confidence: cl.confidence, grounding: cl.groundingScore, authority: auth } });
+      for (const cl of gcl.grounded) this.claims.add({ content: cl.content, type: 'fact', source: { path: canon, type, title, sourceId }, provenance: { extractor: ex.mode, confidence: cl.confidence, grounding: cl.groundingScore, authority: auth } });
 
       const verification = this.verifier.verifyConcepts(gc.grounded);
-      this.db.logOp('ingest', { path, entry: stored.id, concepts: gc.grounded.length, claims: gcl.grounded.length, quarantined: gc.ungrounded.length + gcl.ungrounded.length, summaryScore: grounding.summaryScore, mode: ex.mode, conflicts: verification.conflicts.length, superseded: superseded.length });
+      this.db.logOp('ingest', { path: canon, entry: stored.id, concepts: gc.grounded.length, claims: gcl.grounded.length, quarantined: gc.ungrounded.length + gcl.ungrounded.length, summaryScore: grounding.summaryScore, mode: ex.mode, conflicts: verification.conflicts.length, superseded: superseded.length });
       this.#markVaultDirty();
       return { success: true, entry: stored, concepts: gc.grounded.length, claims: gcl.grounded.length, grounding, verification, mode: ex.mode, superseded };
     });
@@ -269,12 +330,113 @@ export class Orchestrator {
     if (typeof content !== 'string' || !content.length) throw new Error('ingestContent requires non-empty string content');
     const sourceKey = source?.canonicalUri || source?.sourceUri || source?.docId;
     if (!sourceKey) throw new Error('ingestContent requires source.canonicalUri, source.sourceUri or source.docId');
-    normalizeSource(source); // validate before materializing anything
+    // Validate before materializing anything — the source (author included) and the title, which
+    // ingest() re-checks only after this file would already have been written.
+    const guardText = this.cfg.ingest?.secretTextGuard !== false;
+    normalizeSource(source, { secretTextGuard: guardText });
+    if (guardText && typeof title === 'string') refuseSecretsInText('title', title, 'ingest field');
     const dir = this.cfg.contentIngestDir;
     const filePath = nodePath.join(dir, sha12(sourceKey) + '.md');
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(filePath, content);
     return this.ingest({ path: filePath, type, title, source, scope, project, authority, curated, metadata });
+  }
+
+  /**
+   * Sectioned digest ingest (2026-10-06; sections.mjs has the measured problem): the digest file is
+   * ingested as itself (its own governed ingest, dedup and supersede), then every section that cites
+   * exactly ONE source becomes its own grounded content ingest keyed by that citation — the same
+   * paper in next week's digest supersedes its section entry instead of forking, and the paper's
+   * names and figures get a summary of their own. Each section rides the ordinary ingestContent →
+   * ingest path (grounding check, secret guards, #maybeMaintain), so nothing here bypasses them.
+   * Sections inherit the digest's EFFECTIVE authority (doc unless curated/explicit) — ingestContent's
+   * 'web' default does not apply to text the operator handed over as a file. Fewer than `minSections`
+   * distinct qualifying citations → the file is not a digest: the parent stands alone. `source`
+   * (optional) is the digest's own provenance and goes to the parent only.
+   */
+  async ingestSections({ path, type = 'research', title, scope, project, authority, curated = false, metadata = {}, source, minChars = 200, minSections = 2 } = {}) {
+    for (const [k, v] of [['minChars', minChars], ['minSections', minSections]]) {
+      if (!Number.isInteger(v) || v < 0) throw new Error(`ingestSections ${k} must be a non-negative integer`);
+    }
+    // 1. The digest first: governance (the path policy) and its own dedup/supersede. A denial
+    //    propagates from here, before any section file is materialized.
+    const parent = await this.ingest({ path, type, title, metadata, curated, scope, authority, project, source });
+    // 2. Split exactly what the governed ingest read: same canonical path, and the text must hash to
+    //    the parent's sources row — a file swapped or edited in between is refused, not sectioned.
+    const canon = canonicalPath(path);
+    const text = await fs.readFile(canon, 'utf8');
+    const parentSourceId = parent.sourceId || (parent.entry?.id ? this.db.prepare('SELECT source_id FROM entries WHERE id=?').get(parent.entry.id)?.source_id : null);
+    const parentHash = parentSourceId ? this.db.prepare('SELECT hash FROM sources WHERE id=?').get(parentSourceId)?.hash : null;
+    if (parentHash && parentHash !== sha12(text)) throw new Error(`digest ${canon} changed between its ingest and sectioning; re-run`);
+    const all = splitDigestSections(text, { minChars });
+    const qualifying = all.filter((s) => s.qualifies);
+    const skipped = all.filter((s) => !s.qualifies).map((s) => ({ index: s.index, heading: s.heading, reason: s.reason }));
+    const parentEntry = this.#entryIdOf(parent);
+    const summary = { qualified: qualifying.length, ingested: 0, unchanged: 0, linked: 0, superseded: 0, refused: 0, duplicates: 0, skipped };
+    const logIt = (extra = {}) => this.db.logOp('ingest-sections', { path: canon, parent: parentEntry, ...summary, skipped: skipped.length, ...extra });
+    // Distinct citations, not sections: one paper split over two cited sub-headings is not a digest.
+    if (new Set(qualifying.map((s) => s.citations[0])).size < minSections) {
+      logIt({ reason: 'not-a-digest' });
+      return { ...parent, sections: [], sectionsSummary: { ...summary, reason: 'not-a-digest' } };
+    }
+    // 3. One content ingest per qualifying section, in document order, each failure contained.
+    const auth = normalizeAuthority(authority) || (curated ? 'operator' : 'doc');
+    const sections = [];
+    const seen = new Map(); // canonicalUri → index of the section that carried it in THIS run
+    for (const sec of qualifying) {
+      const cit = canonicalizeCitation(sec.citations[0]);
+      const row = { index: sec.index, heading: sec.heading, uri: cit.canonicalUri, ...(cit.docId ? { docId: cit.docId } : {}) };
+      // Two sections citing one source would share one content path, and the later would supersede
+      // the earlier inside a single run — the first (document order) keeps the citation.
+      if (seen.has(cit.canonicalUri)) { summary.duplicates++; sections.push({ ...row, skipped: true, reason: 'duplicate-citation', duplicateOf: seen.get(cit.canonicalUri) }); continue; }
+      seen.set(cit.canonicalUri, sec.index);
+      try {
+        const r = await this.ingestContent({
+          content: `${sec.headingLine}\n\n${sec.text}\n`,
+          source: { canonicalUri: cit.canonicalUri, ...(cit.docId ? { docId: cit.docId } : {}), captureMethod: 'digest-section' },
+          type, title: sec.heading, scope, project, authority: auth, curated,
+          metadata: { ...metadata, digest: { path: canon, heading: sec.heading, index: sec.index } },
+        });
+        const entry = this.#entryIdOf(r);
+        if (r.skipped) {
+          if (r.reason === 'unchanged') summary.unchanged++; else if (r.reason === 'linked-duplicate') summary.linked++;
+          sections.push({ ...row, ...(entry ? { entry } : {}), skipped: true, reason: r.reason });
+        } else {
+          summary.ingested++;
+          summary.superseded += (r.superseded || []).length;
+          sections.push({ ...row, entry, superseded: r.superseded || [], grounding: r.grounding, claims: r.claims });
+        }
+      } catch (e) {
+        // A refused section (e.g. the secret-URI guard in normalizeSource) never stops the others.
+        summary.refused++;
+        sections.push({ ...row, skipped: true, reason: e.message });
+      }
+    }
+    // 4. Index → sections link on the live parent entry. REPLACED, not appended, so a re-run is
+    //    idempotent; metadata-only, so updated_at stays (the knowledge did not change).
+    if (parentEntry) {
+      const live = this.db.prepare("SELECT provenance FROM entries WHERE id=? AND status='active'").get(parentEntry);
+      if (live) {
+        const p = json(live.provenance, {}) || {};
+        p.digestSections = sections.filter((s) => s.entry).map((s) => ({ entry: s.entry, uri: s.uri, heading: s.heading }));
+        this.db.prepare('UPDATE entries SET provenance=? WHERE id=?').run(JSON.stringify(p), parentEntry);
+      }
+    }
+    // 5. The audit row; the per-section detail is in the return value.
+    logIt();
+    return { ...parent, sections, sectionsSummary: summary };
+  }
+
+  /** The live entry an ingest result stands for: the stored entry, the holder a linked duplicate was
+   *  attached to, or — for an 'unchanged' skip — the active entry standing for that sources row (its
+   *  own, or one that links it in provenance.alsoSources). Null when nothing live stands for it. */
+  #entryIdOf(r) {
+    if (typeof r?.entry === 'string') return r.entry;
+    if (r?.entry?.id) return r.entry.id;
+    if (!r?.sourceId) return null;
+    return this.db.prepare(`SELECT id FROM entries WHERE status='active' AND (source_id = ? OR (provenance LIKE '%alsoSources%'
+      AND json_valid(provenance) AND EXISTS (SELECT 1 FROM json_each(provenance, '$.alsoSources') a WHERE a.type = 'object' AND json_extract(a.value, '$.sourceId') = ?)))
+      ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(r.sourceId, r.sourceId)?.id || null;
   }
 
   /** The MCP `remember` op — store a memory directly. */
@@ -1122,12 +1284,15 @@ export class Orchestrator {
     });
   }
 
-  #cascadeForget(entry) {
+  /** `reason` labels the claims' archivedBy (and the concept flag, when not a forget): the forget
+   *  path passes the default; archive-by-id passes 'source-archived'. One cascade, two triggers. */
+  #cascadeForget(entry, reason = 'source-forgotten') {
     const ts = nowISO();
+    const forgot = reason === 'source-forgotten';
     let claimsArchived = 0;
     const upd = this.db.prepare('UPDATE claims SET status=?, metadata=?, updated_at=? WHERE id=?');
     for (const c of this.#claimsDerivedFrom(entry)) {
-      upd.run('archived', JSON.stringify({ ...(c.metadata || {}), archivedBy: { entry: entry.id, at: ts, reason: 'source-forgotten' } }), ts, c.id);
+      upd.run('archived', JSON.stringify({ ...(c.metadata || {}), archivedBy: { entry: entry.id, at: ts, reason } }), ts, c.id);
       claimsArchived++;
     }
     let conceptsFlagged = 0;
@@ -1144,15 +1309,59 @@ export class Orchestrator {
         if (stillUsed.has(key)) continue;
         const n = byKey.get(key);
         if (!n || n.properties?.orphanedBy) continue;
-        this.db.prepare('UPDATE nodes SET properties=? WHERE id=?').run(JSON.stringify({ ...n.properties, orphanedBy: { entry: entry.id, at: ts } }), n.id);
+        this.db.prepare('UPDATE nodes SET properties=? WHERE id=?').run(JSON.stringify({ ...n.properties, orphanedBy: { entry: entry.id, at: ts, ...(forgot ? {} : { reason }) } }), n.id);
         conceptsFlagged++;
       }
     }
-    if (claimsArchived || conceptsFlagged) this.db.logOp('forget-cascade', { entry: entry.id, claimsArchived, conceptsFlagged });
+    if (claimsArchived || conceptsFlagged) this.db.logOp(forgot ? 'forget-cascade' : 'archive-cascade', { entry: entry.id, claimsArchived, conceptsFlagged });
     return { claimsArchived, conceptsFlagged };
   }
 
+  /** Age-based sweep (MCP `archive` without ids): active rows not updated within olderThanMs. */
   archive(opts = {}) { const r = this.memory.archive(opts); this.db.logOp('archive', r); if (r.archived) this.#markVaultDirty(); return r; }
+
+  /**
+   * Governed archive BY ID (2026-10-05): retire specific misplaced or obsolete entries without
+   * deleting them — the row stays readable through a historical read (`query --historical`), it
+   * just leaves the default (active) read. An `active` entry → `archived` (updated_at touched) with
+   * `provenance.archivedBy {at, reason, by}`; any other status is reported `skipped` (with it), an
+   * unknown id `missing`. The forget cascade follows with reason 'source-archived': claims the
+   * entry's ingest produced are archived, concepts it alone supported are flagged for review.
+   * ids are REQUIRED — this never degrades into the age sweep. Governance (`archive-scope-write`):
+   * a stack scope may archive only rows in its own scope or 'shared' (every matched row's scope is
+   * checked, whatever its status). One transaction; dryRun reports and writes nothing.
+   */
+  async archiveEntries({ ids = [], reason = null, dryRun = false } = {}) {
+    const wanted = [...new Set((Array.isArray(ids) ? ids : [ids]).map((s) => String(s ?? '').trim()).filter(Boolean))];
+    if (!wanted.length) throw new Error('archive-entries requires entry ids (the age-based sweep is archive({ olderThanMs }))');
+    const rows = wanted.map((id) => this.recall(id)).filter(Boolean);
+    const fromScopes = [...new Set(rows.map((r) => r.scope))].sort();
+    return governed(this.gov, 'archive-entries', { ids: wanted, fromScopes, reason, dryRun: !!dryRun }, () => {
+      const found = new Map(rows.map((r) => [r.id, r]));
+      const missing = wanted.filter((id) => !found.has(id));
+      const skipped = rows.filter((r) => r.status !== 'active').map((r) => ({ id: r.id, status: r.status }));
+      const targets = rows.filter((r) => r.status === 'active');
+      const out = { success: true, dryRun: !!dryRun, reason, wouldArchive: targets.map((r) => r.id), archived: [], skipped, missing, cascade: null };
+      if (dryRun || !targets.length) return out;
+      const ts = nowISO();
+      const by = this.cfg.agentScope;
+      const cascade = { claimsArchived: 0, conceptsFlagged: 0 };
+      this.db.tx(() => {
+        const upd = this.db.prepare("UPDATE entries SET status='archived', updated_at=?, provenance=? WHERE id=? AND status='active'");
+        for (const r of targets) upd.run(ts, JSON.stringify({ ...(r.provenance || {}), archivedBy: { at: ts, reason, by } }), r.id);
+        // Cascades after ALL rows are archived, so a concept supported only by entries archived in
+        // this same call is seen as orphaned (each cascade looks for OTHER active supporters).
+        if (this.cfg.forget?.cascade !== false) {
+          for (const r of targets) { const c = this.#cascadeForget(r, 'source-archived'); cascade.claimsArchived += c.claimsArchived; cascade.conceptsFlagged += c.conceptsFlagged; }
+        }
+      });
+      out.archived = targets.map((r) => r.id);
+      out.cascade = cascade;
+      this.db.logOp('archive-entries', { ids: wanted, archived: out.archived, skipped, cascade });
+      this.#markVaultDirty();
+      return out;
+    });
+  }
 
   async promote(id, toTier, { curated = false } = {}) {
     // Lifecycle class (#44): the entry's function is part of the governed context so the
@@ -1291,6 +1500,19 @@ export class Orchestrator {
       this.db.logOp('claim-resolve', { id, action, success: r.success });
       if (r.success) this.#markVaultDirty();
       return r;
+    });
+  }
+
+  /** Re-judge write-time `contradictory` tags against the containment floor (2026-10-05): below-floor
+   *  tags become `additive`, write-path deferrals of those claims are released to `active`, and
+   *  judgment deferrals are never touched. Deterministic; preview with dryRun. Governed like the
+   *  other claim judgment ops. `floor` defaults to claims.contradictionMinContainment. */
+  async reclassifyWriteConflicts({ dryRun = false, floor } = {}) {
+    return governed(this.gov, 'claims-reclassify', { dryRun: !!dryRun, ...(floor !== undefined ? { floor } : {}) }, () => {
+      const r = this.claims.reclassifyWriteConflicts({ dryRun: !!dryRun, ...(floor !== undefined ? { floor } : {}) });
+      if (!dryRun) this.db.logOp('claims-reclassify', { scanned: r.scanned, reclassified: r.reclassified, released: r.released, kept: r.kept, judgmentDeferred: r.judgmentDeferred, floor: r.floor });
+      if (!dryRun && r.reclassified) this.#markVaultDirty();
+      return { success: true, ...r };
     });
   }
 
