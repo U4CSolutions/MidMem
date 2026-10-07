@@ -3,7 +3,7 @@
  * no network. `POST /v1/chat/completions` answers like a reasoning model: thinking in
  * `message.reasoning_content`, the JSON answer in `message.content`. `POST /v1/embeddings` returns a
  * deterministic `dim`-wide vector per input. Behaviour is scripted per call through `state`:
- *   state.chat  = 'ok' | 'http-500' | 'hang' | 'unparseable' | 'think' (inline <think> block before the JSON)
+ *   state.chat  = 'ok' | 'http-<status>' (e.g. 'http-500', 'http-400') | 'hang' | 'unparseable' | 'think' (inline <think> block before the JSON)
  *   state.queue = [behaviour, …] consumed first, one per chat call
  *   state.embed = 'ok' | 'http-500'
  * The 'ok' answer is built from the article text: a grounded summary (its first sentence), two
@@ -53,7 +53,7 @@ export async function startFakeOpenAI({ dim = 16 } = {}) {
         state.models.push(msg.model);
         const mode = state.queue.length ? state.queue.shift() : state.chat;
         if (mode === 'hang') return; // never answers: the caller's timeout fires
-        if (mode === 'http-500') return send(500, { error: 'model crashed' });
+        if (/^http-\d{3}$/.test(mode)) return send(Number(mode.slice(5)), { error: `model answered ${mode}` });
         const user = msg.messages?.find((m) => m.role === 'user')?.content || '';
         const text = user.replace(/^type=[^\n]*\n\n/, '');
         const json = JSON.stringify(answer(text));

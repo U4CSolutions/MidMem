@@ -1994,7 +1994,7 @@ try {
       const dry53 = await o53.reextract({ libraryId: L53, dryRun: true });
       ok(dbDigest53() === d0 && fake.state.chatCalls === calls0 && fake.state.embedCalls === embeds0, '--dry-run calls no model and writes nothing (entries, claims, graph, vectors, log, audit unchanged)');
       ok(dry53.success && dry53.dryRun === true && dry53.examined === 8 && dry53.reextracted === 0 && dry53.remaining === 3
-        && JSON.stringify(dry53.skipped) === JSON.stringify({ changed: 1, missing: 1, unreadable: 1, fallback: 0, deleted: 1, notSelected: 1, denied: 0 })
+        && JSON.stringify(dry53.skipped) === JSON.stringify({ changed: 1, missing: 1, unreadable: 1, fallback: 0, deleted: 1, notSelected: 1, denied: 0, retryLater: 0 })
         && JSON.stringify(dry53.entries.map((e) => e.docId)) === '["doc-a","doc-b","doc-f"]' && dry53.entries.every((e) => e.mode === null),
         `--dry-run reports what it would do: examined 8, 3 eligible (a, b, f), changed/missing/unreadable/deleted/notSelected 1 each (${JSON.stringify(dry53.skipped)})${root53 ? ' [root: unreadable simulated by a directory]' : ''}`);
 
@@ -2014,9 +2014,6 @@ try {
       const f2 = await onlyA53();
       o53.cfg.llmTimeoutMs = 5000;
       ok(f2.skipped.fallback === 1 && f2.stopped?.reason === 'timeout' && snap53(E53['doc-a']) === a0, 'model timeout → skipped fallback, stopped, entry byte-identical');
-      fake.state.queue = ['unparseable'];
-      const f3 = await onlyA53();
-      ok(f3.success === true && f3.skipped.fallback === 1 && f3.stopped === null && snap53(E53['doc-a']) === a0, 'unparseable answer → skipped fallback (the pass goes on), entry byte-identical');
       o53.cfg.llmEnabled = false;
       const callsOff53 = fake.state.chatCalls;
       const f4 = await onlyA53();
@@ -2026,6 +2023,14 @@ try {
       const f5 = await onlyA53();
       fake.state.embed = 'ok';
       ok(f5.skipped.fallback === 1 && f5.stopped?.reason === 'embedder-unavailable' && snap53(E53['doc-a']) === a0, 'embedder down (extraction answered) → skipped fallback, entry byte-identical (no new summary behind an old vector)');
+      fake.state.queue = ['unparseable'];
+      const f3 = await onlyA53();
+      ok(f3.success === true && f3.skipped.fallback === 1 && f3.stopped === null && snap53(E53['doc-a']) === a0, 'unparseable answer → skipped fallback (the pass goes on), entry byte-identical');
+      const callsF53 = fake.state.chatCalls;
+      const f6 = await onlyA53();
+      ok(f6.skipped.retryLater === 1 && f6.skipped.fallback === 0 && f6.remaining === 0 && f6.success === true && fake.state.chatCalls === callsF53 && snap53(E53['doc-a']) === a0,
+        'an entry whose answer failed is left alone for a while (skipped.retryLater, no model call); a model that was down is not held against it');
+      o53.db.prepare("DELETE FROM log WHERE operation='reextract-attempt'").run(); // the cooldown spent (cooldown expiry itself: 53b)
 
       // In place: --limit 1 takes the oldest eligible (doc-a); a reasoning model's inline <think> is ignored.
       const oldClaims53 = o53.db.prepare("SELECT id FROM claims WHERE json_extract(source,'$.sourceId') = ? AND status='active' ORDER BY id").all(rec53(E53['doc-a']).source_id).map((r) => r.id);
@@ -2074,9 +2079,9 @@ try {
       ok(f53.provenance.instructionLike?.matched?.includes('override-prior') && f53.provenance.instructionLike.matched.includes('hide-from-user') && f53.provenance.instructionLike.scope === 'source',
         'the instruction-likeness verdict is recomputed from the full source (a legacy entry without one gains it)');
       ok(rec53(E53['doc-b']).provenance.instructionLike?.matched?.[0] === 'exfiltrate' && rec53(E53['doc-b']).provenance.extraction?.mode === 'fallback', 'the skipped entry (doc-b) kept everything, its stale verdict included');
-      const r3 = await o53.reextract({ libraryId: L53, docIds: ['doc-b'] });
+      const r3 = await o53.reextract({ libraryId: L53, docIds: ['doc-b'], retryFailed: true });
       const b53 = rec53(E53['doc-b']);
-      ok(r3.reextracted === 1 && !b53.provenance.instructionLike && b53.provenance.chain.at(-1).from === 'fallback', 'doc-b re-extracted: a clean source clears a stale verdict (no linked duplicates); chain notes from: fallback');
+      ok(r3.reextracted === 1 && !b53.provenance.instructionLike && b53.provenance.chain.at(-1).from === 'fallback', 'doc-b re-extracted at once with retryFailed (it failed minutes ago): a clean source clears a stale verdict (no linked duplicates); chain notes from: fallback');
       const calls53 = fake.state.chatCalls;
       const r4 = await o53.reextract({ libraryId: L53 });
       ok(r4.reextracted === 0 && r4.remaining === 0 && r4.skipped.notSelected === 4 && fake.state.chatCalls === calls53, 'nothing left: a re-run makes no model call');
@@ -2130,6 +2135,136 @@ try {
       try { fs.chmodSync(path.join(dir53, 'ingest-content'), 0o755); } catch { /* best effort */ }
       for (const f of (() => { try { return fs.readdirSync(path.join(dir53, 'ingest-content')); } catch { return []; } })()) { try { fs.chmodSync(path.join(dir53, 'ingest-content', f), 0o644); } catch { /* best effort */ } }
       o53?.close();
+      await fake.close();
+    }
+  }
+
+  // 53b. Re-extraction safety (adversarial review 2026-10-07): an uncurated run never rewrites curated
+  //      knowledge (a wisdom-tier entry, operator authority) and never claims curated:true in the audit;
+  //      a per-entry failure (HTTP 400/422, unparseable) skips only that entry and cools down for 24 h,
+  //      so a poison entry cannot stall or starve a "repeat until remaining is 0" loop, while a model
+  //      that is down (5xx, 429) still stops the pass and is not held against the entry; an error while
+  //      writing one entry still returns the JSON document and the run's log row; the path gate is
+  //      checked before the source is opened.
+  {
+    const { startFakeOpenAI } = await import('./helpers/fake-openai.mjs');
+    const fake = await startFakeOpenAI({ dim: 16 });
+    fake.state.grounded = (t) => [...new Set(t.toLowerCase().match(/\b[a-z]{8,}\b/g) || [])].slice(0, 2);
+    const dirB = path.join(tmp, 'r53b');
+    fs.mkdirSync(dirB, { recursive: true });
+    let oB = null, oB2 = null;
+    try {
+      oB = new Orchestrator({ dbPath: path.join(dirB, 'state.db'), vaultPath: path.join(dirB, 'vault'), llmEnabled: false, llmEndpoint: fake.url, embedModel: 'stub-embed', extractModel: 'stub/extract-1', llmTimeoutMs: 5000, sourceRoots: [dirB], autoIngest: { enabled: false, onMaintain: false } });
+      let tick = Date.parse('2026-10-01T00:00:00.000Z');
+      const ingB = async (name, text, opts = {}) => {
+        const f = path.join(dirB, `${name}.md`);
+        fs.writeFileSync(f, text);
+        oB.cfg.llmEnabled = false;
+        const id = (await oB.ingest({ path: f, type: 'note', ...opts })).entry.id;
+        oB.cfg.llmEnabled = true;
+        oB.db.prepare('UPDATE entries SET created_at=? WHERE id=?').run(new Date(tick += 60e3).toISOString(), id); // a strict age order
+        return id;
+      };
+      const rowB = (id) => JSON.stringify({ e: oB.db.prepare('SELECT * FROM entries WHERE id=?').get(id), v: oB.db.prepare('SELECT * FROM vectors WHERE entry_id=?').get(id),
+        c: oB.db.prepare("SELECT id, status, metadata FROM claims WHERE json_extract(source,'$.sourceId') = (SELECT source_id FROM entries WHERE id=?) ORDER BY id").all(id) });
+      const runB = (opts = {}) => oB.reextract(opts);
+      const inv = (r) => r.examined === r.reextracted + Object.values(r.skipped).reduce((a, b) => a + b, 0) + r.remaining;
+
+      // Curated knowledge: a wisdom-tier entry (curated promotion) and an operator-authority ingest.
+      const W = await ingB('wisdom', 'Kestrelwick foundry cast bronze bells for the cathedral tower. Founders tuned each bell by shaving the inner lip. The peal was rung at the midsummer festival.');
+      const pw = await oB.promote(W, 'wisdom', { curated: true });
+      const O = await ingB('operator', 'Ashbury watermill ground spelt flour with restored millstones. Millers dressed the stones every spring. Visitors buy flour at the mill shop.', { authority: 'operator', curated: true });
+      ok(oB.recall(W).tier === 'wisdom' && pw?.success !== false && oB.recall(O).provenance.authority === 'operator', `fixture: a wisdom-tier entry (curated promotion) and an operator-authority entry`);
+      const w0 = rowB(W), o0 = rowB(O);
+      const audit0 = oB.db.prepare('SELECT MAX(id) m FROM audit').get().m || 0;
+      const callsC = fake.state.chatCalls;
+      const c1B = await runB({});
+      ok(c1B.reextracted === 0 && c1B.skipped.denied === 2 && fake.state.chatCalls === callsC && rowB(W) === w0 && rowB(O) === o0 && inv(c1B),
+        'the default (uncurated) run leaves a wisdom-tier entry and an operator-authority entry byte-identical (skipped.denied, no model call)');
+      const c2B = await runB({ all: true, retryFailed: true });
+      ok(c2B.reextracted === 0 && c2B.skipped.denied === 2 && rowB(W) === w0 && rowB(O) === o0, '--all and --retry-failed do not reach curated entries either');
+
+      // A poison entry (HTTP 400 for its text) skips only itself and cools down; the rest progress.
+      const P = await ingB('poison', 'Gorsemoor quarry cut granite kerbstones for the old town square. Masons dressed every block by hand. Deliveries arrive by rail.');
+      const G1 = await ingB('good1', 'Wrenfield beekeepers moved their hives onto heather moorland in August. The colonies produced a dark, thixotropic honey. Jars sell at the autumn fair.');
+      const G2 = await ingB('good2', 'Dunmarrow lifeboat crew launched twice during the equinox gales. Both fishing vessels were towed safely into harbour. The station thanked its volunteers.');
+      const p0 = rowB(P);
+      fake.state.queue = ['http-400'];
+      const p1 = await runB({});
+      ok(p1.success === true && p1.stopped === null && p1.reextracted === 2 && p1.skipped.fallback === 1 && p1.remaining === 0 && rowB(P) === p0
+        && JSON.stringify(p1.entries.map((e) => e.id)) === JSON.stringify([G1, G2]) && inv(p1),
+        'HTTP 400 for one entry (its text overflows the context) skips only that entry: the pass goes on and re-extracts the two after it');
+      const att = oB.db.prepare("SELECT detail FROM log WHERE operation='reextract-attempt'").all().map((r) => JSON.parse(r.detail));
+      ok(att.length === 1 && att[0].entry === P && att[0].reason === 'http-400', 'the per-entry failure is logged (reextract-attempt), the entry itself untouched');
+      const callsP = fake.state.chatCalls;
+      const p2 = await runB({});
+      ok(p2.success === true && p2.reextracted === 0 && p2.skipped.retryLater === 1 && p2.remaining === 0 && fake.state.chatCalls === callsP && rowB(P) === p0 && inv(p2),
+        'a re-run leaves the poison entry alone (retryLater, no model call): remaining reaches 0, the loop ends');
+      oB.db.prepare("UPDATE log SET ts=? WHERE operation='reextract-attempt'").run(new Date(Date.now() - 25 * 3600e3).toISOString());
+      const p3 = await runB({});
+      ok(p3.reextracted === 1 && p3.entries[0]?.id === P && oB.recall(P).provenance.extraction?.mode === 'lmstudio', 'after 24 h the entry is retried (and re-extracted once the model takes it)');
+
+      // Persistently unparseable / 422 entries at the head cannot starve a later one across runs (--limit 2).
+      const U1 = await ingB('unparse1', 'Pellingham clockmakers repaired the market hall turret clock. The pendulum was rebalanced with lead shot. It now keeps time within seconds.');
+      const U2 = await ingB('unparse2', 'Stonyhurst ramblers waymarked a coastal path between two fishing villages. Volunteers replaced rotten stiles. The route opens at Easter.');
+      const H1 = await ingB('later', 'Ivybridge cheesemakers aged a washed rind cheese in limestone caves. Affineurs turned each wheel weekly. The first batch sold within days.');
+      const u1 = rowB(U1), u2 = rowB(U2);
+      fake.state.queue = ['unparseable', 'http-422'];
+      const s1 = await runB({ limit: 2 });
+      ok(s1.reextracted === 0 && s1.skipped.fallback === 2 && s1.stopped === null && s1.remaining === 1 && s1.success === true && inv(s1), '--limit 2 spent on two failing entries (unparseable, HTTP 422): 1 remaining');
+      const s2 = await runB({ limit: 2 });
+      ok(s2.reextracted === 1 && s2.entries[0]?.id === H1 && s2.skipped.retryLater === 2 && s2.remaining === 0 && rowB(U1) === u1 && rowB(U2) === u2 && inv(s2),
+        'the next run reaches the later entry (the failing two cool down): progress across runs, remaining 0');
+      const N = await ingB('fresh', 'Calderbrook choir recorded an album of sea shanties in the parish church. Singers rehearsed through the winter. Proceeds fund the roof repair.');
+      const s3 = await runB({ retryFailed: true, limit: 1 });
+      ok(s3.reextracted === 1 && s3.entries[0]?.id === N && s3.remaining === 2 && inv(s3), '--retry-failed retries them now, but a never-failed entry still goes first (failed ones last)');
+      fake.state.queue = ['ok', 'ok'];
+      const s4 = await runB({ retryFailed: true });
+      ok(s4.reextracted === 2 && s4.remaining === 0, '--retry-failed: the two failed entries re-extracted once the model takes them');
+
+      // A model that is DOWN (5xx, 429) still stops the pass, and is not held against the entry.
+      const D = await ingB('down', 'Ravensholt orienteering club mapped a new course through the pine forest. Juniors trained on the easier loop. Results were posted online.');
+      const d0 = rowB(D);
+      for (const st of ['http-503', 'http-429']) {
+        fake.state.queue = [st];
+        const dr = await runB({});
+        ok(dr.success === false && dr.stopped?.reason === st && dr.stopped.id === D && dr.skipped.fallback === 1 && dr.remaining === 0 && rowB(D) === d0 && inv(dr), `${st} → the model is down: pass stopped, success false, entry byte-identical`);
+      }
+      ok(!oB.db.prepare("SELECT detail FROM log WHERE operation='reextract-attempt'").all().some((r) => JSON.parse(r.detail).entry === D), 'a down model logs no per-entry failure');
+      const d3 = await runB({});
+      ok(d3.reextracted === 1 && d3.skipped.retryLater === 0, 'so the entry is re-extracted as soon as the model is back (no cooldown)');
+
+      // An error while writing one entry: the document and the run log row still come back.
+      const E1 = await ingB('err1', 'Hartwell canal trust restored a flight of six locks. Volunteers rebuilt the lock gates in oak. Narrowboats returned in the spring.');
+      const E2 = await ingB('err2', 'Brindlecombe weavers revived a pattern from an eighteenth century pattern book. Looms were rethreaded by hand. The cloth won a county prize.');
+      const e20 = rowB(E2);
+      const embed0 = oB.embedder.embed.bind(oB.embedder);
+      let nEmb = 0;
+      oB.embedder.embed = async (t) => { const r = await embed0(t); return ++nEmb === 2 ? { ...r, vector: [...r.vector, 0] } : r; };
+      let e1B = null, e1Err = null;
+      try { e1B = await runB({}); } catch (err) { e1Err = err.message; }
+      oB.embedder.embed = embed0;
+      const runLog = oB.db.prepare("SELECT detail FROM log WHERE operation='reextract-run' ORDER BY id DESC LIMIT 1").get();
+      ok(!e1Err && e1B?.success === true && e1B.reextracted === 1 && e1B.entries[0]?.id === E1 && e1B.stopped?.id === E2 && e1B.stopped.reason === 'error' && /dim mismatch/.test(e1B.stopped.message)
+        && e1B.remaining === 1 && rowB(E2) === e20 && inv(e1B), `an embedding-dimension error on the 2nd entry → one JSON document: 1 re-extracted, stopped { reason: error }, 1 remaining${e1Err ? ` (threw: ${e1Err})` : ''}`);
+      ok(JSON.parse(runLog?.detail || '{}').stopped?.reason === 'error', 'and the run is logged (reextract-run) with its stop reason');
+      const e2B = await runB({});
+      ok(e2B.reextracted === 1 && e2B.entries[0]?.id === E2, 'a re-run picks the stopped entry up');
+      ok(oB.db.prepare('SELECT detail FROM audit WHERE id > ? AND kind=?').all(audit0, 'governance').map((r) => JSON.parse(r.detail)).filter((d) => d.ctx?.reextract).every((d) => d.ctx.curated === false),
+        'every reextract governance audit row records curated:false (never derived from the stored authority)');
+
+      // The path gate runs before the source is opened: narrowed roots → denied, not unreadable.
+      const X = await ingB('outside', 'Larkspur ferry museum displayed a restored paddle steamer engine. Engineers ran it on compressed air. School groups visit weekly.');
+      const xPath = oB.db.prepare('SELECT s.path FROM entries e JOIN sources s ON s.id = e.source_id WHERE e.id=?').get(X).path;
+      fs.rmSync(xPath); fs.mkdirSync(xPath); // opening it would fail: an unread path stays unreadable-free
+      const x1 = await runB({ dryRun: true });
+      ok(x1.skipped.unreadable === 1 && x1.remaining === 0, 'fixture: with the wide roots the entry\'s source is opened (and is unreadable)');
+      fs.mkdirSync(path.join(dirB, 'inner'), { recursive: true });
+      oB2 = new Orchestrator({ dbPath: path.join(dirB, 'state.db'), vaultPath: path.join(dirB, 'vault'), llmEnabled: true, llmEndpoint: fake.url, embedModel: 'stub-embed', extractModel: 'stub/extract-1', sourceRoots: [path.join(dirB, 'inner')], autoIngest: { enabled: false, onMaintain: false } });
+      const x2 = await oB2.reextract({ dryRun: true });
+      ok(x2.skipped.unreadable === 0 && x2.skipped.denied === 3 && x2.remaining === 0, 'with roots narrowed away from it the gate refuses the path first (skipped.denied, never opened)');
+    } finally {
+      oB2?.close(); oB?.close();
       await fake.close();
     }
   }

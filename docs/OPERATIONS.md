@@ -157,7 +157,11 @@ its credentials (if any) out of `midmem.env` while a capture system can read tha
    active entry whose source file is unchanged and updates it **in place**, keeping its id, tier, lease,
    counters (retrieval, helpful, trust), scope, project, authority and `provenance.source`; the old
    claims are archived with lineage, the entry is re-embedded. It writes only when the model really
-   answers and stops at the first sign the model is down, so it is safe to start and re-run:
+   answers and stops at the first sign the model is down, so it is safe to start and re-run. An entry
+   whose own answer fails (unparseable, or an HTTP 400/413 when its text overflows the loaded context)
+   is skipped and left alone for 24 h (`skipped.retryLater`), so the loop still reaches `remaining: 0`;
+   `--retry-failed` retries such entries at once (after loading a model with a larger context, say).
+   Curated entries (tier `wisdom`, `operator` authority) are never touched (`skipped.denied`):
    ```sh
    midmem reextract --dry-run                    # what it would do; calls no model, writes nothing
    midmem reextract --limit 20                   # 20 model calls (~5 min); repeat until remaining: 0

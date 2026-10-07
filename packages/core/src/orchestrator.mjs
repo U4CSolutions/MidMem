@@ -12,7 +12,7 @@ import { Extractor } from './extract.mjs';
 import { GraphStore } from './graph.mjs';
 import { ClaimStore } from './claims.mjs';
 import { SigmaVerifier } from './verify.mjs';
-import { PolicyEvaluator, governed } from './governance.mjs';
+import { PolicyEvaluator, governed, GovernanceError } from './governance.mjs';
 import { projectVault, probeProjection } from './project.mjs';
 import { hybridSearch, progressiveSearch } from './retrieval.mjs';
 import { checkGrounding, groundingScore } from './grounding.mjs';
@@ -31,6 +31,14 @@ import { genId, sha12, nowISO, json, cosine } from './util.mjs';
 import { normalizeProject, resolveProjects } from './projectaxis.mjs';
 import { LibraryRegistry } from './libraries.mjs';
 import { sourceInstructionVerdict, mergeInstructionVerdicts } from './recallpolicy.mjs';
+
+/** `reextract` (2026-10-07): a per-entry failure (unparseable answer, an HTTP 4xx for that text) is
+ *  not retried for this long, so a poison entry cannot stall "repeat until remaining is 0". */
+const REEXTRACT_RETRY_MS = 24 * 3600e3;
+/** A model that is DOWN stops a `reextract` pass (one timeout, not one per entry); every other
+ *  fallback reason belongs to the entry. HTTP: 5xx, auth / missing model (401, 403, 404), 408, 429. */
+const reextractModelDown = (reason) => ['disabled', 'unreachable', 'timeout', 'embedder-unavailable'].includes(reason)
+  || /^http-(5\d\d|401|403|404|408|429)$/.test(reason);
 
 /**
  * Source provenance passthrough (roadmap #46): the caller's own identity for a source — where it
@@ -558,26 +566,38 @@ export class Orchestrator {
    * type, scope, project, authority, lease (expires_at), counters (retrieval/helpful/trust),
    * provenance.source and alsoSources. Summary (content), concepts (graph nodes + the entry's star
    * edges) and claims are replaced through ingest's steps: the same governance gate (the source path
-   * must still be allowed; op 'ingest' with ctx.reextract), grounding with quarantine, concept
-   * verification, a re-embed; old claims are archived with lineage (`archivedBy` ↔ `reextractOf`),
-   * never deleted; the instruction-likeness verdict (#40) is recomputed from the full source text.
-   * provenance gains `extraction: { mode, model, at }` and a chain step 'reextract'.
+   * must still be allowed; op 'ingest' with ctx.reextract, never curated), grounding with quarantine,
+   * concept verification, a re-embed; old claims are archived with lineage (`archivedBy` ↔
+   * `reextractOf`), never deleted; the instruction-likeness verdict (#40) is recomputed from the full
+   * source text. provenance gains `extraction: { mode, model, at }` and a chain step 'reextract'.
+   * Curated knowledge is never rewritten: an entry in a curated-only tier (wisdom) or with operator
+   * authority is `skipped.denied` (the run is uncurated, and the gate is told so), as is a source path
+   * the gate refuses — checked BEFORE the file is opened.
    *
    * It writes ONLY when the extractor really answered (mode 'lmstudio') and the embedder did too —
-   * otherwise the entry is left exactly as it was and counted `skipped.fallback`; a model that is
-   * down (disabled / unreachable / timeout / HTTP error) also stops the pass there (`stopped`), so a
-   * dead endpoint costs one timeout, not one per entry. A changed, missing or unreadable source is
-   * skipped with that reason (a normal re-ingest handles a change; a file only the capture system's
-   * user can read is 'unreadable', never a crash). Sequential (one model call at a time), bounded by
-   * `limit` (model calls per run), resumable: the default selection (`all: false`) takes entries whose
-   * extraction mode is not 'lmstudio' (legacy entries without a record included), so a re-run picks
-   * up what is left. Selection: `libraryId` [+ `docIds`] (provenance.source identity; per doc, its
-   * active entry — a doc whose newest entry is forgotten counts `deleted`, an unknown or inactive one
-   * `notSelected`), else every active ingested entry. `dryRun` reads and classifies, calls no model
-   * and writes nothing (not even a log or audit row). Never runs maintenance.
+   * otherwise the entry is left exactly as it was and counted `skipped.fallback`. A model that is DOWN
+   * (disabled / unreachable / timeout / HTTP 5xx, 401, 403, 404, 408, 429 / embedder down) stops the
+   * pass there (`stopped`), so a dead endpoint costs one timeout, not one per entry. A failure that
+   * belongs to the ENTRY (an unparseable or empty answer, any other HTTP 4xx such as 400 / 413 for a
+   * text that overflows the loaded context) skips only that entry and is logged ('reextract-attempt',
+   * the entry itself untouched): a re-run orders never-failed entries first and leaves an entry that
+   * failed within `REEXTRACT_RETRY_MS` (24 h) alone (`skipped.retryLater`, no model call) unless
+   * `retryFailed` — so a poison entry never starves the rest and "repeat until remaining is 0" ends.
+   * An unexpected error while writing one entry (an embedding-dimension mismatch, a busy database)
+   * stops the pass with `stopped: { id, reason: 'error', message }`; that entry stays in `remaining`
+   * and the run still returns its document and logs its 'reextract-run' row.
+   * A changed, missing or unreadable source is skipped with that reason (a normal re-ingest handles a
+   * change; a file only the capture system's user can read is 'unreadable', never a crash).
+   * Sequential (one model call at a time), bounded by `limit` (model calls per run), resumable: the
+   * default selection (`all: false`) takes entries whose extraction mode is not 'lmstudio' (legacy
+   * entries without a record included), so a re-run picks up what is left. Selection: `libraryId`
+   * [+ `docIds`] (provenance.source identity; per doc, its active entry — a doc whose newest entry is
+   * forgotten counts `deleted`, an unknown or inactive one `notSelected`), else every active ingested
+   * entry. `dryRun` reads and classifies, calls no model and writes nothing (not even a log or audit
+   * row). Never runs maintenance.
    * Invariant: examined = reextracted + Σ skipped + remaining.
    */
-  async reextract({ libraryId = null, docIds = [], all = false, limit = 100, dryRun = false } = {}) {
+  async reextract({ libraryId = null, docIds = [], all = false, limit = 100, dryRun = false, retryFailed = false } = {}) {
     if (!Array.isArray(docIds)) throw new Error('docIds must be an array');
     const idOk = (v, what) => { if (typeof v !== 'string' || !ENTRY_STATUS_ID_RE.test(v)) throw new Error(`bad ${what}: ${String(v).slice(0, 40)}`); };
     if (libraryId !== null && libraryId !== undefined) idOk(libraryId, 'library id');
@@ -585,7 +605,7 @@ export class Orchestrator {
     if (docIds.length && !libraryId) throw new Error('--doc-ids needs --library');
     if (docIds.length > 5000) throw new Error('at most 5000 doc ids');
     if (!Number.isInteger(limit) || limit < 1 || limit > 5000) throw new Error('limit must be an integer 1..5000');
-    const skipped = { changed: 0, missing: 0, unreadable: 0, fallback: 0, deleted: 0, notSelected: 0, denied: 0 };
+    const skipped = { changed: 0, missing: 0, unreadable: 0, fallback: 0, deleted: 0, notSelected: 0, denied: 0, retryLater: 0 };
     const out = { success: true, dryRun: !!dryRun, examined: 0, reextracted: 0, skipped, entries: [], remaining: 0, stopped: null };
     const now = Date.now();
     const selected = (e) => all || e.provenance?.extraction?.mode !== 'lmstudio';
@@ -617,42 +637,59 @@ export class Orchestrator {
       out.examined += cands.length;
     }
 
-    // 2. Classify without writing: selection, source file (unchanged?), governance (evaluated, not audited).
+    // 2. Classify without writing: selection, curation, the source path (exists? allowed? — before any
+    //    open), the file (unchanged?), per-entry failures still cooling down. Evaluated, not audited.
     const srcRow = this.db.prepare('SELECT path, type, title, hash FROM sources WHERE id=?');
+    const locate = async (p) => {
+      try { await fs.realpath(p); return null; } // the same resolution the path gate makes
+      catch (e) { return e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? 'missing' : 'unreadable'; }
+    };
     const readSource = async (p) => {
       try { return { text: await fs.readFile(p, 'utf8') }; }
       catch (e) { return { error: e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? 'missing' : 'unreadable' }; }
     };
-    const gateCtx = (e, s) => {
-      const auth = normalizeAuthority(e.provenance?.authority) || 'doc';
-      return { path: s.path, type: s.type, scope: e.scope, curated: auth === 'operator', authority: auth, project: e.project ?? null, tier: e.tier, reextract: e.id };
-    };
+    // Never curated: an uncurated run cannot satisfy a curated-only tier or operator authority.
+    const gateCtx = (e, s) => ({ path: s.path, type: s.type, scope: e.scope, curated: false, authority: normalizeAuthority(e.provenance?.authority) || 'doc', project: e.project ?? null, tier: e.tier, reextract: e.id });
+    const curatedRow = (e) => !!this.memory.tier(e.tier)?.curatedOnly || normalizeAuthority(e.provenance?.authority) === 'operator';
+    const allowed = (e, s) => !curatedRow(e) && this.gov.evaluator.evaluate('ingest', gateCtx(e, s)).allow;
+    // Per-entry failures (the last one per entry, newer than its last extraction) from the log.
+    const lastFail = new Map();
+    for (const r of this.db.prepare("SELECT json_extract(detail,'$.entry') entry, MAX(ts) ts FROM log WHERE operation='reextract-attempt' AND json_valid(detail) GROUP BY 1").all()) {
+      if (typeof r.entry === 'string') lastFail.set(r.entry, r.ts);
+    }
+    const failedAt = (e) => { const t = lastFail.get(e.id); return t && t > (e.provenance?.extraction?.at || '') ? t : null; };
     const eligible = [];
     for (const id of cands) {
       const e = this.recall(id);
       if (!e || !live(e) || !selected(e)) { skipped.notSelected++; continue; }
       const s = e.source_id ? srcRow.get(e.source_id) : null;
       if (!s) { skipped.missing++; continue; }
+      const where = await locate(s.path);
+      if (where) { skipped[where]++; continue; }
+      if (!allowed(e, s)) { skipped.denied++; continue; }
+      const failed = failedAt(e);
+      if (failed && !retryFailed && now - Date.parse(failed) < REEXTRACT_RETRY_MS) { skipped.retryLater++; continue; }
       const r = await readSource(s.path);
       if (r.error) { skipped[r.error]++; continue; }
       if (sha12(r.text) !== s.hash) { skipped.changed++; continue; }
-      if (!this.gov.evaluator.evaluate('ingest', gateCtx(e, s)).allow) { skipped.denied++; continue; }
-      eligible.push(id);
+      eligible.push({ id, failed: failed || '' });
     }
+    // Never-failed entries first, then the ones whose failure is oldest: a poison entry goes last.
+    eligible.sort((a, b) => (a.failed === b.failed ? 0 : !a.failed ? -1 : !b.failed ? 1 : a.failed.localeCompare(b.failed)));
     out.remaining = eligible.length;
     if (dryRun) {
-      out.entries = eligible.slice(0, limit).map((id) => ({ id, docId: this.recall(id).provenance?.source?.docId ?? null, mode: null, concepts: null, claims: null, quarantined: null }));
+      out.entries = eligible.slice(0, limit).map(({ id }) => ({ id, docId: this.recall(id).provenance?.source?.docId ?? null, mode: null, concepts: null, claims: null, quarantined: null }));
       return out;
     }
 
     // 3. Re-extract, one model call at a time, at most `limit` calls.
-    const down = (reason) => reason === 'disabled' || reason === 'unreachable' || reason === 'timeout' || reason.startsWith('http-') || reason === 'embedder-unavailable';
     let calls = 0;
-    for (const id of eligible) {
+    for (const { id } of eligible) {
       if (calls >= limit) break;
       const e = this.recall(id);
       const s = e?.source_id ? srcRow.get(e.source_id) : null;
       if (!s) { out.remaining--; skipped[e ? 'missing' : 'deleted']++; continue; } // hard-deleted meanwhile
+      if (!allowed(e, s)) { out.remaining--; skipped.denied++; continue; } // gate first, then the re-read
       const r = await readSource(s.path); // re-read: the file may have moved on since classification
       if (r.error || sha12(r.text) !== s.hash) { out.remaining--; skipped[r.error || 'changed']++; continue; }
       calls++;
@@ -665,17 +702,23 @@ export class Orchestrator {
       }
       if (reason) {
         out.remaining--; skipped.fallback++;
-        if (down(reason)) { out.stopped = { id, reason }; break; }
+        if (reextractModelDown(reason)) { out.stopped = { id, reason }; break; }
+        this.db.logOp('reextract-attempt', { entry: id, path: s.path, reason, model: this.cfg.extractModel ?? null });
         continue;
       }
-      const res = await this.#reextractOne(id, { text: r.text, source: s, ex, emb, ctx: gateCtx(e, s), all });
+      let res;
+      try { res = await this.#reextractOne(id, { text: r.text, source: s, ex, emb, ctx: gateCtx(e, s), all }); }
+      catch (err) {
+        if (err instanceof GovernanceError) res = { skip: 'denied' };
+        else { out.stopped = { id, reason: 'error', message: String(err?.message || err).slice(0, 300) }; break; } // stays in `remaining`
+      }
       out.remaining--;
       if (res.skip) { skipped[res.skip]++; continue; }
       out.reextracted++;
       out.entries.push(res.entry);
     }
     if (out.stopped && !out.reextracted) out.success = false;
-    this.db.logOp('reextract-run', { libraryId, docIds: docIds.length, all: !!all, limit, examined: out.examined, reextracted: out.reextracted, skipped, remaining: out.remaining, stopped: out.stopped });
+    this.db.logOp('reextract-run', { libraryId, docIds: docIds.length, all: !!all, retryFailed: !!retryFailed, limit, examined: out.examined, reextracted: out.reextracted, skipped, remaining: out.remaining, stopped: out.stopped });
     if (out.reextracted) this.#markVaultDirty();
     return out;
   }
@@ -705,6 +748,7 @@ export class Orchestrator {
         const e = this.recall(id);
         if (!e || e.status === 'deleted') return { skip: 'deleted' };
         if (e.status !== 'active' || (!all && e.provenance?.extraction?.mode === 'lmstudio')) return { skip: 'notSelected' };
+        if (this.memory.tier(e.tier)?.curatedOnly || normalizeAuthority(e.provenance?.authority) === 'operator') return { skip: 'denied' }; // curated meanwhile
         const ts = nowISO();
         const old = e.provenance || {};
         const auth = normalizeAuthority(old.authority) || 'doc';

@@ -159,7 +159,7 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    unlinks it from other entries' `alsoSources`, and the calling system logs each forget. **(d)
    operator-initiated re-extraction (added 2026-10-07)**: only after the operator has approved an
    on-network extraction model for the store ([OPERATIONS.md](OPERATIONS.md), "Enabling an on-network
-   model"), `midmem reextract --library <id> --doc-ids a,b [--limit n] [--dry-run]` re-runs model
+   model"), `midmem reextract --library <id> --doc-ids a,b [--limit n] [--retry-failed] [--dry-run]` re-runs model
    extraction for that system's entries whose source file is **unchanged** (same path, same content hash)
    and updates each one **in place**: the same entry id, tier, scope, project, authority, lease
    (`expiresAt`), counters (retrieval, helpful, trust) and `provenance.source`. Summary, concepts and
@@ -168,20 +168,31 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    recomputed from the full source), and `provenance.extraction` records the model. It writes only when
    the model really answers: a fallback (model off, unreachable, timed out, an HTTP error, an
    unparseable answer, or the embedder down) leaves the entry exactly as it was and counts
-   `skipped.fallback`, and a model that is down stops the pass (`stopped`). A changed, missing or
-   unreadable source is skipped with that reason (a changed one is the ordinary ingest's job). Default
+   `skipped.fallback`. A model that is **down** (off, unreachable, timed out, HTTP 5xx / 401 / 403 / 404
+   / 408 / 429, the embedder down) stops the pass (`stopped: { id, reason }`); a failure that belongs to
+   **one entry** (an unparseable or empty answer, any other HTTP 4xx such as 400 or 413 for a text that
+   overflows the loaded context) skips only that entry, and later runs leave it alone for 24 hours
+   (`skipped.retryLater`, no model call; `--retry-failed` retries now) and take never-failed entries
+   first, so one poison source never stalls the loop. An unexpected error while writing one entry stops
+   the pass with `stopped: { id, reason: "error", message }` (that entry stays in `remaining`) and the
+   document is still printed. **Curated knowledge is never rewritten:** an entry in a curated-only tier
+   (`wisdom`) or with `operator` authority counts `skipped.denied` (the run is never curated). A
+   changed, missing or unreadable source is skipped with that reason (a changed one is the ordinary
+   ingest's job); the source path passes the governance gate before the file is opened. Default
    selection `--only-fallback` (entries whose extraction is not `lmstudio`, legacy entries without a
    record included), so a re-run resumes where the last one stopped; `--all` forces; `--limit` caps the
    model calls per run (default 100, ≤ 5000); one model call at a time. It prints ONE JSON document:
    ```
    { success, dryRun, examined, reextracted,
-     skipped: { changed, missing, unreadable, fallback, deleted, notSelected, denied },
+     skipped: { changed, missing, unreadable, fallback, deleted, notSelected, denied, retryLater },
      entries: [ { id, docId, mode, concepts, claims, quarantined } ], remaining, stopped }
    ```
    `examined = reextracted + Σ skipped + remaining`; per requested doc id its active entry is examined (a
    doc whose newest entry was forgotten counts `deleted`; an unknown or inactive doc, or one already
-   model-extracted, `notSelected`); `denied` = the governance gate refused the source path or scope;
-   `success: false` only when the pass stopped before re-extracting anything; `--dry-run` lists the
+   model-extracted, `notSelected`); `denied` = a curated entry, or the governance gate refused the
+   source path or scope; `retryLater` = its last answer failed less than 24 h ago; `remaining > 0` =
+   call again; `success: false` only when the pass stopped (model down, or an error) before
+   re-extracting anything; `--dry-run` lists the
    would-be `entries` with `mode: null`, calls no model and writes nothing. CLI only (no MCP tool). It
    reads the source files, so it runs as the user that can read the archive (the capture system's own
    user, or through the capture system); run as any other user those sources come back `unreadable`.
