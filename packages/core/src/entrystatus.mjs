@@ -102,6 +102,8 @@ function view(o, e, withClaims) {
     alsoSources: (Array.isArray(p.alsoSources) ? p.alsoSources : []).map((a) => ({ libraryId: a?.source?.libraryId ?? null, docId: a?.source?.docId ?? null })),
     liftedFrom: p.liftedFrom ?? null,
     grounding: { summaryScore: p.grounding?.summaryScore ?? null },
+    // Which extractor produced summary/concepts/claims ({ mode, model, at }); null for a legacy entry.
+    extraction: p.extraction && typeof p.extraction === 'object' ? { mode: p.extraction.mode ?? null, model: p.extraction.model ?? null, at: p.extraction.at ?? null } : null,
     claims: {
       active: cl.filter((c) => c.status === 'active' || c.status === 'verified').length, total: cl.length,
       ...(withClaims ? { items: cl.slice(0, MAX_CLAIM_ITEMS).map((c) => ({ id: c.id, content: clip(c.content, 500), status: c.status })) } : {}),

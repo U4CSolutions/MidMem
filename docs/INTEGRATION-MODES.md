@@ -156,18 +156,49 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    (one per entry per cooldown) and never sends a vote the operator did not cast. **(c) operator-initiated
    forget**: `midmem forget-source --library <id> --doc-id <docId>`, sent only when the operator permanently
    deletes that source in the capture system. It soft-forgets every entry from the source (#41 cascade) and
-   unlinks it from other entries' `alsoSources`, and the calling system logs each forget. Neither exception
-   changes an entry's authority (`web`), tier, scope or project.
+   unlinks it from other entries' `alsoSources`, and the calling system logs each forget. **(d)
+   operator-initiated re-extraction (added 2026-10-07)**: only after the operator has approved an
+   on-network extraction model for the store ([OPERATIONS.md](OPERATIONS.md), "Enabling an on-network
+   model"), `midmem reextract --library <id> --doc-ids a,b [--limit n] [--dry-run]` re-runs model
+   extraction for that system's entries whose source file is **unchanged** (same path, same content hash)
+   and updates each one **in place**: the same entry id, tier, scope, project, authority, lease
+   (`expiresAt`), counters (retrieval, helpful, trust) and `provenance.source`. Summary, concepts and
+   claims are replaced through ingest's own steps (ungrounded concepts and claims quarantined; the old
+   claims archived with lineage, never deleted; the entry re-embedded; the instruction-likeness verdict
+   recomputed from the full source), and `provenance.extraction` records the model. It writes only when
+   the model really answers: a fallback (model off, unreachable, timed out, an HTTP error, an
+   unparseable answer, or the embedder down) leaves the entry exactly as it was and counts
+   `skipped.fallback`, and a model that is down stops the pass (`stopped`). A changed, missing or
+   unreadable source is skipped with that reason (a changed one is the ordinary ingest's job). Default
+   selection `--only-fallback` (entries whose extraction is not `lmstudio`, legacy entries without a
+   record included), so a re-run resumes where the last one stopped; `--all` forces; `--limit` caps the
+   model calls per run (default 100, ≤ 5000); one model call at a time. It prints ONE JSON document:
+   ```
+   { success, dryRun, examined, reextracted,
+     skipped: { changed, missing, unreadable, fallback, deleted, notSelected, denied },
+     entries: [ { id, docId, mode, concepts, claims, quarantined } ], remaining, stopped }
+   ```
+   `examined = reextracted + Σ skipped + remaining`; per requested doc id its active entry is examined (a
+   doc whose newest entry was forgotten counts `deleted`; an unknown or inactive doc, or one already
+   model-extracted, `notSelected`); `denied` = the governance gate refused the source path or scope;
+   `success: false` only when the pass stopped before re-extracting anything; `--dry-run` lists the
+   would-be `entries` with `mode: null`, calls no model and writes nothing. CLI only (no MCP tool). It
+   reads the source files, so it runs as the user that can read the archive (the capture system's own
+   user, or through the capture system); run as any other user those sources come back `unreadable`.
+   None of these exceptions changes an entry's authority (`web`), tier, scope or project.
 7. **Reads.** Any consumer: `midmem query "<q>" --projects library` (MCP `query` with
    `projects: ["library"]`), or unfiltered when the caller has no project set. Rows carry
    `authority`, `provenance.source`, `fidelity`, `status` and the instruction-likeness flag (#40).
    `midmem entries --library <id> --doc-ids a,b [--claims]` (MCP `entry_status`) returns each
    source's lifecycle view: tier, lease, counters, concepts, claims and promotion progress.
-   Reading it is not a recall; it never renews a lease or bumps `retrieval_count`.
+   Reading it is not a recall; it never renews a lease or bumps `retrieval_count`. Each entry carries
+   `extraction: { mode, model, at }` — `lmstudio` (model-extracted) or `fallback` (the deterministic
+   offline heuristics: lead sentences and frequent tokens) — or `null` for an entry ingested before
+   2026-10-07, which recorded nothing; a capture system uses it to tell model concepts from fallback ones.
 8. **Call shape.** Shell out to the `midmem` CLI through a durable queue with a frozen argv allowlist
    and a provider switch (mock in every test: zero `execFile`); or import `Orchestrator` in-process
    for a Node caller on the same host. Both are governed identically.
-   The allowlist names the verbs `ingest`, `feedback`, `forget-source` and `entries`.
+   The allowlist names the verbs `ingest`, `feedback`, `forget-source`, `entries` and `reextract`.
 
 **Coming for this mode:** metadata filters on query (#48) and MidMem's Qdrant spin-up with a vector
 backfill (#50, #51). None changes the contract above. The Qdrant adapter's code half has landed: search
