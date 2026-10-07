@@ -102,7 +102,7 @@ Store a memory entry (tier default: memory; wisdom requires curated:true). scope
 
 ## `entry_status`
 
-Read-only lifecycle view of entries (INTEGRATION-MODES §6 item 7): tier, lease (expiresAt), trust/retrieval/helpful counters, concepts, claims and promotion progress (next tier, rule, blockers, have/need, grounding gate; promotion runs only in maintain), plus the store's promotion thresholds and feedback trust deltas. Give entryIds, or libraryId (optionally docIds) for one head entry per source doc with history and linkedTo. Reading is NOT a recall: it never bumps retrieval_count or renews a lease.
+Read-only lifecycle view of entries (INTEGRATION-MODES §6 item 7): tier, lease (expiresAt), trust/retrieval/helpful counters, concepts, claims, extraction ({mode, model, at}: which extractor produced them — lmstudio or fallback; null for a legacy entry) and promotion progress (next tier, rule, blockers, have/need, grounding gate; promotion runs only in maintain), plus the store's promotion thresholds and feedback trust deltas. Give entryIds, or libraryId (optionally docIds) for one head entry per source doc with history and linkedTo. Reading is NOT a recall: it never bumps retrieval_count or renews a lease.
 
 | arg | type | required | notes |
 |---|---|---|---|

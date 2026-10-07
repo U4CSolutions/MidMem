@@ -12,7 +12,7 @@ import { Extractor } from './extract.mjs';
 import { GraphStore } from './graph.mjs';
 import { ClaimStore } from './claims.mjs';
 import { SigmaVerifier } from './verify.mjs';
-import { PolicyEvaluator, governed } from './governance.mjs';
+import { PolicyEvaluator, governed, GovernanceError } from './governance.mjs';
 import { projectVault, probeProjection } from './project.mjs';
 import { hybridSearch, progressiveSearch } from './retrieval.mjs';
 import { checkGrounding, groundingScore } from './grounding.mjs';
@@ -22,7 +22,7 @@ import { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, forgetNodes,
 import { verifyTransition, verifyPromotion, auditTransition } from './transitions.mjs';
 import { loadPacks, recordPattern } from './packs.mjs';
 import { exportKnowledge } from './export.mjs';
-import { entryStatus, forgetSource, feedbackIfActive } from './entrystatus.mjs';
+import { entryStatus, forgetSource, feedbackIfActive, ENTRY_STATUS_ID_RE } from './entrystatus.mjs';
 import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
 import { normalizeAuthority, clampAuthority, authorityRank } from './authority.mjs';
 import { checkConsistency } from './consistency.mjs';
@@ -31,6 +31,14 @@ import { genId, sha12, nowISO, json, cosine } from './util.mjs';
 import { normalizeProject, resolveProjects } from './projectaxis.mjs';
 import { LibraryRegistry } from './libraries.mjs';
 import { sourceInstructionVerdict, mergeInstructionVerdicts } from './recallpolicy.mjs';
+
+/** `reextract` (2026-10-07): a per-entry failure (unparseable answer, an HTTP 4xx for that text) is
+ *  not retried for this long, so a poison entry cannot stall "repeat until remaining is 0". */
+const REEXTRACT_RETRY_MS = 24 * 3600e3;
+/** A model that is DOWN stops a `reextract` pass (one timeout, not one per entry); every other
+ *  fallback reason belongs to the entry. HTTP: 5xx, auth / missing model (401, 403, 404), 408, 429. */
+const reextractModelDown = (reason) => ['disabled', 'unreachable', 'timeout', 'embedder-unavailable'].includes(reason)
+  || /^http-(5\d\d|401|403|404|408|429)$/.test(reason);
 
 /**
  * Source provenance passthrough (roadmap #46): the caller's own identity for a source — where it
@@ -210,7 +218,11 @@ export class Orchestrator {
       // Deterministic category tag so the store tracks ongoing requests by kind (research/build/...).
       const category = categorizeIngest({ type, content: ex.summary, title }, this.packs?.rules || []);
       // A superseding version carries only its own text's verdict: a cleaned page clears the flag.
-      const prov = { originalSource: path, extractedAt: nowISO(), category, authority: auth, grounding, chain: [{ step: 'ingest', source: path }], ...(src ? { source: src } : {}), ...(ilVerdict ? { instructionLike: ilVerdict } : {}) };
+      // provenance.extraction (2026-10-07): which extractor produced this entry's summary, concepts and
+      // claims, so a capture system can tell model-extracted entries from fallback ones (`entries`) and
+      // `reextract` can select the fallback ones. Legacy entries have no record.
+      const extractedAt = nowISO();
+      const prov = { originalSource: path, extractedAt, category, authority: auth, grounding, extraction: { mode: ex.mode, model: ex.model ?? null, at: extractedAt }, chain: [{ step: 'ingest', source: path }], ...(src ? { source: src } : {}), ...(ilVerdict ? { instructionLike: ilVerdict } : {}) };
       // Sources row (the dedup hash) commits WITH the entry: a failed ingest must not
       // leave the hash behind, or re-ingests would be skipped as 'unchanged' forever.
       // Supersede-on-reingest: a changed file replaces its earlier ingests — archive
@@ -545,6 +557,261 @@ export class Orchestrator {
     const out = { success, candidates: total, batch: rows.length, reembedded, remaining: total - reembedded, model, stoppedAt, reason: stoppedAt && !reembedded ? 'embedder-offline' : stoppedAt ? 'embedder-dropped-mid-run' : null };
     this.db.logOp('reembed', out);
     return out;
+  }
+
+  /**
+   * Re-extraction in place (2026-10-07; operator decision for a store ingested while the model was
+   * off): re-run model extraction for existing ACTIVE ingested entries whose source file is UNCHANGED
+   * (same path, same content hash as the sources row) and update each entry IN PLACE — same id, tier,
+   * type, scope, project, authority, lease (expires_at), counters (retrieval/helpful/trust),
+   * provenance.source and alsoSources. Summary (content), concepts (graph nodes + the entry's star
+   * edges) and claims are replaced through ingest's steps: the same governance gate (the source path
+   * must still be allowed; op 'ingest' with ctx.reextract, never curated), grounding with quarantine,
+   * concept verification, a re-embed; old claims are archived with lineage (`archivedBy` ↔
+   * `reextractOf`), never deleted; the instruction-likeness verdict (#40) is recomputed from the full
+   * source text. provenance gains `extraction: { mode, model, at }` and a chain step 'reextract'.
+   * Curated knowledge is never rewritten: an entry in a curated-only tier (wisdom) or with operator
+   * authority is `skipped.denied` (the run is uncurated, and the gate is told so), as is a source path
+   * the gate refuses — checked BEFORE the file is opened.
+   *
+   * It writes ONLY when the extractor really answered (mode 'lmstudio') and the embedder did too —
+   * otherwise the entry is left exactly as it was and counted `skipped.fallback`. A model that is DOWN
+   * (disabled / unreachable / timeout / HTTP 5xx, 401, 403, 404, 408, 429 / embedder down) stops the
+   * pass there (`stopped`), so a dead endpoint costs one timeout, not one per entry. A failure that
+   * belongs to the ENTRY (an unparseable or empty answer, any other HTTP 4xx such as 400 / 413 for a
+   * text that overflows the loaded context) skips only that entry and is logged ('reextract-attempt',
+   * the entry itself untouched): a re-run orders never-failed entries first and leaves an entry that
+   * failed within `REEXTRACT_RETRY_MS` (24 h) alone (`skipped.retryLater`, no model call) unless
+   * `retryFailed` — so a poison entry never starves the rest and "repeat until remaining is 0" ends.
+   * An unexpected error while writing one entry (an embedding-dimension mismatch, a busy database)
+   * stops the pass with `stopped: { id, reason: 'error', message }`; that entry stays in `remaining`
+   * and the run still returns its document and logs its 'reextract-run' row.
+   * A changed, missing or unreadable source is skipped with that reason (a normal re-ingest handles a
+   * change; a file only the capture system's user can read is 'unreadable', never a crash).
+   * Sequential (one model call at a time), bounded by `limit` (model calls per run), resumable: the
+   * default selection (`all: false`) takes entries whose extraction mode is not 'lmstudio' (legacy
+   * entries without a record included), so a re-run picks up what is left. Selection: `libraryId`
+   * [+ `docIds`] (provenance.source identity; per doc, its active entry — a doc whose newest entry is
+   * forgotten counts `deleted`, an unknown or inactive one `notSelected`), else every active ingested
+   * entry. `dryRun` reads and classifies, calls no model and writes nothing (not even a log or audit
+   * row). Never runs maintenance.
+   * Invariant: examined = reextracted + Σ skipped + remaining.
+   */
+  async reextract({ libraryId = null, docIds = [], all = false, limit = 100, dryRun = false, retryFailed = false } = {}) {
+    if (!Array.isArray(docIds)) throw new Error('docIds must be an array');
+    const idOk = (v, what) => { if (typeof v !== 'string' || !ENTRY_STATUS_ID_RE.test(v)) throw new Error(`bad ${what}: ${String(v).slice(0, 40)}`); };
+    if (libraryId !== null && libraryId !== undefined) idOk(libraryId, 'library id');
+    for (const d of docIds) idOk(d, 'doc id');
+    if (docIds.length && !libraryId) throw new Error('--doc-ids needs --library');
+    if (docIds.length > 5000) throw new Error('at most 5000 doc ids');
+    if (!Number.isInteger(limit) || limit < 1 || limit > 5000) throw new Error('limit must be an integer 1..5000');
+    const skipped = { changed: 0, missing: 0, unreadable: 0, fallback: 0, deleted: 0, notSelected: 0, denied: 0, retryLater: 0 };
+    const out = { success: true, dryRun: !!dryRun, examined: 0, reextracted: 0, skipped, entries: [], remaining: 0, stopped: null };
+    const now = Date.now();
+    const selected = (e) => all || e.provenance?.extraction?.mode !== 'lmstudio';
+    const live = (e) => e.status === 'active' && !(e.expires_at && Date.parse(e.expires_at) <= now);
+
+    // 1. Candidates: per library doc its active entries, or every active ingested entry.
+    let cands = [];
+    if (libraryId) {
+      const rows = this.db.prepare(`SELECT id, status, updated_at, json_extract(provenance,'$.source.docId') doc FROM entries
+        WHERE json_valid(provenance) AND json_extract(provenance,'$.source.libraryId') = ? ORDER BY created_at, id`).all(libraryId);
+      const wanted = docIds.length ? [...new Set(docIds)] : null;
+      const want = wanted ? new Set(wanted) : null;
+      const byDoc = new Map();
+      for (const r of rows) {
+        if (typeof r.doc !== 'string' || (want && !want.has(r.doc))) continue;
+        if (!byDoc.has(r.doc)) byDoc.set(r.doc, []);
+        byDoc.get(r.doc).push(r);
+      }
+      for (const d of wanted || [...byDoc.keys()].sort()) {
+        const rs = byDoc.get(d) || [];
+        const act = rs.filter((r) => r.status === 'active');
+        out.examined += act.length || 1;
+        if (act.length) { cands.push(...act.map((r) => r.id)); continue; }
+        const newest = [...rs].sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))[0];
+        if (newest?.status === 'deleted') skipped.deleted++; else skipped.notSelected++;
+      }
+    } else {
+      cands = this.db.prepare("SELECT id FROM entries WHERE status='active' AND source_id IS NOT NULL ORDER BY created_at, id").all().map((r) => r.id);
+      out.examined += cands.length;
+    }
+
+    // 2. Classify without writing: selection, curation, the source path (exists? allowed? — before any
+    //    open), the file (unchanged?), per-entry failures still cooling down. Evaluated, not audited.
+    const srcRow = this.db.prepare('SELECT path, type, title, hash FROM sources WHERE id=?');
+    const locate = async (p) => {
+      try { await fs.realpath(p); return null; } // the same resolution the path gate makes
+      catch (e) { return e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? 'missing' : 'unreadable'; }
+    };
+    const readSource = async (p) => {
+      try { return { text: await fs.readFile(p, 'utf8') }; }
+      catch (e) { return { error: e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? 'missing' : 'unreadable' }; }
+    };
+    // Never curated: an uncurated run cannot satisfy a curated-only tier or operator authority.
+    const gateCtx = (e, s) => ({ path: s.path, type: s.type, scope: e.scope, curated: false, authority: normalizeAuthority(e.provenance?.authority) || 'doc', project: e.project ?? null, tier: e.tier, reextract: e.id });
+    const curatedRow = (e) => !!this.memory.tier(e.tier)?.curatedOnly || normalizeAuthority(e.provenance?.authority) === 'operator';
+    const allowed = (e, s) => !curatedRow(e) && this.gov.evaluator.evaluate('ingest', gateCtx(e, s)).allow;
+    // Per-entry failures (the last one per entry, newer than its last extraction) from the log.
+    const lastFail = new Map();
+    for (const r of this.db.prepare("SELECT json_extract(detail,'$.entry') entry, MAX(ts) ts FROM log WHERE operation='reextract-attempt' AND json_valid(detail) GROUP BY 1").all()) {
+      if (typeof r.entry === 'string') lastFail.set(r.entry, r.ts);
+    }
+    const failedAt = (e) => { const t = lastFail.get(e.id); return t && t > (e.provenance?.extraction?.at || '') ? t : null; };
+    const eligible = [];
+    for (const id of cands) {
+      const e = this.recall(id);
+      if (!e || !live(e) || !selected(e)) { skipped.notSelected++; continue; }
+      const s = e.source_id ? srcRow.get(e.source_id) : null;
+      if (!s) { skipped.missing++; continue; }
+      const where = await locate(s.path);
+      if (where) { skipped[where]++; continue; }
+      if (!allowed(e, s)) { skipped.denied++; continue; }
+      const failed = failedAt(e);
+      if (failed && !retryFailed && now - Date.parse(failed) < REEXTRACT_RETRY_MS) { skipped.retryLater++; continue; }
+      const r = await readSource(s.path);
+      if (r.error) { skipped[r.error]++; continue; }
+      if (sha12(r.text) !== s.hash) { skipped.changed++; continue; }
+      eligible.push({ id, failed: failed || '' });
+    }
+    // Never-failed entries first, then the ones whose failure is oldest: a poison entry goes last.
+    eligible.sort((a, b) => (a.failed === b.failed ? 0 : !a.failed ? -1 : !b.failed ? 1 : a.failed.localeCompare(b.failed)));
+    out.remaining = eligible.length;
+    if (dryRun) {
+      out.entries = eligible.slice(0, limit).map(({ id }) => ({ id, docId: this.recall(id).provenance?.source?.docId ?? null, mode: null, concepts: null, claims: null, quarantined: null }));
+      return out;
+    }
+
+    // 3. Re-extract, one model call at a time, at most `limit` calls.
+    let calls = 0;
+    for (const { id } of eligible) {
+      if (calls >= limit) break;
+      const e = this.recall(id);
+      const s = e?.source_id ? srcRow.get(e.source_id) : null;
+      if (!s) { out.remaining--; skipped[e ? 'missing' : 'deleted']++; continue; } // hard-deleted meanwhile
+      if (!allowed(e, s)) { out.remaining--; skipped.denied++; continue; } // gate first, then the re-read
+      const r = await readSource(s.path); // re-read: the file may have moved on since classification
+      if (r.error || sha12(r.text) !== s.hash) { out.remaining--; skipped[r.error || 'changed']++; continue; }
+      calls++;
+      const ex = await this.extractor.extract(r.text, s.type);
+      let reason = ex.mode === 'lmstudio' ? null : (ex.reason || 'fallback');
+      let emb = null;
+      if (!reason) {
+        emb = await this.embedder.embed(ex.summary);
+        if (emb.mode !== 'lmstudio') reason = 'embedder-unavailable';
+      }
+      if (reason) {
+        out.remaining--; skipped.fallback++;
+        if (reextractModelDown(reason)) { out.stopped = { id, reason }; break; }
+        this.db.logOp('reextract-attempt', { entry: id, path: s.path, reason, model: this.cfg.extractModel ?? null });
+        continue;
+      }
+      let res;
+      try { res = await this.#reextractOne(id, { text: r.text, source: s, ex, emb, ctx: gateCtx(e, s), all }); }
+      catch (err) {
+        if (err instanceof GovernanceError) res = { skip: 'denied' };
+        else { out.stopped = { id, reason: 'error', message: String(err?.message || err).slice(0, 300) }; break; } // stays in `remaining`
+      }
+      out.remaining--;
+      if (res.skip) { skipped[res.skip]++; continue; }
+      out.reextracted++;
+      out.entries.push(res.entry);
+    }
+    if (out.stopped && !out.reextracted) out.success = false;
+    this.db.logOp('reextract-run', { libraryId, docIds: docIds.length, all: !!all, retryFailed: !!retryFailed, limit, examined: out.examined, reextracted: out.reextracted, skipped, remaining: out.remaining, stopped: out.stopped });
+    if (out.reextracted) this.#markVaultDirty();
+    return out;
+  }
+
+  /** One in-place re-extraction (see `reextract`): the governed write. Re-checks the row inside the
+   *  transaction (another process may have forgotten, superseded or re-extracted it meanwhile). */
+  async #reextractOne(id, { text, source: s, ex, emb, ctx, all }) {
+    const path = s.path;
+    const gcfg = this.cfg.grounding || {};
+    const minOverlap = gcfg.enabled === false ? 0 : (gcfg.minOverlap ?? 0.5);
+    const gc = checkGrounding(text, ex.concepts, (c) => c.name, minOverlap);
+    const gcl = checkGrounding(text, ex.claims, (c) => c.content, minOverlap);
+    const grounding = {
+      summaryScore: Number(groundingScore(text, ex.summary).toFixed(3)), minOverlap,
+      conceptsKept: gc.grounded.length, conceptsQuarantined: gc.ungrounded.length,
+      claimsKept: gcl.grounded.length, claimsQuarantined: gcl.ungrounded.length,
+    };
+    // The dimension guard upsertVector applies, checked BEFORE the rows change: a refused vector must
+    // not leave a new summary behind an old embedding.
+    const dim = this.db.prepare("SELECT value FROM meta WHERE key='vector_dim'").get()?.value;
+    if (dim && Number(dim) !== emb.vector.length) throw new Error(`embedding dim mismatch: canonical=${dim}, got ${emb.vector.length} from model '${emb.model}'. Refusing to mix dimensions — re-embed or reset 'vector_dim'.`);
+    return governed(this.gov, 'ingest', ctx, async () => {
+      const nid = (c) => { const t = c.type || 'concept'; return `node-${sha12(`${t}:${GraphStore.nodeKey(t, c.name)}`)}`; };
+      const star = (cs) => { const ids = cs.map(nid); return ids.slice(1).map((to) => `edge-${sha12(`${ids[0]}:${to}:relates`)}`); };
+      const named = (cs) => (Array.isArray(cs) ? cs : []).filter((c) => c && typeof c.name === 'string' && c.name);
+      const done = this.db.tx(() => {
+        const e = this.recall(id);
+        if (!e || e.status === 'deleted') return { skip: 'deleted' };
+        if (e.status !== 'active' || (!all && e.provenance?.extraction?.mode === 'lmstudio')) return { skip: 'notSelected' };
+        if (this.memory.tier(e.tier)?.curatedOnly || normalizeAuthority(e.provenance?.authority) === 'operator') return { skip: 'denied' }; // curated meanwhile
+        const ts = nowISO();
+        const old = e.provenance || {};
+        const auth = normalizeAuthority(old.authority) || 'doc';
+        const prov = { ...old, extractedAt: ts, category: categorizeIngest({ type: s.type, content: ex.summary, title: s.title }, this.packs?.rules || []), grounding,
+          extraction: { mode: ex.mode, model: ex.model ?? null, at: ts },
+          chain: [...(Array.isArray(old.chain) ? old.chain : []), { step: 'reextract', source: path, at: ts, from: old.extraction?.mode ?? null }] };
+        // #40: recomputed from the full (unchanged) source, as at ingest. A holder of linked duplicates
+        // keeps its stored verdict OR'd in — it covers the linked sources' texts, which are not re-read.
+        if (this.cfg.recall?.instructionLike?.enabled !== false) {
+          const linked = Array.isArray(old.alsoSources) && old.alsoSources.length > 0;
+          const il = mergeInstructionVerdicts(sourceInstructionVerdict(text), linked ? old.instructionLike : null);
+          if (il) prov.instructionLike = il; else delete prov.instructionLike;
+        }
+        // Content, concepts and provenance in place; lease, counters, tier, scope, project untouched.
+        this.db.prepare('UPDATE entries SET content=?, concepts=?, provenance=?, updated_at=? WHERE id=?')
+          .run(ex.summary, JSON.stringify(gc.grounded), JSON.stringify(prov), ts, id);
+
+        // Claims: the old ones are archived FIRST (so the new ones are not related to their own
+        // predecessors at write), then the new ones land, with the lineage recorded both ways.
+        const oldClaims = this.#claimsDerivedFrom(e);
+        const arch = this.db.prepare('UPDATE claims SET status=?, metadata=?, updated_at=? WHERE id=?');
+        for (const c of oldClaims) arch.run('archived', JSON.stringify(c.metadata || {}), ts, c.id);
+        const added = gcl.grounded.map((cl) => this.claims.add({ content: cl.content, type: 'fact', source: { path, type: s.type, title: s.title, sourceId: e.source_id },
+          provenance: { extractor: ex.mode, confidence: cl.confidence, grounding: cl.groundingScore, authority: auth, chain: [{ step: 'reextract', source: path, timestamp: ts }] },
+          metadata: { reextractOf: { entry: id, at: ts, replaces: oldClaims.map((c) => c.id).sort() } } }).id);
+        for (const c of oldClaims) arch.run('archived', JSON.stringify({ ...(c.metadata || {}), archivedBy: { entry: id, at: ts, reason: 'reextracted', replacedBy: added } }), ts, c.id);
+
+        // Concepts: the new nodes + star edges as at ingest. Old star edges this source created that no
+        // other non-deleted entry implies are removed; an old node that no other non-deleted entry lists
+        // is deleted when only derived edges (relates / member_of) touch it, else flagged for review.
+        const newC = gc.grounded;
+        const newIds = newC.map((c) => this.graph.upsertNode({ type: c.type || 'concept', label: c.name, source: path, properties: { confidence: c.confidence, grounding: c.groundingScore } }));
+        for (let i = 1; i < newIds.length; i++) this.graph.upsertEdge({ from: newIds[0], to: newIds[i], type: 'relates', source: path });
+        const oldC = named(e.concepts);
+        const keepNodes = new Set(newIds), keepEdges = new Set(star(newC));
+        for (const row of this.db.prepare("SELECT concepts FROM entries WHERE status != 'deleted' AND id != ? AND concepts IS NOT NULL").all(id)) {
+          const cs = named(json(row.concepts, []));
+          for (const c of cs) keepNodes.add(nid(c));
+          for (const x of star(cs)) keepEdges.add(x);
+        }
+        let edgesRemoved = 0, nodesRemoved = 0, conceptsFlagged = 0;
+        const delEdge = this.db.prepare('DELETE FROM edges WHERE id=? AND source=?');
+        for (const x of new Set(star(oldC))) if (!keepEdges.has(x)) edgesRemoved += delEdge.run(x, path).changes;
+        for (const nodeId of new Set(oldC.map(nid))) {
+          if (keepNodes.has(nodeId)) continue;
+          const n = this.graph.node(nodeId);
+          if (!n) continue;
+          if (this.graph.neighbors(nodeId).every((x) => x.type === 'relates' || x.type === 'member_of')) { this.graph.deleteNode(nodeId); nodesRemoved++; }
+          else if (!n.properties?.orphanedBy) {
+            this.db.prepare('UPDATE nodes SET properties=? WHERE id=?').run(JSON.stringify({ ...n.properties, orphanedBy: { entry: id, at: ts, reason: 'reextracted' } }), nodeId);
+            conceptsFlagged++;
+          }
+        }
+        return { e, claimsArchived: oldClaims.length, edgesRemoved, nodesRemoved, conceptsFlagged };
+      });
+      if (done.skip) return done;
+      await this.memory.upsertVector(id, emb.vector, emb.model, emb.mode);
+      const verification = this.verifier.verifyConcepts(gc.grounded);
+      const quarantined = gc.ungrounded.length + gcl.ungrounded.length;
+      this.db.logOp('reextract', { path, entry: id, concepts: gc.grounded.length, claims: gcl.grounded.length, quarantined, summaryScore: grounding.summaryScore, mode: ex.mode, model: ex.model ?? null,
+        claimsArchived: done.claimsArchived, edgesRemoved: done.edgesRemoved, nodesRemoved: done.nodesRemoved, conceptsFlagged: done.conceptsFlagged, conflicts: verification.conflicts.length });
+      return { entry: { id, docId: done.e.provenance?.source?.docId ?? null, mode: ex.mode, concepts: gc.grounded.length, claims: gcl.grounded.length, quarantined } };
+    });
   }
 
   /** Real-model SQLite vectors eligible for Qdrant (#50): non-fallback, on active or archived entries

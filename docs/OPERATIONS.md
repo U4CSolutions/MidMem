@@ -42,7 +42,9 @@ setting and gets noisy over a large corpus (measured: 1295 pairs at minShared 3 
 - `maintain` summary: `projectionQA` (wiki completeness/fidelity), `queryProbes` (would future
   queries find their evidence?), `consistency`, and vector-dimension health.
 - Offline fallback: if the embed endpoint is down, ingest/query still work lexically and vectors
-  are marked fallback — re-ingest important documents once the model is back for semantic recall.
+  are marked fallback — `midmem reembed` repairs them once the model is back; entries extracted while
+  the model was down (`extraction.mode: fallback` in `midmem entries`) get model concepts and claims
+  from `midmem reextract` (see Enabling an on-network model).
 
 ## Backup & restore
 
@@ -122,6 +124,59 @@ wisdom included, into a store other agents read. Acceptable only while the store
 capture system then drops the group and the `ReadWritePaths`, and the archive grants `midmem` read
 through a dedicated group. Put the broker in place before enabling the Qdrant backend (an API key in
 the store's env) or any consumer off the host.
+
+## Enabling an on-network model (extraction + embeddings)
+
+With `MIDMEM_LLM_ENABLED=0` every ingest uses the deterministic fallbacks: the summary is the lead
+sentences, the concepts are frequent tokens (stopwords included), the claims are the first sentences,
+and the vector is a hash placeholder. Turning a model on is an operator decision when the store holds
+third-party text: the endpoint receives each source's first 12,000 characters and every summary, so use
+an OpenAI-compatible server on the trusted network (LM Studio or llama.cpp), never a hosted API, and keep
+its credentials (if any) out of `midmem.env` while a capture system can read that file.
+
+1. **Probe the endpoint** from the host: `curl -s http://<lan-host>:1234/v1/models` lists the loaded
+   models; one chat completion answering `{"summary": …}` proves extraction. A reasoning model (for
+   example `qwen/qwen3.6-35b-a3b`) is fine: LM Studio returns its thinking in
+   `message.reasoning_content` and the JSON answer in `message.content`, which is what MidMem parses
+   (an inline `<think>…</think>` block is dropped). Measured: ≈ 13 s per 12,000-character article.
+2. **Set the env** (in `midmem.env`; the launcher reads it whole):
+   ```sh
+   MIDMEM_LLM_ENABLED=1
+   MIDMEM_LLM_ENDPOINT=http://<lan-host>:1234/v1
+   MIDMEM_EXTRACT_MODEL=qwen/qwen3.6-35b-a3b    # the chat model id the server lists
+   MIDMEM_EMBED_MODEL=text-embedding-bge-m3      # 1024 dimensions
+   MIDMEM_LLM_TIMEOUT_MS=60000                   # per call, extraction and embeddings alike
+   ```
+   From the next ingest on, the result says `mode: "lmstudio"` and the entry records
+   `provenance.extraction: { mode, model, at }` (`midmem entries` shows it as `extraction`).
+3. **`midmem reembed`** (repeat until `remaining: 0`) swaps the hash placeholders for real vectors in
+   place. The first real vector fixes the store's dimension; a store that already holds real vectors
+   of another model is a new-collection / full re-embed job (see Moving a store), not this.
+4. **`midmem reextract`** for the entries ingested while the model was off. Re-ingesting them would do
+   nothing: an unchanged source is skipped by its hash. `reextract` re-runs the extraction on each
+   active entry whose source file is unchanged and updates it **in place**, keeping its id, tier, lease,
+   counters (retrieval, helpful, trust), scope, project, authority and `provenance.source`; the old
+   claims are archived with lineage, the entry is re-embedded. It writes only when the model really
+   answers and stops at the first sign the model is down, so it is safe to start and re-run. An entry
+   whose own answer fails (unparseable, or an HTTP 400/413 when its text overflows the loaded context)
+   is skipped and left alone for 24 h (`skipped.retryLater`), so the loop still reaches `remaining: 0`;
+   `--retry-failed` retries such entries at once (after loading a model with a larger context, say).
+   Curated entries (tier `wisdom`, `operator` authority) are never touched (`skipped.denied`):
+   ```sh
+   midmem reextract --dry-run                    # what it would do; calls no model, writes nothing
+   midmem reextract --limit 20                   # 20 model calls (~5 min); repeat until remaining: 0
+   midmem reextract --library <id> --doc-ids a,b # one capture system's sources only
+   ```
+   Snapshot `state.db` first (Backup & restore): the old summaries and concept lists are replaced, not
+   kept (old claims stay, archived). **Run it as a user that can read the sources.** A capture system
+   whose archive only its own user can read (the privilege note above) must run it as that user
+   (`sudo -u <capture-user> /usr/local/bin/midmem reextract …`) or trigger it through the capture
+   system; run as `midmem`, those sources come back `skipped.unreadable` and nothing changes. Never as
+   root (root-owned `-wal`/`-shm`). `--all` re-extracts model-extracted entries too (a new model).
+5. **Rollback** is `MIDMEM_LLM_ENABLED=0`: new ingests fall back at once; entries already re-extracted
+   keep their model output and real vectors, and queries then embed with the hash placeholder, so the
+   vector lane misses until the model is back (lexical recall is unaffected). To undo the content
+   itself, restore the snapshot taken before step 4.
 
 ## Moving a store
 
