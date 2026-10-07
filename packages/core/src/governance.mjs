@@ -80,6 +80,18 @@ export function defaultPolicies(cfg) {
       },
     },
     {
+      // Archive by id (2026-10-05): the same boundary as reclassification — a stack scope may archive
+      // only rows in its own scope or 'shared'; 'shared' (admin/bridge) may archive anything.
+      // ctx.fromScopes = the scopes of every row the ids matched.
+      name: 'archive-scope-write',
+      applies: (op) => op === 'archive-entries',
+      check: (_op, ctx) => {
+        if (cfg.agentScope === 'shared') return { allow: true };
+        const bad = [...new Set((ctx.fromScopes || []).filter((s) => s !== cfg.agentScope && s !== 'shared'))];
+        return bad.length ? { allow: false, reason: `agent '${cfg.agentScope}' cannot archive rows in private scope(s): ${bad.join(', ')}` } : { allow: true };
+      },
+    },
+    {
       // Authority is assigned at origin and can never be RAISED downstream (roadmap #10). This op is
       // the governed way to correct an over-labelled origin DOWNWARD; raising stays impossible here —
       // it requires a curated re-ingest, which the operator-authority policy already gates.

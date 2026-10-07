@@ -233,6 +233,12 @@ export function loadConfig(overrides = {}) {
      *  ledger state between kept and quarantined. Resolution (accept|reject) is always explicit. */
     claims: {
       deferContradictory: env('DEFER_CONTRADICTORY') !== '0',
+      /** Containment floor for the write-path `contradictory` verdict (and the audit-time finder):
+       *  a differing-polarity pair counts as a contradiction only when shared significant tokens /
+       *  the smaller side's token count reaches this. Long prose fragments that merely share a
+       *  locality and one negation word fall below it; a claim and its negation sit near 1.
+       *  0 restores the pre-floor rule. `claims-reclassify` re-judges tags written before. */
+      contradictionMinContainment: Number(env('CLAIM_CONTRADICTION_MIN_CONTAINMENT') ?? 0.6),
       /** Consistency pass (roadmap #13) flags deferred claims older than this. */
       deferAgeDays: Number(env('DEFER_AGE_DAYS') || 14),
     },
@@ -275,6 +281,11 @@ export function loadConfig(overrides = {}) {
     /** Dependency-aware forget (roadmap 2026-09 #41): forgetting an entry archives the claims it
      *  sourced and flags concept nodes it alone supported (report-only flags). */
     forget: { cascade: env('FORGET_CASCADE') !== '0' },
+    /** Ingest boundary checks. secretTextGuard: refuse a `title` or `source.author` that carries a
+     *  secret-shaped value (a credential-bearing URL, `password=…`-style assignment, or a well-known
+     *  token shape) — both are stored and echoed on recall rows / the export forever. Narrow by
+     *  design: prose ABOUT tokens passes. MIDMEM_SECRET_TEXT_GUARD=0 disables. */
+    ingest: { secretTextGuard: env('SECRET_TEXT_GUARD') !== '0' },
     /** Default memory scope for this process: `openclaw` | `hermes` | `shared`.
      *  Set per MCP registration (OCMW_AGENT_SCOPE). Writes default here; reads = this + shared.
      *  `shared` = admin/bridge context (may write any scope). */

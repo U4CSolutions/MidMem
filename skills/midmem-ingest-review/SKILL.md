@@ -21,6 +21,15 @@ agreement**, never by asking a model "is this right?"
   `claimsKept/Quarantined`). Flags: low `summaryScore` (≲0.4) → the summary drifted from the source;
   heavy quarantine → the extractor confabulated. Investigate the source/extraction before trusting it.
 - Finish editing a source BEFORE ingesting (mid-edit saves mint duplicates). Re-ingest supersedes.
+- **A multi-paper digest (a weekly report, one `###` per paper) is ingested with `--sections`:** every
+  section that cites exactly one URL becomes its own grounded entry keyed by the canonical citation
+  (arXiv ids normalised, versions stripped), so a paper cited again next week supersedes its earlier
+  entry; the digest entry stays as the index. Without it a six-paper report yields one short summary
+  and about one claim, and a paper can be absent from the store by name (2026-10-05: MemAgent, at a
+  grounding score of 0.864).
+- **After the ingest, search the store for the named entities and key numbers the source carries**
+  (`midmem claims "<name>"`, a `query`): the grounding score measures the summary against the
+  source, not what the summary left out.
 
 ## Review / audit the store
 - **`midmem brief`** — tier distribution, vector health (dim, fallback count), recent ops.

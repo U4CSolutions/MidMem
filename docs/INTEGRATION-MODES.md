@@ -189,11 +189,14 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    ```
    `examined = reextracted + Σ skipped + remaining`; per requested doc id its active entry is examined (a
    doc whose newest entry was forgotten counts `deleted`; an unknown or inactive doc, or one already
-   model-extracted, `notSelected`); `denied` = a curated entry, or the governance gate refused the
-   source path or scope; `retryLater` = its last answer failed less than 24 h ago; `remaining > 0` =
-   call again; `success: false` only when the pass stopped (model down, or an error) before
-   re-extracting anything; `--dry-run` lists the
-   would-be `entries` with `mode: null`, calls no model and writes nothing. CLI only (no MCP tool). It
+   model-extracted, `notSelected` — an entry archived by id meanwhile included); `denied` = a curated
+   entry, a row whose stored title, author or source URI the ingest boundary guards would now refuse
+   (secret-shaped, 2026-10-05; `MIDMEM_SECRET_TEXT_GUARD=0` lifts the title/author half), or the
+   governance gate refused the source path or scope; the source is read through its canonical path and
+   the rows reextract writes record that form (the sources row keeps its stored identity);
+   `retryLater` = its last answer failed less than 24 h ago; `remaining > 0` = call again;
+   `success: false` only when the pass stopped (model down, or an error) before re-extracting anything;
+   `--dry-run` lists the would-be `entries` with `mode: null`, calls no model and writes nothing. CLI only (no MCP tool). It
    reads the source files, so it runs as the user that can read the archive (the capture system's own
    user, or through the capture system); run as any other user those sources come back `unreadable`.
    None of these exceptions changes an entry's authority (`web`), tier, scope or project.
