@@ -6,7 +6,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { Orchestrator, GovernanceError, checkGrounding, groundingScore, categorizeIngest, isOpaqueTaskLabel, WORK_EVENT_NAMES } from '../src/index.mjs';
+import { Orchestrator, GovernanceError, checkGrounding, groundingScore, categorizeIngest, isOpaqueTaskLabel, WORK_EVENT_NAMES, stanceOf } from '../src/index.mjs';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; console.log(`  ✓ ${msg}`); } else { fail++; console.log(`  ✗ ${msg}`); } };
@@ -3111,6 +3111,113 @@ try {
       const call64 = JSON.parse(mc64.find((m) => m.id === 2).result.content[0].text);
       ok(tl64?.inputSchema?.properties?.audit?.type === 'boolean' && call64.audit === true && call64.results.some((r) => r.id === b64.id) && JSON.stringify(rows64()) === snap64, 'MCP query lists audit (boolean); an audit call renews nothing');
     } finally { o64.close(); }
+  }
+
+  // 65. Claim stance at commit (roadmap #33, CASK arXiv 2610.09008). Every claim gets a deterministic
+  //     stance from fixed word lists (rejected > quoted > provisional > observed); a non-observed claim
+  //     never defers, leaves no evidence edge on a neighbour, is never a neighbour or a contradiction
+  //     side, and is not current unless asked for. MIDMEM_CLAIM_STANCE=0 → everything as before.
+  {
+    const so65 = (t) => stanceOf(t);
+    const ids65 = (rows) => rows.map((c) => c.id).sort().join();
+    ok(so65('The paper reports a 4.09 point gain').stance === 'observed' && so65('The paper reports a 4.09 point gain').markers.length === 0
+      && ['The study finds a drop', 'The benchmark shows a gain', 'The team measures latency'].every((t) => so65(t).stance === 'observed'),
+      'stanceOf: a document reporting / finding / showing / measuring its own result stays observed (no markers)');
+    ok(so65('according to the vendor the fix shipped').stance === 'quoted' && JSON.stringify(so65('according to the vendor the fix shipped').markers) === '["according to"]'
+      && ['The operator said that the rack rebooted', 'reportedly the cache was warm', 'She told the crew it worked'].every((t) => so65(t).stance === 'quoted'),
+      'stanceOf: explicit third-party attribution → quoted (according to / said that / reportedly / told)');
+    ok(so65('we decided against the rewrite').stance === 'rejected' && JSON.stringify(so65('we decided against the rewrite').markers) === '["decided against"]'
+      && ['the migration was ruled out', 'the plan was withdrawn', 'the proposal was not adopted'].every((t) => so65(t).stance === 'rejected')
+      && so65('the patch was reverted on 2026-09-23').stance === 'observed' && so65('No attacker text may reach the agent; logged May 30, 2026').stance === 'observed',
+      'stanceOf: explicit rejection → rejected (decided against / ruled out / withdrawn / not adopted); "reverted" and "may" stay observed');
+    const dr65 = so65('the dry run would return success');
+    ok(dr65.stance === 'provisional' && dr65.markers.includes('would') && dr65.markers.includes('dry run')
+      && so65('the dry-run passed').stance === 'provisional' && so65('Let’s ship it').stance === 'provisional'
+      && ['we could migrate tomorrow', 'what if the cache is cold', 'a simulated failover recovered'].every((t) => so65(t).stance === 'provisional'),
+      'stanceOf: modal / conditional / simulation → provisional; hyphen and curly-apostrophe variants fold ("dry-run", "Let’s")');
+    ok(['the mayor approved the mockup', 'the council couldn\'t agree', 'reported results'].every((t) => so65(t).stance === 'observed'),
+      'stanceOf: whole words only (mayor / mockup / couldn\'t / reported do not fire may / mock / could / reportedly)');
+    const mx65 = so65('according to the vendor we could ship it, but we decided against it');
+    ok(mx65.stance === 'rejected' && JSON.stringify(mx65.markers) === '["decided against"]' && so65('according to the vendor we might ship it').stance === 'quoted',
+      'stanceOf: mixed markers → the strongest wins (rejected > quoted > provisional) and only its markers are recorded');
+
+    const dbA65 = path.join(tmp, 's65a', 'state.db');
+    const oA65 = new Orchestrator(base53('s65a'));
+    try {
+      ok(oA65.cfg.claims.stance === true, 'stance tagging is on by default (MIDMEM_CLAIM_STANCE)');
+      const obsA65 = oA65.claims.add({ content: 'the brindlewort65 valve seals quiltrax65 tanks at noon' });
+      ok(obsA65.metadata.stance === 'observed' && !('stanceMarkers' in obsA65.metadata), 'add() writes metadata.stance observed with no stanceMarkers');
+      const provB65 = oA65.claims.add({ content: 'we could never seal the brindlewort65 valve quiltrax65 tanks at noon' });
+      ok(provB65.metadata.stance === 'provisional' && JSON.stringify(provB65.metadata.stanceMarkers) === '["could"]', 'add() writes metadata.stance provisional + stanceMarkers ["could"]');
+      ok(provB65.status === 'active' && provB65.metadata.writeRelation?.relation === 'contradictory' && provB65.metadata.writeRelation.neighborId === obsA65.id && !provB65.metadata.deferredAt,
+        'a provisional candidate negating an observed neighbour lands active (no deferral); its write relation is still recorded');
+      ok(!('contradictedBy' in oA65.claims.get(obsA65.id).metadata), 'the observed neighbour\'s contradictedBy is untouched');
+      const log65 = oA65.db.prepare("SELECT detail FROM log WHERE operation='claim-write-conflict'").all().map((r) => JSON.parse(r.detail));
+      ok(log65.length === 1 && log65[0].id === provB65.id && log65[0].deferred === false && log65[0].stance === 'provisional', 'the write-conflict log row says deferred:false and names the stance');
+      ok(!oA65.lint().writeConflicts.some((w) => w.id === provB65.id), 'lint writeConflicts does not queue the provisional claim');
+      const obsG65 = oA65.claims.add({ content: 'the yarrowind65 pump primes velk65 coolant loops daily' });
+      const qH65 = oA65.claims.add({ content: 'according to ops the yarrowind65 pump primes velk65 coolant loops daily' });
+      ok(qH65.metadata.stance === 'quoted' && qH65.metadata.writeRelation?.relation === 'corroborating' && !oA65.claims.get(obsG65.id).metadata.supportCount,
+        'a quoted near-duplicate is tagged corroborating but does not extend the observed neighbour\'s window (no supportCount)');
+      const provC65 = oA65.claims.add({ content: 'the dorvanix65 relay might reroute plenkor65 traffic overnight' });
+      const obsD65 = oA65.claims.add({ content: 'the dorvanix65 relay does not reroute plenkor65 traffic overnight' });
+      ok(obsD65.metadata.stance === 'observed' && obsD65.status === 'active' && !obsD65.metadata.writeRelation,
+        'an observed claim negating a provisional one finds no neighbour (relate ignores non-observed) and lands active');
+      ok(oA65.claims.relate('the dorvanix65 relay might reroute plenkor65 traffic overnight').neighborId === obsD65.id, 'relate() still sees the observed claim as a neighbour');
+      const cur65 = oA65.currentClaims('dorvanix65 relay');
+      ok(cur65.length === 1 && cur65[0].id === obsD65.id, 'current() returns the observed claim only');
+      ok(ids65(oA65.currentClaims('dorvanix65 relay', { stances: ['observed', 'provisional'] })) === [provC65.id, obsD65.id].sort().join()
+        && ids65(oA65.currentClaims('dorvanix65 relay', { allStances: true })) === [provC65.id, obsD65.id].sort().join()
+        && ids65(oA65.currentClaims('dorvanix65 relay', { stances: ['provisional'] })) === provC65.id,
+        'current() includes non-observed claims when stances lists them or allStances is true');
+      const all65 = oA65.searchClaims('dorvanix65 relay');
+      ok(all65.length === 2 && all65.find((c) => c.id === provC65.id)?.metadata.stance === 'provisional', 'search() (the --all read) is unchanged: every stance, each row with its metadata.stance');
+      let bad65 = null; try { oA65.currentClaims('dorvanix65', { stances: ['hypothetical'] }); } catch (e) { bad65 = e; }
+      ok(bad65 && /unknown stance 'hypothetical'/.test(bad65.message), 'an unknown stance name is an error, never a silent empty read');
+      const ex65 = oA65.claims.add({ content: 'we might relabel the gorrimund65 sockets', defer: true });
+      ok(ex65.status === 'deferred' && ex65.metadata.deferReason === 'explicit' && ex65.metadata.stance === 'provisional', 'an explicit defer:true keeps the deferred path for a non-observed claim');
+      const fc65 = oA65.claimContradictions({ minShared: 3 });
+      ok(!fc65.some((p) => [p.a, p.b].some((id) => id === provB65.id || id === provC65.id)), 'findContradictions() ignores non-observed claims (two pairs at containment ≥ 0.857 are not reported)');
+      const qE65 = oA65.claims.add({ content: 'according to the auditor the snorvel65 ledger balanced' });
+      oA65.claims.add({ content: 'we ruled out the snorvel65 ledger migration' });
+      oA65.claims.updateStatus(qE65.id, 'archived');
+      const st65 = oA65.claims.stats().byStance;
+      ok(st65.observed === 3 && st65.provisional === 3 && st65.quoted === 2 && st65.rejected === 1, `stats().byStance counts every claim (${JSON.stringify(st65)})`);
+      const ls65 = oA65.lint().stances;
+      ok(ls65 && ls65.observed === 3 && ls65.provisional === 2 && ls65.quoted === 1 && ls65.rejected === 1, `lint().stances counts live claims only (${JSON.stringify(ls65)})`);
+      ok(JSON.stringify((await oA65.brief()).claims.byStance) === JSON.stringify(st65), 'brief shows the stance counts with the claim stats');
+      const ing65 = path.join(tmp, 's65a', 'crane65.md');
+      fs.writeFileSync(ing65, 'The wexmoor65 crane could lift the tarvel65 beam before sunset.\nThe wexmoor65 crane lifted the oskel65 crate this morning.\n');
+      const ir65 = await oA65.ingest({ path: ing65, type: 'note', title: 'Crane Notes' });
+      const ic65 = oA65.searchClaims('wexmoor65 crane');
+      const icP65 = ic65.find((c) => /could lift/.test(c.content)); const icO65 = ic65.find((c) => /lifted the oskel65/.test(c.content));
+      ok(ir65.success && icP65?.metadata.stance === 'provisional' && JSON.stringify(icP65.metadata.stanceMarkers) === '["could"]' && icO65?.metadata.stance === 'observed',
+        'the ingest path writes stances on extracted claims ("could" → provisional, the plain sentence → observed)');
+      const cl65 = cli53(dbA65, 'claims', 'dorvanix65', 'relay', '--all', '--stances', 'provisional');
+      ok(cl65.code === 0 && Array.isArray(cl65.out) && cl65.out.length === 1 && cl65.out[0].id === provC65.id && cl65.out[0].metadata.stance === 'provisional', 'CLI claims --all --stances provisional → only the provisional claim');
+      const cc65 = cli53(dbA65, 'claims', 'dorvanix65', 'relay'); const ca65 = cli53(dbA65, 'claims', 'dorvanix65', 'relay', '--all-stances');
+      ok(cc65.code === 0 && ids65(cc65.out) === obsD65.id && ca65.code === 0 && ids65(ca65.out) === [provC65.id, obsD65.id].sort().join(), 'CLI claims (current) → observed only; --all-stances → both');
+      const cb65 = cli53(dbA65, 'claims', 'dorvanix65', '--stances', 'bogus');
+      ok(cb65.code === 1 && /unknown stance 'bogus'/.test(cb65.err), 'CLI claims --stances with an unknown name → exit 1 with the error');
+      const mc65 = await mcp53(dbA65, [{ name: 'claims', arguments: { query: 'dorvanix65 relay', allStances: true } }, { name: 'claims', arguments: { query: 'dorvanix65 relay' } }, { name: 'claims', arguments: { query: 'dorvanix65 relay', mode: 'all', stances: ['observed'] } }]);
+      const tl65 = mc65.find((m) => m.id === 1).result.tools.find((t) => t.name === 'claims');
+      const r65 = (id) => JSON.parse(mc65.find((m) => m.id === id).result.content[0].text);
+      ok(tl65?.inputSchema?.properties?.allStances?.type === 'boolean' && tl65.inputSchema.properties.stances?.type === 'array', 'MCP claims lists stances (array) and allStances (boolean)');
+      ok(ids65(r65(2)) === [provC65.id, obsD65.id].sort().join() && ids65(r65(3)) === obsD65.id && ids65(r65(4)) === obsD65.id,
+        'MCP claims: allStances:true → both; the default → observed only; mode all + stances narrows');
+    } finally { oA65.close(); }
+
+    // Tagging off: no stance written, and the pre-#33 behaviour holds (the observation defers on the hypothetical).
+    const oB65 = new Orchestrator(base53('s65b', { claims: { stance: false } }));
+    try {
+      const pB65 = oB65.claims.add({ content: 'the dorvanix65 relay might reroute plenkor65 traffic overnight' });
+      const dB65 = oB65.claims.add({ content: 'the dorvanix65 relay does not reroute plenkor65 traffic overnight' });
+      ok(!('stance' in pB65.metadata) && !('stanceMarkers' in pB65.metadata) && !('stance' in dB65.metadata), 'claims.stance === false → no stance written');
+      ok(dB65.status === 'deferred' && dB65.metadata.writeRelation?.neighborId === pB65.id, 'claims.stance === false → the observation defers on the hypothetical, as before');
+      const qB65 = oB65.claims.add({ content: 'according to the vendor the dorvanix65 relay firmware shipped' });
+      ok(ids65(oB65.currentClaims('dorvanix65 relay')) === [pB65.id, qB65.id].sort().join(), 'claims.stance === false → current() returns every live claim, as before');
+      ok(oB65.claims.stats().byStance.observed === 3 && oB65.lint().stances.provisional === 0, 'claims.stance === false → unstanced rows count as observed');
+    } finally { oB65.close(); }
   }
 
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);

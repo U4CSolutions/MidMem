@@ -67,6 +67,7 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_DEFER_CONTRADICTORY` | `deferContradictory: env('DEFER_CONTRADICTORY') !== '0',` |
 | `MIDMEM_CLAIM_CONTRADICTION_MIN_CONTAINMENT` | `contradictionMinContainment: Number(env('CLAIM_CONTRADICTION_MIN_CONTAINMENT') ?? 0.6),` |
 | `MIDMEM_DEFER_AGE_DAYS` | `deferAgeDays: Number(env('DEFER_AGE_DAYS') \|\| 14),` |
+| `MIDMEM_CLAIM_STANCE` | `stance: env('CLAIM_STANCE') !== '0',` |
 | `MIDMEM_WORK_MEMORY` | `enabled: env('WORK_MEMORY') !== '0',` |
 | `MIDMEM_GUARD_OPAQUE_TASK_LABELS` | `guardOpaqueTaskLabels: env('GUARD_OPAQUE_TASK_LABELS') !== '0',` |
 | `MIDMEM_AUTO_INGEST` | `enabled: env('AUTO_INGEST') !== '0',` |
@@ -88,4 +89,4 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_PROJECT` | `project: normalizeProject(env('PROJECT')),` |
 | `MIDMEM_PROJECT_LIFT` | `liftOnCurated: env('PROJECT_LIFT') !== '0',` |
 
-_81 env knobs._
+_82 env knobs._

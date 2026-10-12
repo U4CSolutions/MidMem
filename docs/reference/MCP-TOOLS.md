@@ -398,13 +398,15 @@ Bulk-close open task nodes (status → done). Task nodes are never deleted by de
 
 ## `claims`
 
-Search atomic claims. mode "current" (default) returns only the freshest non-superseded/contradicted claim(s) — use to get the right CURRENT fact after updates; mode "all" searches every status.
+Search atomic claims. mode "current" (default) returns only the freshest non-superseded/contradicted claim(s) — use to get the right CURRENT fact after updates; mode "all" searches every status. Every claim carries a stance set at commit by fixed word lists (metadata.stance: observed | provisional | quoted | rejected — a hypothetical, simulation or proposal; a third-party attribution; an explicit rejection): mode "current" returns OBSERVED claims only unless stances lists others or allStances is true; mode "all" returns every stance (stances narrows it).
 
 | arg | type | required | notes |
 |---|---|---|---|
 | `query` | string | yes |  |
 | `mode` | string |  |  |
 | `limit` | number |  |  |
+| `stances` | array<string> |  | stances to return: observed\|provisional\|quoted\|rejected (current default: observed) |
+| `allStances` | boolean |  | mode current: return every stance |
 
 ## `claim_supersede`
 

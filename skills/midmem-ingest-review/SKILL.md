@@ -41,9 +41,12 @@ agreement**, never by asking a model "is this right?"
 The store is shared but each stack reads **its own scope + `shared`**. To compare what each
 *understands* about a topic, run the same query under each lens and diff:
 ```
-midmem query "<topic>" --scopes openclaw,shared   # what OpenClaw can surface
-midmem query "<topic>" --scopes hermes,shared     # what Hermes can surface
+midmem query "<topic>" --scopes openclaw,shared --audit   # what OpenClaw can surface
+midmem query "<topic>" --scopes hermes,shared --audit     # what Hermes can surface
 ```
+`--audit` (2026-10-12) reads without renewing leases or counting retrievals: a review's own queries
+must not count as usage, or the audit keeps alive the content-free rows it keeps surfacing.
+
 Then assess:
 - **Divergence** — entries one stack has and the other doesn't (private-scope knowledge that should
   be `shared`? or stale to one side?).

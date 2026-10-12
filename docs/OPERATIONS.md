@@ -50,6 +50,18 @@ floor) are re-judged by `midmem claims-reclassify --dryRun`, then without `--dry
 tags become `additive`, the claims the write path deferred for them are released to `active`, and
 claims deferred by judgment are never touched. Deterministic; the run is logged as `claims-reclassify`.
 
+**Claim stance** (since 2026-10-12, roadmap #33): every claim is tagged at commit with
+`metadata.stance` — `observed` (the default), `provisional` (could / might / would / if we / plan to /
+dry run / simulated …), `quoted` (according to / said that / reportedly …) or `rejected` (decided
+against / ruled out / withdrawn …) — by fixed word lists (`stanceOf` in `claims.mjs`, the only source;
+`metadata.stanceMarkers` records what fired). A non-observed claim asserts nothing: it never defers, never
+counts as a neighbour or a contradiction side, never lands in `writeConflicts`, and `midmem claims <q>` (the
+current read) leaves it out. To see it, use `midmem claims <q> --all-stances` (or `--stances provisional,quoted`;
+MCP `claims` with `allStances: true` / `stances`); `claims <q> --all` returns every status and stance.
+`lint` reports the live mix as `stances`, `brief` as `claims.byStance`. A research claim of the form "the
+paper reports X" stays `observed` — the source speaking is not a quotation. `MIDMEM_CLAIM_STANCE=0` turns
+tagging off and every read behaves as before; claims written earlier keep their tag.
+
 ## Health signals worth watching
 
 - `midmem brief` — tier counts, claim stats, vector health, recent ops.

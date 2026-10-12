@@ -11,7 +11,7 @@ import { TieredMemory } from './memory.mjs';
 import { Embedder } from './embeddings.mjs';
 import { Extractor } from './extract.mjs';
 import { GraphStore } from './graph.mjs';
-import { ClaimStore, significantTokens } from './claims.mjs';
+import { ClaimStore, significantTokens, claimStance } from './claims.mjs';
 import { SigmaVerifier } from './verify.mjs';
 import { PolicyEvaluator, governed, GovernanceError } from './governance.mjs';
 import { projectVault, probeProjection } from './project.mjs';
@@ -1265,20 +1265,26 @@ export class Orchestrator {
     // Both sides must still be live: a conflict whose neighbor was since superseded/archived is
     // resolved history, not a pending judgment call — without this filter the queue could never
     // be cleared for corrected claims.
+    // A non-observed claim (roadmap #33: provisional / quoted / rejected) keeps its write relation for
+    // the ledger but asserts nothing, so it is never a pending write conflict.
     const claimById = new Map(this.claims.getAll().map((c) => [c.id, c]));
+    const stanceOn = this.claims.stanceEnabled();
     const writeConflicts = [...claimById.values()]
-      .filter((c) => (c.status === 'active' || c.status === 'verified') && c.metadata?.writeRelation?.relation === 'contradictory')
+      .filter((c) => (c.status === 'active' || c.status === 'verified') && c.metadata?.writeRelation?.relation === 'contradictory' && (!stanceOn || claimStance(c) === 'observed'))
       .filter((c) => { const n = claimById.get(c.metadata.writeRelation.neighborId); return n && (n.status === 'active' || n.status === 'verified'); })
       .map((c) => ({ id: c.id, neighbor: c.metadata.writeRelation.neighborId, content: c.content.slice(0, 120) }));
     // TARL pending ledger: deferred claims are a review queue, not a hidden state — always surfaced.
     const deferredClaims = this.claims.deferred().map((c) => ({ id: c.id, since: c.metadata?.deferredAt, reason: c.metadata?.deferReason, content: c.content.slice(0, 120) }));
+    // Stance mix of the live claims (roadmap #33): how much of what is live is not an observation.
+    const stances = { observed: 0, provisional: 0, quoted: 0, rejected: 0 };
+    for (const c of claimById.values()) if (c.status === 'active' || c.status === 'verified') stances[claimStance(c)]++;
     // HiGram stale paths: dependency paths flagged by a supersede, awaiting review (report-only).
     const stalePaths = this.graph.allNodes().filter((n) => n.properties?.staleReview)
       .map((n) => ({ id: n.id, type: n.type, label: n.label, ...n.properties.staleReview }));
     // Forget cascade (#41): concept nodes whose only supporting entry was forgotten — a review queue.
     const orphanedConcepts = this.graph.byType('concept').filter((n) => n.properties?.orphanedBy)
       .map((n) => ({ id: n.id, label: n.label, ...n.properties.orphanedBy }));
-    return { contradictions: conflicts.conflicts, writeConflicts, deferredClaims, stalePaths, orphans, orphanedConcepts, lowTrustWisdom, dupeConcepts, summary: { nodes: g.nodes.length, edges: g.edges.length, entries: Object.values(this.memory.stats()).reduce((a, b) => a + b, 0) } };
+    return { contradictions: conflicts.conflicts, writeConflicts, deferredClaims, stances, stalePaths, orphans, orphanedConcepts, lowTrustWisdom, dupeConcepts, summary: { nodes: g.nodes.length, edges: g.edges.length, entries: Object.values(this.memory.stats()).reduce((a, b) => a + b, 0) } };
   }
 
   async forget(id, { soft = true, force = false } = {}) {

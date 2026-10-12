@@ -248,6 +248,10 @@ export function loadConfig(overrides = {}) {
       contradictionMinContainment: Number(env('CLAIM_CONTRADICTION_MIN_CONTAINMENT') ?? 0.6),
       /** Consistency pass (roadmap #13) flags deferred claims older than this. */
       deferAgeDays: Number(env('DEFER_AGE_DAYS') || 14),
+      /** Claim stance at commit (roadmap #33, CASK arXiv 2610.09008): every claim is tagged observed |
+       *  provisional | quoted | rejected by fixed word lists (claims.mjs stanceOf); only observed claims
+       *  defer, neighbour, contradict or read as current. 0 = no tagging, reads as before. */
+      stance: env('CLAIM_STANCE') !== '0',
     },
     workMemory: {
       enabled: env('WORK_MEMORY') !== '0',

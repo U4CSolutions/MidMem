@@ -6,7 +6,7 @@ export { TieredMemory } from './memory.mjs';
 export { Embedder } from './embeddings.mjs';
 export { Extractor } from './extract.mjs';
 export { GraphStore } from './graph.mjs';
-export { ClaimStore } from './claims.mjs';
+export { ClaimStore, stanceOf, claimStance, STANCES } from './claims.mjs';
 export { SigmaVerifier } from './verify.mjs';
 export { PolicyEvaluator, GovernanceError, governed, defaultPolicies } from './governance.mjs';
 export { hybridSearch, progressiveSearch, evidenceSufficient } from './retrieval.mjs';
