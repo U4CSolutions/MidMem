@@ -33,6 +33,7 @@ export function loadConfig(overrides = {}) {
   // Env reads honor the new MIDMEM_ prefix, falling back to legacy OCMW_ (safe rename).
   const env = (k) => process.env['MIDMEM_' + k] ?? process.env['OCMW_' + k];
   const dbPath = env('DB_PATH') || path.join(REPO, 'state.db');
+  const bridgeExclude = parseBridgeExclude(env('BRIDGE_EXCLUDE')); // comma-separated subfolders EVERY bridge source skips; default none
   const cfg = {
     /** Single SQLite source-of-truth. */
     dbPath,
@@ -58,13 +59,19 @@ export function loadConfig(overrides = {}) {
      *  optional project). Pulls each stack's memory into the shared, tiered, searchable store.
      *  Configurable (roadmap 2026-09 #38): MIDMEM_BRIDGE_SOURCES = `dir|scope|type|project;…`
      *  (type/project optional; a sixth field lists subfolders to skip, comma-separated) REPLACES the default list, so a third harness's memory dir or a
-     *  console's report folders register without a core change. */
-    bridgeSources: parseBridgeSources(env('BRIDGE_SOURCES')) || [
-      { dir: path.join(HOME, '.openclaw', 'workspace', 'memory'), scope: 'openclaw', type: 'session' },
-      { dir: path.join(HOME, '.hermes', 'memories'), scope: 'hermes', type: 'note' },
+     *  console's report folders register without a core change. The two memory dirs skip the stacks'
+     *  self-generated reflection logs (GENERATED_LOG_DIRS). */
+    bridgeSources: withBridgeExclude(parseBridgeSources(env('BRIDGE_SOURCES')) || [
+      { dir: path.join(HOME, '.openclaw', 'workspace', 'memory'), scope: 'openclaw', type: 'session', exclude: [...GENERATED_LOG_DIRS] },
+      { dir: path.join(HOME, '.hermes', 'memories'), scope: 'hermes', type: 'note', exclude: [...GENERATED_LOG_DIRS] },
       ...agentVaultSources(path.join(VAULT, 'OpenClaw'), 'openclaw'),
       ...agentVaultSources(path.join(VAULT, 'Hermes'), 'hermes'),
-    ],
+    ], bridgeExclude),
+    /** Operator-wide bridge excludes: MIDMEM_BRIDGE_EXCLUDE = comma-separated root-relative subfolder
+     *  names (default none), APPENDED to every bridge source's own exclude list above — the defaults
+     *  and MIDMEM_BRIDGE_SOURCES entries alike — so `scratch,drafts` can be skipped everywhere without
+     *  restating (and then maintaining a copy of) the default source list. Echoed here for reports. */
+    bridgeExclude,
     /** Bridge walk recurses into subfolders (skipping dot-dirs + node_modules); a per-source
      *  `recursive:false` opts out. MIDMEM_BRIDGE_RECURSIVE=0 restores the flat walk globally. */
     bridgeRecursive: env('BRIDGE_RECURSIVE') !== '0',
@@ -319,6 +326,28 @@ export function loadConfig(overrides = {}) {
  * stays private to that stack by default, because notes can be personal.
  */
 export const DELIVERABLE_DIRS = Object.freeze(['research', 'reports']);
+
+/**
+ * Generated-log subfolders of a stack's memory dir (2026-10-12). A stack's self-generated reflection /
+ * consolidation logs (OpenClaw writes `memory/dreaming/{light,rem}/<date>.md`) are not knowledge: they
+ * restate what the store already holds, with scores. Measured 2026-10-12: the bridge had ingested 27 of
+ * them as doc-authority entries with 46 claims ("The theme 'huddle' appeared in five distinct REM sleep
+ * memories"); forgetting them is undone by the next pass unless the walk skips them. The name is generic
+ * on purpose — the core knows no stack; it is simply excluded on both default memory-dir sources.
+ */
+export const GENERATED_LOG_DIRS = Object.freeze(['dreaming']);
+
+/** MIDMEM_BRIDGE_EXCLUDE → a clean list of root-relative subfolder names ([] when unset). */
+export function parseBridgeExclude(spec) {
+  return String(spec || '').split(',').map((e) => e.trim()).filter(Boolean);
+}
+
+/** Append operator-wide excludes to every source's own list (deduped, own entries first). A source
+ *  that ends up with nothing to skip keeps no `exclude` field, so an unset knob changes nothing. */
+export function withBridgeExclude(sources, extra = []) {
+  if (!extra.length) return sources;
+  return sources.map((s) => ({ ...s, exclude: [...new Set([...(s.exclude || []), ...extra])] }));
+}
 
 /** Bridge sources for one agent vault folder: the folder itself (private scope, deliverable
  *  subfolders excluded) plus each deliverable subfolder as its own `shared` source. */

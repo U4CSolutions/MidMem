@@ -10,7 +10,7 @@ Parsed from `packages/core/bin/cli.mjs` (the wrapper `midmem <command>` in a dep
 | `ingest` | `--sections` `--type` `--title` `--scope` `--curated` `--authority` |
 | `ingest-content` | `--stdin` `--type` `--title` `--scope` `--authority` `--curated` |
 | `remember` | `--tier` `--type` `--scope` `--curated` `--function` `--authority` |
-| `query` | `--tiers` `--scopes` `--functions` `--limit` `--graph` `--minAuthority` `--deep` `--historical` `--statuses` `--asOf` `--bounded` `--includeWorking` |
+| `query` | `--tiers` `--scopes` `--functions` `--limit` `--graph` `--minAuthority` `--deep` `--historical` `--statuses` `--asOf` `--bounded` `--includeWorking` `--audit` |
 | `bridge` | — |
 | `handoff` | `--profile` `--scopes` `--tiers` |
 | `recall` | — |
@@ -61,7 +61,7 @@ Usage: ocmw <init|ingest <path>|ingest-content <text>|remember <text>|query <tex
   rescope / lower-authority selectors (at least one required): [entry ids…] | --pathPrefix <source dir> | --match <content regex>; --from a,b and --statuses a,b narrow; --reason (lower-authority); preview with --dryRun
   archive <entry ids…> [--reason <text>] [--dryRun]: governed archive by id (ids required — no age sweep here); the row leaves the default read, stays in --historical, and the claims its ingest produced are archived (reason source-archived)
   claims-reclassify [--dryRun]: re-judge write-time contradictory claim tags against the containment floor (MIDMEM_CLAIM_CONTRADICTION_MIN_CONTAINMENT, default 0.6); below-floor tags become additive and their write-path deferrals are released; explicit deferrals are never touched
-  query history/policy: --historical (active + archived, labelled) | --statuses a,b | --asOf <ISO> | --bounded (occupancy policy without a token budget) | --includeWorking
+  query history/policy: --historical (active + archived, labelled) | --statuses a,b | --asOf <ISO> | --bounded (occupancy policy without a token budget) | --includeWorking | --audit (same results, nothing renewed: no retrieval count, last-accessed or lease change, no maintain — for reviews)
   close-tasks selectors (at least one required): [labels…] | --task <label> | --match <regex> | --opaque | --olderThanDays <n>; preview with --dryRun
   forget-nodes (HARD delete, edges cascade) selectors: [node ids…] | --match <label regex> | --opaque; --types narrows; preview with --dryRun
   ingest source provenance: --source-uri --canonical-uri --library --doc-id --capture-method --captured-at --site --author --published-at --language

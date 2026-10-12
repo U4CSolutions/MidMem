@@ -7,9 +7,10 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | env var | source context (default visible) |
 |---|---|
 | `MIDMEM_DB_PATH` | `const dbPath = env('DB_PATH') \|\| path.join(REPO, 'state.db');` |
+| `MIDMEM_BRIDGE_EXCLUDE` | `const bridgeExclude = parseBridgeExclude(env('BRIDGE_EXCLUDE')); // comma-separated subfolders EVERY bridge source skips; default none` |
 | `MIDMEM_CONTENT_INGEST_DIR` | `contentIngestDir: env('CONTENT_INGEST_DIR') \|\| path.join(path.dirname(dbPath), 'ingest-content'),` |
 | `MIDMEM_SOURCE_ROOTS` | `sourceRoots: (env('SOURCE_ROOTS') \|\|` |
-| `MIDMEM_BRIDGE_SOURCES` | `bridgeSources: parseBridgeSources(env('BRIDGE_SOURCES')) \|\| [` |
+| `MIDMEM_BRIDGE_SOURCES` | `bridgeSources: withBridgeExclude(parseBridgeSources(env('BRIDGE_SOURCES')) \|\| [` |
 | `MIDMEM_BRIDGE_RECURSIVE` | `bridgeRecursive: env('BRIDGE_RECURSIVE') !== '0',` |
 | `MIDMEM_LLM_ENDPOINT` | `llmEndpoint: env('LLM_ENDPOINT') \|\| 'http://localhost:1234/v1',` |
 | `MIDMEM_EMBED_MODEL` | `embedModel: env('EMBED_MODEL') \|\| 'nomic-embed-text',` |
@@ -87,4 +88,4 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_PROJECT` | `project: normalizeProject(env('PROJECT')),` |
 | `MIDMEM_PROJECT_LIFT` | `liftOnCurated: env('PROJECT_LIFT') !== '0',` |
 
-_80 env knobs._
+_81 env knobs._

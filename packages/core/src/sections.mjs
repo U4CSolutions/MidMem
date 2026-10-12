@@ -110,3 +110,26 @@ export function splitDigestSections(text, { minChars = 200 } = {}) {
   }
   return out;
 }
+
+/**
+ * The leading name of a section heading (2026-10-12): list numbering stripped (`1.9 `), cut at the first
+ * `:`, ` — ` or ` – `, trimmed. Null when nothing is left or it runs past 6 words (a sentence, not a
+ * name). Measured: 2 of 18 section summaries omitted the system their heading names (DAEDALUS: "The
+ * paper shows that an agent…"; Ansatz), so an entity probe for the name found nothing although
+ * sources.title carried it; ingestSections hands this name to ingest as `ensureName`.
+ */
+export function headingLeadingName(heading) {
+  if (typeof heading !== 'string') return null;
+  const name = heading.replace(/^\s*\d+(?:\.\d+)*[.)]?\s+/, '').split(/:| — | – /)[0].trim();
+  return name && name.split(/\s+/).length <= 6 ? name : null;
+}
+
+/** Hyphen variants a name is spelled with (hyphen, non-breaking hyphen, figure dash, en dash, ASCII). */
+const HYPHENS_RE = /[\u2010\u2011\u2012\u2013-]/g;
+const foldName = (s) => String(s ?? '').toLowerCase().replace(HYPHENS_RE, '-').replace(/\s+/g, ' ').trim();
+
+/** Whether `text` already names `name`: case-insensitive, hyphen variants and whitespace runs folded. */
+export function mentionsName(text, name) {
+  const n = foldName(name);
+  return !n || foldName(text).includes(n);
+}

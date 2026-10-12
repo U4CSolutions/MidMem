@@ -662,9 +662,12 @@ try {
   ok(commNodes.every((n) => (n.properties.size ?? 0) >= 2), 'community parents only for multi-member communities');
   const cg12b = await o.refreshConcepts();
   ok(o.graph.byType('community').length === commNodes.length, 'community materialization is idempotent across passes');
-  // path rewrite: a claim about a known concept, superseded → concept + parent flagged
-  const nodeLabel = o.graph.allNodes().find((n) => n.type !== 'community' && /retrieval|vector|hybrid/i.test(n.label))?.label || 'hybrid retrieval';
-  const c12 = o.claims.add({ content: `the ${nodeLabel} implementation batches lookups nightly for efficiency reasons` });
+  // path rewrite: a claim about a known concept, superseded → concept + parent flagged. The claim
+  // carries its document's path as an ingested claim does: the scoped rule (2026-10-12) flags the
+  // nodes that document's ingest created, not every label sharing one word with the claim.
+  const node12 = o.graph.allNodes().find((n) => n.type !== 'community' && n.source && /retrieval|vector|hybrid/i.test(n.label));
+  const nodeLabel = node12?.label || 'hybrid retrieval';
+  const c12 = o.claims.add({ content: `the ${nodeLabel} implementation batches lookups nightly for efficiency reasons`, source: { path: node12?.source } });
   const sup12 = o.supersedeClaim(c12.id, { content: `the ${nodeLabel} implementation now streams lookups continuously for efficiency reasons` });
   ok(sup12.success && Array.isArray(sup12.stalePath) && sup12.stalePath.length > 0, `supersede flagged ${sup12.stalePath?.length} node(s) on the dependency path`);
   const lint12 = o.lint();
@@ -2853,6 +2856,261 @@ try {
       oC?.close();
       await fake.close();
     }
+  }
+
+  // 60. Generated reflection logs are not knowledge (2026-10-12): the two default memory-dir bridge
+  //     sources skip `dreaming/` (GENERATED_LOG_DIRS) — measured, 27 OpenClaw dreaming logs had been
+  //     bridged as doc knowledge with 46 claims — and MIDMEM_BRIDGE_EXCLUDE appends operator-wide
+  //     subfolder excludes to EVERY bridge source, the defaults and MIDMEM_BRIDGE_SOURCES entries alike.
+  {
+    const { loadConfig: lc60, GENERATED_LOG_DIRS: gld60, bridgeMemory: bm60 } = await import('../src/index.mjs');
+    const prevEx60 = process.env.MIDMEM_BRIDGE_EXCLUDE, prevSrc60 = process.env.MIDMEM_BRIDGE_SOURCES;
+    delete process.env.MIDMEM_BRIDGE_EXCLUDE; delete process.env.MIDMEM_BRIDGE_SOURCES;
+    const root60 = path.join(tmp, 'bridge60');
+    for (const d of ['dreaming/light', 'dreaming/rem', 'drafts']) fs.mkdirSync(path.join(root60, d), { recursive: true });
+    fs.writeFileSync(path.join(root60, 'notes.md'), 'Vellisport60 operators rotated the grommick60 keys after the thursday outage.');
+    fs.writeFileSync(path.join(root60, 'dreaming', 'light', 'a.md'), 'The theme quembril60 appeared in three light sleep reflections with a score of 0.82.');
+    fs.writeFileSync(path.join(root60, 'dreaming', 'rem', 'b.md'), 'The theme quembril60 appeared in five distinct REM sleep reflections.');
+    fs.writeFileSync(path.join(root60, 'drafts', 'c.md'), 'Draft: the vellisport60 runbook for the grommick60 rotation, not yet reviewed.');
+    let o60 = null, oe60 = null;
+    try {
+      ok(JSON.stringify(gld60) === '["dreaming"]' && Object.isFrozen(gld60), 'GENERATED_LOG_DIRS is the frozen, stack-agnostic list ["dreaming"]');
+      // (a) the defaults: both memory dirs skip dreaming/; the vault sources are unchanged.
+      const d60 = lc60().bridgeSources;
+      const isMem60 = (x) => x.dir.endsWith(path.join('.openclaw', 'workspace', 'memory')) || x.dir.endsWith(path.join('.hermes', 'memories'));
+      const mem60 = d60.filter(isMem60), vault60 = d60.filter((x) => !isMem60(x));
+      ok(mem60.length === 2 && mem60.every((x) => JSON.stringify(x.exclude) === '["dreaming"]')
+        && mem60.find((x) => x.scope === 'openclaw')?.type === 'session' && mem60.find((x) => x.scope === 'hermes')?.type === 'note',
+      'default bridge: the OpenClaw + Hermes memory dirs exclude dreaming/ (scope and type unchanged)');
+      ok(vault60.length === 6 && vault60.every((x) => !(x.exclude || []).includes('dreaming'))
+        && vault60.filter((x) => x.exclude).length === 2 && vault60.filter((x) => x.exclude).every((x) => x.exclude.join(',') === 'research,reports'),
+      'default bridge: no vault source excludes dreaming/; the agent folders keep exactly research,reports');
+      ok(JSON.stringify(lc60().bridgeExclude) === '[]', 'MIDMEM_BRIDGE_EXCLUDE unset → bridgeExclude [] (nothing appended)');
+      // (b) the walk: a memory-dir-shaped source ingests notes.md and drafts/c.md, never a dreaming log.
+      o60 = new Orchestrator(base53('b60'));
+      const br60 = await bm60(o60, { sources: [{ dir: root60, scope: 'openclaw', type: 'session', exclude: ['dreaming'] }], project: false });
+      const real60 = fs.realpathSync(root60);
+      const paths60 = o60.db.prepare('SELECT path FROM sources ORDER BY path').all().map((r) => path.relative(real60, r.path));
+      ok(br60.ingested === 2 && br60.errors.length === 0 && JSON.stringify(paths60) === '["drafts/c.md","notes.md"]', `bridge with exclude dreaming → notes.md + drafts/c.md ingested, neither dreaming log (${paths60.join(', ')})`);
+      ok(JSON.stringify(br60.perSource[0].exclude) === '["dreaming"]' && br60.perSource[0].files === 2, 'the bridge result reports the source exclude list and the 2 files walked');
+      ok(o60.db.prepare("SELECT COUNT(*) n FROM claims WHERE content LIKE '%quembril60%'").get().n === 0, 'no claim from a dreaming log reaches the store');
+      // (c) MIDMEM_BRIDGE_EXCLUDE appends to every default source, and to a parsed MIDMEM_BRIDGE_SOURCES entry's own list.
+      process.env.MIDMEM_BRIDGE_EXCLUDE = ' drafts , scratch ';
+      const e60 = lc60();
+      ok(JSON.stringify(e60.bridgeExclude) === '["drafts","scratch"]' && e60.bridgeSources.length === 8 && e60.bridgeSources.every((x) => x.exclude.includes('drafts') && x.exclude.includes('scratch')),
+        'MIDMEM_BRIDGE_EXCLUDE=drafts,scratch → every default source excludes both (trimmed)');
+      ok(e60.bridgeSources.filter(isMem60).every((x) => x.exclude.join(',') === 'dreaming,drafts,scratch') && e60.bridgeSources.filter((x) => !isMem60(x)).every((x) => ['research,reports,drafts,scratch', 'drafts,scratch'].includes(x.exclude.join(','))),
+        'operator-wide excludes are appended after each source\'s own (dreaming / research,reports kept)');
+      process.env.MIDMEM_BRIDGE_EXCLUDE = 'drafts';
+      process.env.MIDMEM_BRIDGE_SOURCES = `${root60}|openclaw|session|||dreaming,drafts;${path.join(tmp, 'absent60')}|hermes`;
+      const p60 = lc60().bridgeSources;
+      ok(p60.length === 2 && JSON.stringify(p60[0].exclude) === '["dreaming","drafts"]' && JSON.stringify(p60[1].exclude) === '["drafts"]',
+        'a parsed MIDMEM_BRIDGE_SOURCES entry keeps its own sixth-field excludes plus drafts (deduped); one without gets drafts');
+      process.env.MIDMEM_BRIDGE_SOURCES = `${root60}|openclaw|session|||dreaming`;
+      oe60 = new Orchestrator(base53('b60e'));
+      const bre60 = await bm60(oe60, { project: false });
+      ok(bre60.ingested === 1 && bre60.perSource.length === 1 && JSON.stringify(bre60.perSource[0].exclude) === '["dreaming","drafts"]' && path.basename(oe60.db.prepare('SELECT path FROM sources').all().map((r) => r.path).join()) === 'notes.md',
+        'end to end: a configured bridge (own exclude dreaming + MIDMEM_BRIDGE_EXCLUDE=drafts) walks notes.md only');
+    } finally {
+      if (prevEx60 === undefined) delete process.env.MIDMEM_BRIDGE_EXCLUDE; else process.env.MIDMEM_BRIDGE_EXCLUDE = prevEx60;
+      if (prevSrc60 === undefined) delete process.env.MIDMEM_BRIDGE_SOURCES; else process.env.MIDMEM_BRIDGE_SOURCES = prevSrc60;
+      o60?.close(); oe60?.close();
+    }
+  }
+
+  // 61. The supersede stale-path flag is scoped to the claim's own evidence (2026-10-12). Measured:
+  //     superseding one 40-word claim flagged 264 nodes (graph.findByText: any label containing any
+  //     ≥ 3-char token as a substring — "and", "the", "memory"). Now (i) the nodes the claim's own
+  //     source ingest created, or (ii) a label sharing ≥ 2 whole significant words with the claim that
+  //     cover ≥ the containment floor of the label's own words; community parents only via a member.
+  {
+    const o61 = new Orchestrator(base53('s61'));
+    try {
+      const f61 = path.join(tmp, 's61', 'brastovar61.md');
+      fs.writeFileSync(f61, 'The brastovar61 relay copies memory pages between the quintrel61 racks and logs every transfer for the overnight operators. '
+        + 'Brastovar61 operators archive the transfer logs weekly. The quintrel61 racks sit in the eastern hall.');
+      const canon61 = fs.realpathSync(f61);
+      await o61.ingest({ path: f61, type: 'note' });
+      const unrelated61 = ['Understanding Hands', 'Theme memory bus', 'Kormish Vandle', 'Kormish relay telemetry dashboard export']
+        .map((label) => o61.graph.upsertNode({ type: 'concept', label, source: 'fixture61' }));
+      const [hands61, theme61, vandle61, wide61] = unrelated61;
+      await o61.refreshConcepts();
+      const own61 = o61.graph.allNodes().filter((n) => n.type !== 'community' && n.source === canon61).map((n) => n.id);
+      const long61 = o61.claims.getAll().find((c) => c.source?.path === canon61 && /copies memory pages/.test(c.content));
+      ok(own61.length > 0 && long61, `fixture: the note's ingest created ${own61.length} concept nodes and the long claim`);
+      const loose61 = o61.graph.findByText(long61.content).map((n) => n.id);
+      ok(loose61.includes(hands61) && loose61.includes(theme61), 'the old substring matcher would have flagged "Understanding Hands" and "Theme memory bus" (and / the / memory)');
+      const sup61 = o61.supersedeClaim(long61.id, { content: 'The brastovar61 relay now streams memory pages between the quintrel61 racks and logs every transfer for the overnight operators.' });
+      const flagged61 = new Set(sup61.stalePath || []);
+      const byId61 = (id) => o61.graph.node(id);
+      const members61 = [...flagged61].filter((id) => byId61(id).type !== 'community');
+      const parents61 = [...flagged61].filter((id) => byId61(id).type === 'community');
+      ok(sup61.success && members61.length === own61.length && own61.every((id) => flagged61.has(id)), `long claim superseded → exactly the note's ${own61.length} concept nodes flagged (rule i; ${flagged61.size} flagged in all)`);
+      ok(parents61.every((id) => flagged61.has(byId61(id).properties.staleReview?.via) && o61.graph.neighbors(byId61(id).properties.staleReview.via).some((e) => e.type === 'member_of' && e.to === id)),
+        `community parents (${parents61.length}) are flagged only through a flagged member`);
+      ok(unrelated61.every((id) => !flagged61.has(id) && !byId61(id).properties.staleReview), 'unrelated labels sharing "and" / "the" / "memory" are not flagged');
+      const lg61 = o61.db.prepare("SELECT detail FROM log WHERE operation='stale-path' ORDER BY id DESC LIMIT 1").get();
+      ok(lg61 && JSON.parse(lg61.detail).rule === 'scoped' && JSON.parse(lg61.detail).flagged === flagged61.size && JSON.parse(lg61.detail).claim === long61.id, 'the stale-path log row keeps its shape plus rule: scoped');
+      // Rule (ii): a short claim without a source path names one label by whole words (coverage 1.0 ≥ 0.6);
+      // a label sharing the same 2 words at 0.4 coverage stays unflagged, as do single-word labels.
+      const short61 = o61.claims.add({ content: 'the kormish vandle relay stalls under load' });
+      const supS61 = o61.supersedeClaim(short61.id, { content: 'the kormish vandle relay recovers under load' });
+      const flaggedS61 = new Set(supS61.stalePath || []);
+      ok(supS61.success && flaggedS61.has(vandle61) && [...flaggedS61].every((id) => id === vandle61 || byId61(id).type === 'community'), 'short claim → its whole-word label "Kormish Vandle" flagged (rule ii), nothing else but its parent');
+      ok(!flaggedS61.has(wide61) && !flaggedS61.has(hands61) && !flaggedS61.has(theme61), 'a label sharing 2 words at 0.4 coverage ("Kormish relay telemetry dashboard export") is below the floor');
+      const all61 = [...new Set([...flagged61, ...flaggedS61])];
+      const clr61 = await o61.clearStaleFlags({ ids: all61 });
+      ok(clr61.cleared === all61.length && o61.lint().stalePaths.length === 0, `stale-clear clears all ${all61.length} flags`);
+    } finally { o61.close(); }
+  }
+
+  // 62. A section entry keeps the name in its heading (2026-10-12). Measured: 2 of 18 section summaries
+  //     omitted the system their heading names (DAEDALUS: "The paper shows that an agent…"), so an entity
+  //     probe for the name found nothing. ingestSections hands the heading's leading name to ingest as
+  //     ensureName; a summary without it is stored as `<name>: <summary>` before grounding + embedding.
+  {
+    const { headingLeadingName: hln62, mentionsName: mn62 } = await import('../src/index.mjs');
+    ok(hln62('1.9 DAEDRIX62: autonomous kelvorn notebooks') === 'DAEDRIX62' && hln62('Ansolvium62 — sparse probes') === 'Ansolvium62' && hln62('Kel‑Tavor62 – drift ledgers') === 'Kel‑Tavor62'
+      && hln62('Wimbrel62 caching across morwick shards') === 'Wimbrel62 caching across morwick shards' && hln62('one two three four five six seven') === null && hln62('') === null,
+    'headingLeadingName: numbering stripped, cut at : / — / –, null past 6 words or empty');
+    ok(mn62('kel-tavor62 keeps ledgers', 'Kel‑Tavor62') && mn62('KEL–TAVOR62 x', 'kel-tavor62') && !mn62('The paper shows that an agent', 'DAEDRIX62'), 'mentionsName: case-insensitive, hyphen variants folded');
+    const o62 = new Orchestrator(base53('s62'));
+    try {
+      const dir62 = path.join(tmp, 'digests62');
+      fs.mkdirSync(dir62, { recursive: true });
+      const bodyD62 = 'The paper shows that an agent can keep a kelvorn lab notebook across long experiment runs, writing one entry per trial and reading the last five entries before it plans the next trial. The authors release the notebook format and the trial scripts.';
+      const bodyA62 = 'Sparse probes rank vintrel maps by how often a probe fires on held-out prompts; the ranking keeps the top tenth of probes and drops the rest. The method needs no labels and the probe weights are published with the code for every vintrel map.';
+      const bodyK62 = 'Drift ledgers record every change to a vintrel store with the reason for the change, so a later reader can replay how a stored belief moved. The ledger compresses old rows into checkpoints and keeps the replay cost bounded by the checkpoints.';
+      const digest62 = ['# Vintrel62 weekly digest', '', '### 1.9 DAEDRIX62: autonomous kelvorn notebooks', '', 'https://arxiv.org/abs/2610.06201', '', bodyD62, '',
+        '### Ansolvium62 — sparse probes for vintrel maps', '', 'https://arxiv.org/abs/2610.06202', '', bodyA62, '',
+        '### Kel‑Tavor62 – drift ledgers for vintrel stores', '', 'https://arxiv.org/abs/2610.06203', '', bodyK62, ''].join('\n');
+      const parentSum62 = 'Weekly vintrel62 digest of three papers on kelvorn notebooks, sparse probes and drift ledgers.';
+      const sumD62 = 'The paper shows that an agent keeps a kelvorn lab notebook across experiment runs.';
+      const sumA62 = 'Ansolvium62 ranks sparse probes over vintrel maps without labels.';
+      const sumK62 = 'kel-tavor62 drift ledgers record every change to a vintrel store.';
+      o62.extractor.extract = async (text) => ({
+        summary: text.startsWith('# ') ? parentSum62 : text.includes('2610.06201') ? sumD62 : text.includes('2610.06202') ? sumA62 : sumK62,
+        concepts: [], claims: [], mode: 'fallback', model: null, reason: 'disabled',
+      });
+      const embedded62 = [];
+      const realEmbed62 = o62.embedder.embed.bind(o62.embedder);
+      o62.embedder.embed = async (t) => { embedded62.push(t); return realEmbed62(t); };
+      const f62 = path.join(dir62, 'vintrel62-weekly.md');
+      fs.writeFileSync(f62, digest62);
+      const r62 = await o62.ingestSections({ path: f62 });
+      const [sD62, sA62, sK62] = r62.sections;
+      const eD62 = o62.recall(sD62?.entry), eA62 = o62.recall(sA62?.entry), eK62 = o62.recall(sK62?.entry);
+      ok(r62.sectionsSummary.ingested === 3 && eD62 && eA62 && eK62, 'fixture: three single-citation sections ingested');
+      ok(eD62.content === `DAEDRIX62: ${sumD62}` && eD62.provenance.extraction?.namePrefix === 'DAEDRIX62', `a summary that never names its heading's system is stored as "<Name>: …" → ${eD62.content.slice(0, 40)}…`);
+      ok(embedded62.includes(eD62.content) && !embedded62.includes(sumD62), 'the vector is computed from the stored (prefixed) text');
+      const secText62 = fs.readFileSync(eD62.provenance.originalSource, 'utf8');
+      ok(eD62.provenance.grounding.summaryScore === Number(groundingScore(secText62, eD62.content).toFixed(3)) && eD62.provenance.grounding.summaryScore >= groundingScore(secText62, sumD62),
+        `the grounding score is the stored text's and does not fall (${groundingScore(secText62, sumD62).toFixed(3)} → ${eD62.provenance.grounding.summaryScore})`);
+      const q62 = await o62.query('DAEDRIX62', { limit: 5 });
+      ok(q62.results.some((r) => r.id === eD62.id), 'an entity query for the name finds the section entry');
+      ok(eA62.content === sumA62 && eK62.content === sumK62 && !eA62.provenance.extraction?.namePrefix && !eK62.provenance.extraction?.namePrefix,
+        'a summary already naming the system (hyphen variant included) is stored unchanged');
+      const eP62 = o62.recall(r62.entry.id);
+      ok(eP62.content === parentSum62 && !eP62.provenance.extraction?.namePrefix, 'the parent digest is stored unchanged');
+      const fp62 = path.join(dir62, 'plain62.md');
+      fs.writeFileSync(fp62, `### 1.9 DAEDRIX62: autonomous kelvorn notebooks\n\nhttps://arxiv.org/abs/2610.06201\n\nA plain copy. ${bodyD62}\n`);
+      const rp62 = await o62.ingest({ path: fp62, type: 'note' });
+      ok(o62.recall(rp62.entry.id).content === sumD62, 'a plain ingest of the same text is not prefixed (no ensureName)');
+    } finally { o62.close(); }
+  }
+
+  // 63. The grounding check catches a unit drift (2026-10-12). Measured: the extractor turned "15.9
+  //     success-rate points" into "15.9 % higher success rates" and the overlap check passed it at 0.40.
+  //     unitDrift compares the unit after each claim number with the unit after the same number in the
+  //     source (percent / points / multiplier); checkGrounding's unitCheck quarantines a drifted claim.
+  {
+    const { unitDrift: ud63 } = await import('../src/index.mjs');
+    const S63 = 'gains up to 15.9 points and 2.2× pass^5';
+    const d63a = ud63(S63, 'up to 15.9% higher success');
+    ok(d63a.length === 1 && d63a[0].number === 15.9 && d63a[0].claimUnit === '%' && d63a[0].sourceUnit === 'points', `"15.9%" against "15.9 points" is a drift → ${JSON.stringify(d63a)}`);
+    ok(ud63(S63, 'up to 15.9 points').length === 0 && ud63(S63, 'a 2.2× increase').length === 0, 'the same number in the same unit is no drift (points, ×)');
+    const d63d = ud63(S63, '2.2 percent increase');
+    ok(d63d.length === 1 && d63d[0].claimUnit === 'percent' && d63d[0].sourceUnit === '×', '"2.2 percent" against "2.2×" is a drift');
+    const d63e = ud63('gains up to 15.9 success-rate points over no memory', 'up to 15.9% higher success rates');
+    ok(d63e.length === 1 && d63e[0].claimUnit === '%' && d63e[0].sourceUnit === 'points', 'the measured case: a hyphenated modifier between the number and "points" still reads as points → "15.9%" is a drift');
+    ok(ud63('the memo lists 2 key points for the team', 'a 2% rise').length === 0, 'a plain word between the number and "points" is a count, not a unit → no drift');
+    ok(ud63(S63, 'up to 42% higher').length === 0 && ud63(S63, 'gains 15.9 overall').length === 0 && ud63('a 2x2 grid', '2 points').length === 0,
+      'a number absent from the source, a unitless claim number, or a dimension (2x2) is not this check\'s job');
+    ok(ud63('a 15.9-point gain', '15.9 percentage points').length === 0 && ud63('rises 15.9 percentage points', 'rises 15.9 pp').length === 0 && ud63('3.1x faster', 'up to 3.1 pct').length === 1,
+      'unit spellings fold into classes (point / percentage points / pp; x glued is a multiplier)');
+    const src63 = 'Success for the quellvane63 planner rises up to 15.9 points, a higher margin, and 2.2× pass^5 increase over the brindle63 baseline.';
+    const items63 = ['Success rises up to 15.9% higher for quellvane63', 'Success rises up to 15.9 points for quellvane63', 'quellvane63 shows a 2.2× increase', 'quellvane63 shows a 2.2 percent increase'].map((content) => ({ content }));
+    const cg63 = checkGrounding(src63, items63, (c) => c.content, 0.5, { unitCheck: src63 });
+    ok(cg63.grounded.length === 2 && cg63.ungrounded.length === 2 && cg63.unitDrift === 2 && cg63.ungrounded.every((c) => c.reason === 'unit-drift' && c.unitDrift.length === 1 && c.groundingScore >= 0.5)
+      && cg63.grounded.every((c) => !c.reason), 'checkGrounding with unitCheck quarantines the two drifted claims (reason unit-drift + details) although their words overlap');
+    const cgOff63 = checkGrounding(src63, items63, (c) => c.content, 0.5);
+    ok(cgOff63.grounded.length === 4 && cgOff63.unitDrift === 0, 'without unitCheck the overlap check alone keeps all four (the measured gap; concept checks unchanged)');
+
+    // ingest: the grounding report and the log row count it; the drifted claims are never stored.
+    const o63 = new Orchestrator(base53('g63'));
+    try {
+      const f63 = path.join(tmp, 'g63', 'quellvane63.md');
+      fs.writeFileSync(f63, src63);
+      const stub63 = (mode) => async () => ({ summary: 'The quellvane63 planner rises over the brindle63 baseline.', concepts: [], claims: items63.map((c) => ({ ...c, confidence: 0.8 })), mode, model: mode === 'lmstudio' ? 'stub/extract-63' : null });
+      o63.extractor.extract = stub63('fallback');
+      const r63 = await o63.ingest({ path: f63, type: 'note' });
+      const live63 = (id) => o63.db.prepare("SELECT content FROM claims WHERE status IN ('active','verified') AND json_extract(source,'$.sourceId') = (SELECT source_id FROM entries WHERE id=?) ORDER BY content").all(id).map((r) => r.content);
+      ok(r63.grounding.unitDrift === 2 && r63.grounding.claimsQuarantined === 2 && r63.grounding.claimsKept === 2 && r63.claims === 2, `ingest result: grounding.unitDrift 2, claimsKept 2 (${JSON.stringify(r63.grounding)})`);
+      ok(JSON.stringify(live63(r63.entry.id)) === JSON.stringify(['Success rises up to 15.9 points for quellvane63', 'quellvane63 shows a 2.2× increase']), 'only the unit-faithful claims are stored');
+      const lg63 = JSON.parse(o63.db.prepare("SELECT detail FROM log WHERE operation='ingest' ORDER BY id DESC LIMIT 1").get().detail);
+      ok(lg63.unitDrift === 2 && lg63.quarantined === 2 && o63.recall(r63.entry.id).provenance.grounding.unitDrift === 2, 'the ingest log row and provenance.grounding carry unitDrift: 2');
+      // reextract (the model path) holds the same guard.
+      o63.extractor.extract = stub63('lmstudio');
+      const realEmbed63 = o63.embedder.embed.bind(o63.embedder);
+      o63.embedder.embed = async () => ({ vector: new Array(1024).fill(0).map((_, i) => (i === 63 ? 1 : 0)), model: 'stub-embed-63', mode: 'lmstudio' });
+      try {
+        const rx63 = await o63.reextract({});
+        const lgx63 = JSON.parse(o63.db.prepare("SELECT detail FROM log WHERE operation='reextract' ORDER BY id DESC LIMIT 1").get()?.detail || '{}');
+        ok(rx63.reextracted === 1 && o63.recall(r63.entry.id).provenance.grounding.unitDrift === 2 && lgx63.unitDrift === 2
+          && JSON.stringify(live63(r63.entry.id)) === JSON.stringify(['Success rises up to 15.9 points for quellvane63', 'quellvane63 shows a 2.2× increase']),
+        'reextract applies the same unit-drift quarantine (provenance.grounding + reextract log row)');
+      } finally { o63.embedder.embed = realEmbed63; }
+      // grounding disabled → the unit check is off with it.
+      o63.cfg.grounding = { ...o63.cfg.grounding, enabled: false };
+      o63.extractor.extract = stub63('fallback');
+      const f63b = path.join(tmp, 'g63', 'quellvane63-b.md');
+      fs.writeFileSync(f63b, `${src63} A second copy.`);
+      const r63b = await o63.ingest({ path: f63b, type: 'note' });
+      ok(r63b.grounding.unitDrift === 0 && r63b.grounding.claimsKept === 4, 'MIDMEM_GROUNDING=0 turns the unit check off with the overlap check');
+    } finally { o63.close(); }
+  }
+
+  // 64. An audit read that does not renew (2026-10-12). Measured: a review's own queries renewed the
+  //     leases of three content-free session-log rows. query({ audit: true }) returns the same results
+  //     with no retrieval_count bump, no last_accessed_at, no lease renewal and no opportunistic maintain.
+  {
+    const o64 = new Orchestrator(base53('q64'));
+    const db64 = path.join(tmp, 'q64', 'state.db');
+    try {
+      const a64 = await o64.storeMemory({ content: 'Zelphorin64 session log: the plumbrack64 relay idled all night.', tier: 'memory', type: 'note' });
+      const b64 = await o64.storeMemory({ content: 'Zelphorin64 session log: plumbrack64 counters reset at dawn.', tier: 'memory', type: 'note' });
+      const lease64 = '2030-01-01T00:00:00.000Z';
+      o64.db.prepare('UPDATE entries SET expires_at=? WHERE id IN (?,?)').run(lease64, a64.id, b64.id);
+      o64.db.prepare("DELETE FROM meta WHERE key='last_maintenance_at'").run();
+      const rows64 = () => o64.db.prepare('SELECT id, retrieval_count, last_accessed_at, expires_at FROM entries WHERE id IN (?,?) ORDER BY id').all(a64.id, b64.id);
+      const before64 = JSON.stringify(rows64());
+      const qa64 = await o64.query('zelphorin64 plumbrack64 session log', { audit: true, limit: 5 });
+      const qb64 = await o64.query('zelphorin64 plumbrack64 session log', { audit: true, limit: 5 });
+      ok(qa64.audit === true && qb64.audit === true && [a64.id, b64.id].every((id) => qa64.results.some((r) => r.id === id) && qb64.results.some((r) => r.id === id)), 'audit queries return the rows and carry audit: true');
+      ok(JSON.stringify(rows64()) === before64, 'two audit queries: retrieval_count, last_accessed_at and expires_at unchanged');
+      ok(!o64.db.prepare("SELECT 1 FROM meta WHERE key='last_maintenance_at'").get(), 'an audit query runs no opportunistic maintain');
+      const qn64 = await o64.query('zelphorin64 plumbrack64 session log', { limit: 5 });
+      const after64 = rows64();
+      ok(qn64.audit === undefined && JSON.stringify(qn64.results.map((r) => r.id)) === JSON.stringify(qa64.results.map((r) => r.id)) && after64.every((r) => r.retrieval_count === 1 && r.last_accessed_at && r.expires_at !== lease64)
+        && o64.db.prepare("SELECT 1 FROM meta WHERE key='last_maintenance_at'").get(), 'a normal query afterwards (same results) bumps the count, the access time and the lease, and may maintain');
+      const snap64 = JSON.stringify(rows64());
+      const cl64 = cli53(db64, 'query', 'zelphorin64', 'plumbrack64', '--audit');
+      ok(cl64.code === 0 && cl64.out?.audit === true && cl64.out.results.some((r) => r.id === a64.id) && JSON.stringify(rows64()) === snap64, 'CLI query --audit → audit: true, nothing renewed');
+      const mc64 = await mcp53(db64, [{ name: 'query', arguments: { query: 'zelphorin64 plumbrack64', audit: true } }]);
+      const tl64 = mc64.find((m) => m.id === 1).result.tools.find((t) => t.name === 'query');
+      const call64 = JSON.parse(mc64.find((m) => m.id === 2).result.content[0].text);
+      ok(tl64?.inputSchema?.properties?.audit?.type === 'boolean' && call64.audit === true && call64.results.some((r) => r.id === b64.id) && JSON.stringify(rows64()) === snap64, 'MCP query lists audit (boolean); an audit call renews nothing');
+    } finally { o64.close(); }
   }
 
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);

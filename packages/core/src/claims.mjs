@@ -25,6 +25,11 @@ function polarity(content) {
   return { neg: [...toks].some((t) => NEGATION_WORDS.has(t)), sig: new Set([...toks].filter((t) => !NEGATION_WORDS.has(t))) };
 }
 
+/** A text's significant tokens: the claim store's tokenisation minus its negation markers — the set
+ *  every polarity/containment judgment here compares. Exported so the supersede stale-path rule
+ *  (Orchestrator.supersedeClaim) matches node labels by the same words, not a copied word list. */
+export function significantTokens(text) { return polarity(text).sig; }
+
 /** Token containment of a pair: shared significant tokens / the SMALLER side's significant token
  *  count. Unlike Jaccard it is not diluted when one side is a short claim inside a long paragraph,
  *  and it separates a claim-and-its-negation (≈ 1) from two prose fragments that merely touch the
@@ -44,6 +49,8 @@ export class ClaimStore {
     const f = this.cfg?.claims?.contradictionMinContainment;
     return typeof f === 'number' && Number.isFinite(f) ? f : CONTRADICTION_MIN_CONTAINMENT;
   }
+  /** The same floor, for callers outside the store (the supersede stale-path rule): one value, one fallback. */
+  containmentFloor() { return this.#containmentFloor(); }
 
   add({ content, type = 'fact', source = {}, provenance = {}, metadata = {}, defer = false }) {
     // The id's hash part must not repeat within one millisecond: two claims that share their first

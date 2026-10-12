@@ -11,7 +11,7 @@ import { TieredMemory } from './memory.mjs';
 import { Embedder } from './embeddings.mjs';
 import { Extractor } from './extract.mjs';
 import { GraphStore } from './graph.mjs';
-import { ClaimStore } from './claims.mjs';
+import { ClaimStore, significantTokens } from './claims.mjs';
 import { SigmaVerifier } from './verify.mjs';
 import { PolicyEvaluator, governed, GovernanceError } from './governance.mjs';
 import { projectVault, probeProjection } from './project.mjs';
@@ -32,7 +32,7 @@ import { genId, sha12, nowISO, json, cosine } from './util.mjs';
 import { normalizeProject, resolveProjects } from './projectaxis.mjs';
 import { LibraryRegistry } from './libraries.mjs';
 import { sourceInstructionVerdict, mergeInstructionVerdicts } from './recallpolicy.mjs';
-import { canonicalizeCitation, splitDigestSections } from './sections.mjs';
+import { canonicalizeCitation, splitDigestSections, headingLeadingName, mentionsName } from './sections.mjs';
 
 /** `reextract` (2026-10-07): a per-entry failure (unparseable answer, an HTTP 4xx for that text) is
  *  not retried for this long, so a poison entry cannot stall "repeat until remaining is 0". */
@@ -186,7 +186,7 @@ export class Orchestrator {
   async recordPattern(rec = {}) { return recordPattern(this, rec); }
 
   /** Ingest a raw source: extract → store (memory tier, or a capture-pack type's tier) → embed → graph → claims → verify. */
-  async ingest({ path, type = 'note', title, metadata = {}, curated = false, scope = this.cfg.agentScope, authority, project = this.cfg.project, source }) {
+  async ingest({ path, type = 'note', title, metadata = {}, curated = false, scope = this.cfg.agentScope, authority, project = this.cfg.project, source, ensureName = null }) {
     // Authority assigned at origin (roadmap #10): explicit label wins; curation implies operator;
     // otherwise ingested material is 'doc'. Unknown labels are rejected, not silently mapped.
     if (authority !== undefined && !normalizeAuthority(authority)) throw new Error(`unknown authority: ${authority} (expected operator|stack|doc|web)`);
@@ -261,17 +261,26 @@ export class Orchestrator {
         if (linked) return linked;
       }
 
-      const ex = await this.extractor.extract(text, type);
+      const extracted = await this.extractor.extract(text, type);
+      // ensureName (2026-10-12, section ingests only — ingestSections passes the heading's leading
+      // name): a summary that never names what its heading names is stored as `<name>: <summary>`.
+      // Done BEFORE the grounding score and the embedding so the stored text, its score and its
+      // vector agree; the name is in the source (the heading line), so grounding cannot fall. A plain
+      // ingest passes none and is untouched; the title is never re-parsed here.
+      const namePrefix = typeof ensureName === 'string' && ensureName.trim() && !mentionsName(extracted.summary, ensureName) ? ensureName.trim() : null;
+      const ex = namePrefix ? { ...extracted, summary: `${namePrefix}: ${extracted.summary}` } : extracted;
       // DELEGATE-52 safeguard: ground LLM-extracted concepts/claims against the source BEFORE they
       // persist — quarantine (don't store) any whose content-words aren't actually in the document.
       const gcfg = this.cfg.grounding || {};
       const minOverlap = gcfg.enabled === false ? 0 : (gcfg.minOverlap ?? 0.5);
       const gc = checkGrounding(text, ex.concepts, (c) => c.name, minOverlap);
-      const gcl = checkGrounding(text, ex.claims, (c) => c.content, minOverlap);
+      // Claims also get the unit-drift check (2026-10-12, grounding.mjs): a number whose unit changed
+      // between source and claim (points → %) is quarantined even when every word overlaps.
+      const gcl = checkGrounding(text, ex.claims, (c) => c.content, minOverlap, gcfg.enabled === false ? {} : { unitCheck: text });
       const grounding = {
         summaryScore: Number(groundingScore(text, ex.summary).toFixed(3)), minOverlap,
         conceptsKept: gc.grounded.length, conceptsQuarantined: gc.ungrounded.length,
-        claimsKept: gcl.grounded.length, claimsQuarantined: gcl.ungrounded.length,
+        claimsKept: gcl.grounded.length, claimsQuarantined: gcl.ungrounded.length, unitDrift: gcl.unitDrift,
       };
       const { vector, model, mode } = await this.embedder.embed(ex.summary);
       const sourceId = genId('src', canon);
@@ -282,7 +291,7 @@ export class Orchestrator {
       // claims, so a capture system can tell model-extracted entries from fallback ones (`entries`) and
       // `reextract` can select the fallback ones. Legacy entries have no record.
       const extractedAt = nowISO();
-      const prov = { originalSource: canon, extractedAt, category, authority: auth, grounding, extraction: { mode: ex.mode, model: ex.model ?? null, at: extractedAt }, chain: [{ step: 'ingest', source: canon }], ...(src ? { source: src } : {}), ...(ilVerdict ? { instructionLike: ilVerdict } : {}) };
+      const prov = { originalSource: canon, extractedAt, category, authority: auth, grounding, extraction: { mode: ex.mode, model: ex.model ?? null, at: extractedAt, ...(namePrefix ? { namePrefix } : {}) }, chain: [{ step: 'ingest', source: canon }], ...(src ? { source: src } : {}), ...(ilVerdict ? { instructionLike: ilVerdict } : {}) };
       // Sources row (the dedup hash) commits WITH the entry: a failed ingest must not
       // leave the hash behind, or re-ingests would be skipped as 'unchanged' forever.
       // Supersede-on-reingest: a changed file replaces its earlier ingests — archive
@@ -311,7 +320,7 @@ export class Orchestrator {
       for (const cl of gcl.grounded) this.claims.add({ content: cl.content, type: 'fact', source: { path: canon, type, title, sourceId }, provenance: { extractor: ex.mode, confidence: cl.confidence, grounding: cl.groundingScore, authority: auth } });
 
       const verification = this.verifier.verifyConcepts(gc.grounded);
-      this.db.logOp('ingest', { path: canon, entry: stored.id, concepts: gc.grounded.length, claims: gcl.grounded.length, quarantined: gc.ungrounded.length + gcl.ungrounded.length, summaryScore: grounding.summaryScore, mode: ex.mode, conflicts: verification.conflicts.length, superseded: superseded.length });
+      this.db.logOp('ingest', { path: canon, entry: stored.id, concepts: gc.grounded.length, claims: gcl.grounded.length, quarantined: gc.ungrounded.length + gcl.ungrounded.length, unitDrift: grounding.unitDrift, summaryScore: grounding.summaryScore, mode: ex.mode, conflicts: verification.conflicts.length, superseded: superseded.length });
       this.#markVaultDirty();
       return { success: true, entry: stored, concepts: gc.grounded.length, claims: gcl.grounded.length, grounding, verification, mode: ex.mode, superseded };
     });
@@ -326,7 +335,7 @@ export class Orchestrator {
    * SAME path: unchanged content dedups by hash, changed content supersedes through the existing
    * path-keyed supersede. Authority defaults to 'web'. Then it is an ordinary governed ingest.
    */
-  async ingestContent({ content, source, type = 'note', title, scope, project, authority = 'web', curated = false, metadata = {} } = {}) {
+  async ingestContent({ content, source, type = 'note', title, scope, project, authority = 'web', curated = false, metadata = {}, ensureName = null } = {}) {
     if (typeof content !== 'string' || !content.length) throw new Error('ingestContent requires non-empty string content');
     const sourceKey = source?.canonicalUri || source?.sourceUri || source?.docId;
     if (!sourceKey) throw new Error('ingestContent requires source.canonicalUri, source.sourceUri or source.docId');
@@ -339,7 +348,7 @@ export class Orchestrator {
     const filePath = nodePath.join(dir, sha12(sourceKey) + '.md');
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(filePath, content);
-    return this.ingest({ path: filePath, type, title, source, scope, project, authority, curated, metadata });
+    return this.ingest({ path: filePath, type, title, source, scope, project, authority, curated, metadata, ensureName });
   }
 
   /**
@@ -396,6 +405,8 @@ export class Orchestrator {
           source: { canonicalUri: cit.canonicalUri, ...(cit.docId ? { docId: cit.docId } : {}), captureMethod: 'digest-section' },
           type, title: sec.heading, scope, project, authority: auth, curated,
           metadata: { ...metadata, digest: { path: canon, heading: sec.heading, index: sec.index } },
+          // The heading's leading name must survive into the summary (2026-10-12; sections.mjs).
+          ensureName: headingLeadingName(sec.heading),
         });
         const entry = this.#entryIdOf(r);
         if (r.skipped) {
@@ -470,14 +481,18 @@ export class Orchestrator {
     // Usage signal feeds trust/decay (+ lease renewal) — for LIVE rows only: a historical read (#43)
     // must never renew or count an archived entry, or history would leak back into the lifecycle.
     // Library rows (#49) carry status null, so this same filter guarantees they are never renewed.
-    this.memory.recordRetrieval(results.filter((r) => r.status === 'active').map((r) => r.id));
+    // Audit read (2026-10-12): the same results with NO lifecycle side effect — no retrieval_count
+    // bump, no last_accessed_at, no lease renewal, no opportunistic maintain. Measured: a review's own
+    // queries renewed three content-free July session-log rows, so an audit kept alive what it inspected.
+    const audit = !!opts.audit;
+    if (!audit) this.memory.recordRetrieval(results.filter((r) => r.status === 'active').map((r) => r.id));
     const graphContext = opts.includeGraphContext ? this.#graphContext(question) : null;
     const statuses = Array.isArray(opts.statuses) && opts.statuses.length ? opts.statuses : (opts.historical ? ['active', 'archived'] : ['active']);
-    await this.#maybeMaintain();
+    if (!audit) await this.#maybeMaintain();
     // Metadata filters (#48) ride opts into hybridSearch; echoed so a caller sees what narrowed the set.
     // Library lane (#49): false = skipped, an array = the ids asked, default = every registered library.
     const libraries = opts.libraries === false ? false : (Array.isArray(opts.libraries) ? opts.libraries : this.libraries.list().map((l) => l.id));
-    return { query: question, results, sufficiency, scopes, projects, statuses, asOf: opts.asOf || null, filters: opts.filters || null, types: opts.types || null, libraries, graphContext, tiers: opts.tiers || this.memory.tierNames, timestamp: nowISO() };
+    return { query: question, results, sufficiency, scopes, projects, statuses, asOf: opts.asOf || null, filters: opts.filters || null, types: opts.types || null, libraries, graphContext, tiers: opts.tiers || this.memory.tierNames, ...(audit ? { audit: true } : {}), timestamp: nowISO() };
   }
 
   /**
@@ -908,11 +923,12 @@ export class Orchestrator {
     const gcfg = this.cfg.grounding || {};
     const minOverlap = gcfg.enabled === false ? 0 : (gcfg.minOverlap ?? 0.5);
     const gc = checkGrounding(text, ex.concepts, (c) => c.name, minOverlap);
-    const gcl = checkGrounding(text, ex.claims, (c) => c.content, minOverlap);
+    // ingest's unit-drift guard holds here too: reextract is the model path, where the drift arises.
+    const gcl = checkGrounding(text, ex.claims, (c) => c.content, minOverlap, gcfg.enabled === false ? {} : { unitCheck: text });
     const grounding = {
       summaryScore: Number(groundingScore(text, ex.summary).toFixed(3)), minOverlap,
       conceptsKept: gc.grounded.length, conceptsQuarantined: gc.ungrounded.length,
-      claimsKept: gcl.grounded.length, claimsQuarantined: gcl.ungrounded.length,
+      claimsKept: gcl.grounded.length, claimsQuarantined: gcl.ungrounded.length, unitDrift: gcl.unitDrift,
     };
     // The dimension guard upsertVector applies, checked BEFORE the rows change: a refused vector must
     // not leave a new summary behind an old embedding.
@@ -988,7 +1004,7 @@ export class Orchestrator {
       await this.memory.upsertVector(id, emb.vector, emb.model, emb.mode);
       const verification = this.verifier.verifyConcepts(gc.grounded);
       const quarantined = gc.ungrounded.length + gcl.ungrounded.length;
-      this.db.logOp('reextract', { path, entry: id, concepts: gc.grounded.length, claims: gcl.grounded.length, quarantined, summaryScore: grounding.summaryScore, mode: ex.mode, model: ex.model ?? null,
+      this.db.logOp('reextract', { path, entry: id, concepts: gc.grounded.length, claims: gcl.grounded.length, quarantined, unitDrift: grounding.unitDrift, summaryScore: grounding.summaryScore, mode: ex.mode, model: ex.model ?? null,
         claimsArchived: done.claimsArchived, edgesRemoved: done.edgesRemoved, nodesRemoved: done.nodesRemoved, conceptsFlagged: done.conceptsFlagged, conflicts: verification.conflicts.length });
       return { entry: { id, docId: done.e.provenance?.source?.docId ?? null, mode: ex.mode, concepts: gc.grounded.length, claims: gcl.grounded.length, quarantined } };
     });
@@ -1436,15 +1452,32 @@ export class Orchestrator {
     }
     const old = this.claims.get(oldId);
     const r = this.claims.supersede(oldId, next); this.db.logOp('claim-supersede', { oldId, current: r.current }); if (r.success) this.#markVaultDirty();
-    // HiGram path rewrite (roadmap #12), report-only: when a claim is superseded, flag the
-    // concept nodes its content touches — and their community parents — as the affected
-    // dependency path needing review. Judgment clears the flags (clearStaleFlags); nothing
-    // here mutates knowledge.
+    // HiGram path rewrite (roadmap #12), report-only: when a claim is superseded, flag the nodes
+    // on ITS dependency path — and their community parents — as needing review. Judgment clears
+    // the flags (clearStaleFlags); nothing here mutates knowledge. Scoped rule (2026-10-12): the old
+    // matcher (graph.findByText — any label containing ANY ≥ 3-char token of the claim as a
+    // substring: "and", "the", "memory") flagged 264 nodes for one 40-word claim, 95 of them
+    // community parents, so the flag stopped meaning anything. A node is on the path when
+    //  (i) the claim's own source ingest created it (node.source === the claim's source.path), or
+    //  (ii) its label, as whole words, shares ≥ 2 significant tokens with the claim (the claim
+    //       store's tokenisation + negation set) AND they cover ≥ the containment floor
+    //       (claims.contradictionMinContainment) of the label's own significant tokens — a label
+    //       named BY the claim, not one that merely shares a common word with it.
+    // Deterministic. Community parents are flagged only through a flagged member, as before.
     if (r.success && old) {
       const flagged = [];
       const ts = nowISO();
-      for (const n of this.graph.findByText(old.content)) {
-        if (n.type === 'community') continue;
+      const srcPath = typeof old.source?.path === 'string' && old.source.path ? old.source.path : null;
+      const claimSig = significantTokens(old.content);
+      const floor = this.claims.containmentFloor();
+      const onPath = (n) => {
+        if (srcPath && n.source === srcPath) return true;
+        const label = significantTokens(n.label);
+        let shared = 0; for (const t of label) if (claimSig.has(t)) shared++;
+        return shared >= 2 && shared / label.size >= floor;
+      };
+      for (const n of this.graph.allNodes()) {
+        if (n.type === 'community' || !onPath(n)) continue;
         this.db.prepare('UPDATE nodes SET properties=? WHERE id=?')
           .run(JSON.stringify({ ...n.properties, staleReview: { claim: oldId, at: ts } }), n.id);
         flagged.push(n.id);
@@ -1458,7 +1491,7 @@ export class Orchestrator {
           }
         }
       }
-      if (flagged.length) this.db.logOp('stale-path', { claim: oldId, flagged: flagged.length });
+      if (flagged.length) this.db.logOp('stale-path', { claim: oldId, flagged: flagged.length, rule: 'scoped' });
       r.stalePath = flagged;
     }
     return r;

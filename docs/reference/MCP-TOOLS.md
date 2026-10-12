@@ -58,6 +58,7 @@ Hybrid (lexical+vector) search of the knowledge store with provenance. Defaults 
 | `asOf` | string |  | ISO time: only entries that existed then (created_at <= asOf) |
 | `bounded` | boolean |  | apply the occupancy policy (per-authority caps, protected operator slots, lineage floor) even without maxTokens |
 | `includeWorking` | boolean |  | include working-function (context-assembly) entries, excluded by default |
+| `audit` | boolean |  | audit read: the same results, but nothing is renewed — no retrieval_count, last_accessed_at or lease change and no opportunistic maintain (a review must not keep alive what it inspects); the result carries audit:true |
 | `filters` | object |  | source metadata filters: site, author, libraryId, docId, captureMethod, sourceUri, canonicalUri, language, publishedAfter, publishedBefore, capturedAfter, capturedBefore |
 | `types` | array<string> |  | entry type filter, e.g. ["news","research-paper"] |
 | `libraries` | array<string> |  | library ids to ask for evidence (default: every registered library); pass noLibraries:true to skip the lane |
