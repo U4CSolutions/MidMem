@@ -127,7 +127,7 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
   };
   let qv = null;
   if (!lexicalOnly) {
-    ({ vector: qv } = await embedder.embed(query));
+    ({ vector: qv } = await embedder.embed(query, { retries: 0 })); // one attempt: a query never waits out the write-path retries
     const vraw = await memory.vectorStore.search(qv, 400); // backend-ranked candidates (id+score)
     const vAllowed = filterActiveIds(db, vraw.map((r) => r.id), tiers, scoped, projects, statuses, asOf);
     lanes.vector = vraw.filter((r) => vAllowed.has(r.id)).slice(0, 200).map((r) => r.id);

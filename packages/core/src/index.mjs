@@ -10,7 +10,7 @@ export { ClaimStore, stanceOf, claimStance, STANCES } from './claims.mjs';
 export { SigmaVerifier } from './verify.mjs';
 export { PolicyEvaluator, GovernanceError, governed, defaultPolicies } from './governance.mjs';
 export { hybridSearch, progressiveSearch, evidenceSufficient } from './retrieval.mjs';
-export { checkGrounding, groundingScore, unitDrift } from './grounding.mjs';
+export { checkGrounding, groundingScore, unitDrift, isClaimShaped } from './grounding.mjs';
 export { canonicalizeCitation, splitDigestSections, headingLeadingName, mentionsName } from './sections.mjs';
 export { projectVault } from './project.mjs';
 export { bridgeMemory, walkMarkdown } from './bridge.mjs';

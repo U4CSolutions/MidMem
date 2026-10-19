@@ -6,7 +6,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { Orchestrator, GovernanceError, checkGrounding, groundingScore, categorizeIngest, isOpaqueTaskLabel, WORK_EVENT_NAMES, stanceOf } from '../src/index.mjs';
+import { Orchestrator, GovernanceError, checkGrounding, groundingScore, categorizeIngest, isOpaqueTaskLabel, WORK_EVENT_NAMES, stanceOf, isClaimShaped } from '../src/index.mjs';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; console.log(`  ✓ ${msg}`); } else { fail++; console.log(`  ✗ ${msg}`); } };
@@ -3218,6 +3218,334 @@ try {
       ok(ids65(oB65.currentClaims('dorvanix65 relay')) === [pB65.id, qB65.id].sort().join(), 'claims.stance === false → current() returns every live claim, as before');
       ok(oB65.claims.stats().byStance.observed === 3 && oB65.lint().stances.provisional === 0, 'claims.stance === false → unstanced rows count as observed');
     } finally { oB65.close(); }
+  }
+
+  // Shared by §66–69: a store of its own (db AND vault under tmp/<dir>), so projections never touch the main vault.
+  const base66 = (dir, extra = {}) => base53(dir, { vaultPath: path.join(tmp, dir, 'vault'), ...extra });
+  // A loopback URL nothing listens on (a refused connection), for the unreachable-endpoint cases.
+  const deadUrl66 = async () => { const http = await import('node:http'); return new Promise((resolve) => { const s = http.createServer(); s.listen(0, '127.0.0.1', () => { const port = s.address().port; s.close(() => resolve(`http://127.0.0.1:${port}/v1`)); }); }); };
+
+  // 66. Claim shape at write time (2026-10-19). Measured: with the model timing out, the fallback
+  //     extractor turned the first five "sentences" of markdown files into claims — headings, table rows,
+  //     bullets — and 125 such fragments were live, colliding with real claims as false contradictions.
+  //     `isClaimShaped` refuses them deterministically: the fallback never emits them (droppedFragments),
+  //     the model path drops them too, and checkGrounding quarantines any that reach it with reason
+  //     'not-a-claim' (grounding.notClaim on the ingest result and its log row).
+  {
+    const shapes66 = [
+      ['# Zephyrine brolly ledger', false, 'an ATX heading'],
+      ['| brolly | count | owner |', false, 'a table row'],
+      ['- **Brolly owner:** the zephyrine desk', false, 'a bullet with a bold lead'],
+      ['*Backlog check* — the zephyrine queue is empty today', false, 'an italic-wrapped lead-in'],
+      ['Session Key: agent-main-zephyrine', false, 'a Session Key label'],
+      ['**Session** opened by the zephyrine desk', false, 'a bold session label'],
+      ['brolly ledger', false, 'a two-word fragment'],
+      ['> the zephyrine desk said brollies are free', false, 'a block quote'],
+      ['2. **Lend** the zephyrine brolly at noon', false, 'a numbered item with a bold lead'],
+      ['```js const brolly = zephyrine()', false, 'a code fence'],
+      ['2026-10-19 17:55Z 41 s 0.93 ok', false, 'a mostly non-letter log line'],
+      ['12 34 56', false, 'no letters'],
+      ['The zephyrine desk lends a **spare** brolly to every visiting engineer.', true, 'a plain sentence with **bold** mid-way'],
+      ['3 zephyrine desks lend brollies to visiting quintrel engineers.', true, 'a sentence starting with a number'],
+      ['the session key for the zephyrine desk rotates hourly', true, 'prose about a session key (lower-case)'],
+    ];
+    const wrong66 = shapes66.filter(([t, want]) => isClaimShaped(t) !== want);
+    ok(!wrong66.length, `isClaimShaped on ${shapes66.length} shapes: ${wrong66.length ? 'WRONG on ' + wrong66.map((w) => w[2]).join('; ') : 'heading, table row, bold-lead bullet, italic lead-in, session labels, quote, numbered bold, fence, non-letter and two-word fragments refused; plain sentences (mid-way bold, a leading number, prose about a session key) kept'}`);
+    const src66 = 'Zephyrine desk overview. The zephyrine desk lends brollies to visiting quintrel engineers.';
+    const g66 = checkGrounding(src66, [{ content: '## Zephyrine desk overview' }, { content: 'The zephyrine desk lends brollies to visiting quintrel engineers.' }], (c) => c.content, 0.5, { claimShape: true });
+    ok(g66.notClaim === 1 && g66.grounded.length === 1 && g66.ungrounded.length === 1 && g66.ungrounded[0].reason === 'not-a-claim' && g66.ungrounded[0].groundingScore === 1,
+      'checkGrounding({ claimShape }) quarantines a fully grounded heading (score 1) with reason not-a-claim, before the overlap check; notClaim counts it');
+    const gc66 = checkGrounding(src66, [{ name: 'zephyrine' }, { name: 'quintrel' }], (c) => c.name, 0.5);
+    ok(gc66.grounded.length === 2 && gc66.notClaim === 0, 'without claimShape (the concept check) one-word names are untouched');
+
+    const oF66 = new Orchestrator(base66('s66a'));
+    try {
+      const md66 = '# Zephyrine brolly ledger overview\n\n| brolly | count |\n|---|---|\n| zephyrine-red | 12 |\n\n- **Brolly owner:** the zephyrine desk keeps the ledger.\n\nThe zephyrine brolly desk lends umbrellas to visiting quintrel engineers.\n';
+      const fx66 = await oF66.extractor.extract(md66, 'note');
+      ok(fx66.mode === 'fallback' && fx66.claims.length === 1 && /lends umbrellas/.test(fx66.claims[0].content) && fx66.droppedFragments === 4,
+        `fallback extractor: the heading, two table rows and the bold-lead bullet are dropped (droppedFragments ${fx66.droppedFragments}), the one real sentence is the claim`);
+      const glued66 = await oF66.extractor.extract('## Quintrel rota\nThe quintrel rota assigns zephyrine shifts every monday.\n```\nconst quintrel = rotaShiftsForZephyrine(monday);\n```\n', 'note');
+      ok(glued66.claims.length === 1 && glued66.claims[0].content === 'The quintrel rota assigns zephyrine shifts every monday.' && glued66.droppedFragments === 1,
+        'a sentence right under a heading (no blank line) survives on its own — the heading is its own block, dropped and counted; fenced code is never a claim (nor counted)');
+      const p66 = path.join(tmp, 's66a', 'ledger66.md');
+      fs.writeFileSync(p66, md66);
+      const i66 = await oF66.ingest({ path: p66, type: 'note' });
+      const stored66 = oF66.db.prepare("SELECT content FROM claims WHERE json_extract(source,'$.sourceId') = (SELECT source_id FROM entries WHERE id=?)").all(i66.entry.id).map((r) => r.content);
+      const lg66 = JSON.parse(oF66.db.prepare("SELECT detail FROM log WHERE operation='ingest' ORDER BY id DESC LIMIT 1").get().detail);
+      ok(i66.mode === 'fallback' && i66.claims === 1 && stored66.length === 1 && /lends umbrellas/.test(stored66[0]) && i66.grounding.notClaim >= 1 && lg66.notClaim === i66.grounding.notClaim,
+        `fallback ingest of a markdown file (heading, table rows, bullet first): zero fragment claims stored, the real sentence kept, grounding.notClaim ${i66.grounding.notClaim} (also on the log row)`);
+      // The model path: an extractor answer (mode lmstudio) carrying a heading-shaped claim.
+      const p66b = path.join(tmp, 's66a', 'desk66.md');
+      fs.writeFileSync(p66b, src66);
+      const realEx66 = oF66.extractor.extract;
+      oF66.extractor.extract = async () => ({ summary: 'The zephyrine desk lends brollies to visiting quintrel engineers.', concepts: [], mode: 'lmstudio', model: 'stub/66',
+        claims: [{ content: '## Zephyrine desk overview', confidence: 0.8 }, { content: 'The zephyrine desk lends brollies to visiting quintrel engineers.', confidence: 0.8 }] });
+      let m66;
+      try { m66 = await oF66.ingest({ path: p66b, type: 'note' }); } finally { oF66.extractor.extract = realEx66; }
+      const storedM66 = oF66.db.prepare("SELECT content FROM claims WHERE json_extract(source,'$.sourceId') = (SELECT source_id FROM entries WHERE id=?)").all(m66.entry.id).map((r) => r.content);
+      ok(m66.mode === 'lmstudio' && m66.claims === 1 && m66.grounding.claimsQuarantined === 1 && m66.grounding.notClaim === 1 && storedM66.length === 1 && !storedM66.some((c) => c.startsWith('#')),
+        'model path: a heading-shaped claim in the model answer is quarantined (not-a-claim; grounding.notClaim 1), the sentence is stored');
+    } finally { oF66.close(); }
+    // The model path inside the extractor: the fake endpoint answers its text's first two sentences as claims.
+    const { startFakeOpenAI: startFake66 } = await import('./helpers/fake-openai.mjs');
+    const { Extractor: Extractor66 } = await import('../src/index.mjs');
+    const fake66 = await startFake66({ dim: 16 });
+    try {
+      const ex66 = new Extractor66({ llmEnabled: true, llmEndpoint: fake66.url, extractModel: 'stub/66', llmTimeoutMs: 5000 });
+      const r66 = await ex66.extract('# Zephyrine ledger heading line. The zephyrine desk lends brollies to quintrel engineers. Later text follows here.', 'note');
+      ok(r66.mode === 'lmstudio' && r66.droppedFragments === 1 && !r66.claims.some((c) => c.content.startsWith('#')) && r66.claims.some((c) => /lends brollies/.test(c.content)),
+        'model path: the extractor drops a heading-shaped claim the model answered (droppedFragments 1) and keeps the sentence');
+    } finally { await fake66.close(); }
+  }
+
+  // 67. Governed claims sweep (2026-10-19). Measured: 40 fragment-shaped claims stayed live after
+  //     `reextract` cleared 85, 12 of them from entries that no longer exist (a re-ingest supersedes the
+  //     entry, never its claims). `claims-sweep` archives fragments (reason not-a-claim) and orphans
+  //     (reason source-gone, archivedBy.entry when known); archived claims leave contradictedBy lists;
+  //     lint shows the queue as fragmentClaims / orphanClaims. Seeded with the shape check bypassed
+  //     (claims.add directly) — what the store holds from before it existed.
+  {
+    const dir67 = path.join(tmp, 's67');
+    fs.mkdirSync(dir67, { recursive: true });
+    const db67 = path.join(dir67, 'state.db');
+    const fA67 = path.join(dir67, 'sluice67.md'), fB67 = path.join(dir67, 'weir67.md');
+    fs.writeFileSync(fA67, 'The glimmerfen sluice opens every tuesday for the barge crews.\n');
+    fs.writeFileSync(fB67, 'The brennick weir never floods the lower meadow each spring.\n');
+    let o67 = new Orchestrator(base66('s67'));
+    let realA67, headA67, nb67, orphB67, legacy67, legacyLive67, eA67, eB67, frag67b;
+    try {
+      nb67 = o67.claims.add({ content: 'the brennick weir floods the lower meadow each spring' }).id; // no source: derives from no entry
+      eA67 = (await o67.ingest({ path: fA67, type: 'note' })).entry.id;
+      eB67 = (await o67.ingest({ path: fB67, type: 'note' })).entry.id;
+      const srcOf67 = (e) => o67.db.prepare('SELECT s.id, s.path FROM entries e JOIN sources s ON s.id = e.source_id WHERE e.id=?').get(e);
+      const sA67 = srcOf67(eA67), sB67 = srcOf67(eB67);
+      const claimOf67 = (sid) => o67.db.prepare("SELECT id FROM claims WHERE json_extract(source,'$.sourceId') = ?").get(sid)?.id;
+      realA67 = claimOf67(sA67.id);
+      orphB67 = claimOf67(sB67.id);
+      headA67 = o67.claims.add({ content: '## Glimmerfen sluice schedule', source: { path: sA67.path, sourceId: sA67.id } }).id;
+      legacy67 = o67.claims.add({ content: 'The quellmoor lock keeper logs every passing barge at noon.', source: { path: path.join(dir67, 'gone67.md') } }).id;
+      legacyLive67 = o67.claims.add({ content: 'The glimmerfen barge crews unload timber beside the sluice.', source: { path: sA67.path } }).id;
+      // An entry that leaves without its claims — what a re-ingest supersede (or an archive with the cascade off) does.
+      o67.cfg.forget.cascade = false;
+      try { await o67.archiveEntries({ ids: [eB67], reason: 'fixture67' }); } finally { o67.cfg.forget.cascade = true; }
+      const nbBefore67 = o67.claims.get(nb67);
+      ok(realA67 && orphB67 && o67.claims.get(orphB67).status === 'deferred' && (nbBefore67.metadata.contradictedBy || []).includes(orphB67) && o67.recall(eB67).status === 'archived' && o67.claims.get(orphB67).status === 'deferred',
+        "fixture: a real claim, a heading-shaped claim, a (deferred) claim whose entry was archived without it — in a live neighbour's contradictedBy — and legacy claims with a gone and a live path");
+      const l067 = o67.lint();
+      ok(l067.fragmentClaims === 1 && l067.orphanClaims === 2, `lint shows the queue before any sweep: fragmentClaims ${l067.fragmentClaims}, orphanClaims ${l067.orphanClaims}`);
+      const snap67 = () => JSON.stringify(o67.db.prepare('SELECT id, status, metadata, updated_at FROM claims ORDER BY id').all());
+      const before67 = snap67();
+      const dry67 = await o67.claimsSweep({ dryRun: true });
+      ok(dry67.success && dry67.dryRun === true && dry67.scanned === 6 && dry67.fragments === 1 && dry67.orphans === 2 && dry67.archived === 3 && dry67.neighbours === 1 && dry67.sample.length === 3
+        && snap67() === before67 && !o67.db.prepare("SELECT 1 FROM log WHERE operation='claims-sweep'").get(),
+        `claims-sweep dryRun reports 3 (fragments ${dry67.fragments}, orphans ${dry67.orphans}, neighbours ${dry67.neighbours} of ${dry67.scanned} scanned) and changes nothing — no claim row, no log row`);
+      o67.db.prepare("UPDATE meta SET value='0' WHERE key='vault_dirty'").run();
+      const run67 = await o67.claimsSweep();
+      const c67 = (id) => o67.claims.get(id);
+      ok(run67.archived === 3 && run67.fragments === 1 && run67.orphans === 2 && run67.neighbours === 1 && run67.dryRun === false, 'the real run archives the same 3');
+      const hb67 = c67(headA67).metadata.archivedBy;
+      ok(c67(headA67).status === 'archived' && hb67?.reason === 'not-a-claim' && !('entry' in hb67) && !Number.isNaN(Date.parse(hb67.at)), 'the heading-shaped claim → archived with archivedBy { at, reason: not-a-claim }');
+      ok(c67(orphB67).status === 'archived' && c67(orphB67).metadata.archivedBy?.reason === 'source-gone' && c67(orphB67).metadata.archivedBy.entry === eB67,
+        'the (deferred) claim whose entry was archived → archived, reason source-gone, archivedBy.entry = that entry');
+      ok(c67(legacy67).status === 'archived' && c67(legacy67).metadata.archivedBy?.reason === 'source-gone' && !('entry' in c67(legacy67).metadata.archivedBy),
+        'the legacy claim (no sourceId) whose path no active entry stands for → archived, reason source-gone');
+      ok([realA67, legacyLive67, nb67].every((id) => c67(id).status === 'active'), 'the real claim, a legacy claim whose path is live, and a claim with no source stay active');
+      ok(!('contradictedBy' in c67(nb67).metadata) && c67(nb67).updated_at === nbBefore67.updated_at, "the archived claim leaves the neighbour's contradictedBy (the emptied list is dropped; the neighbour's updated_at stays)");
+      const lg67 = o67.db.prepare("SELECT detail FROM log WHERE operation='claims-sweep'").all().map((r) => JSON.parse(r.detail));
+      ok(lg67.length === 1 && lg67[0].archived === 3 && lg67[0].fragments === 1 && lg67[0].orphans === 2 && o67.db.prepare("SELECT value FROM meta WHERE key='vault_dirty'").get()?.value === '1',
+        'the run is logged as claims-sweep and marks the vault dirty');
+      const l167 = o67.lint();
+      ok(l167.fragmentClaims === 0 && l167.orphanClaims === 0, 'lint reads fragmentClaims 0 / orphanClaims 0 afterwards');
+      const again67 = await o67.claimsSweep();
+      ok(again67.archived === 0 && again67.scanned === 3, 'a second run is a no-op');
+      // The measured case: a changed file re-ingested supersedes its entry, and the old claim is left live.
+      fs.writeFileSync(fA67, 'The glimmerfen sluice now opens every thursday for the barge crews.\n');
+      await o67.ingest({ path: fA67, type: 'note' });
+      ok(o67.recall(eA67).status === 'archived' && c67(realA67).status === 'active' && o67.lint().orphanClaims === 1, 'a re-ingest supersedes the entry but leaves its claim live → lint orphanClaims 1');
+      frag67b = o67.claims.add({ content: '| sluice | day |' }).id;
+    } finally { o67.close(); }
+    const cd67 = cli53(db67, 'claims-sweep', '--dryRun', '--no-orphans');
+    const cf67 = cli53(db67, 'claims-sweep', '--dryRun', '--no-fragments');
+    ok(cd67.code === 0 && cd67.out?.dryRun === true && cd67.out.fragments === 1 && cd67.out.orphans === 0 && cf67.code === 0 && cf67.out?.fragments === 0 && cf67.out.orphans === 1,
+      'CLI claims-sweep --dryRun with --no-orphans → only the fragment; with --no-fragments → only the orphan');
+    const mc67 = await mcp53(db67, [{ name: 'claims_sweep', arguments: { fragments: false } }]);
+    const tl67 = mc67.find((m) => m.id === 1).result.tools.find((t) => t.name === 'claims_sweep');
+    const call67 = JSON.parse(mc67.find((m) => m.id === 2).result.content[0].text);
+    ok(['fragments', 'orphans', 'dryRun'].every((k) => tl67?.inputSchema?.properties?.[k]?.type === 'boolean') && call67.success === true && call67.orphans === 1 && call67.fragments === 0 && call67.archived === 1,
+      'MCP claims_sweep is listed (fragments / orphans / dryRun booleans); fragments:false archives the orphan only');
+    const cr67 = cli53(db67, 'claims-sweep');
+    ok(cr67.code === 0 && cr67.out?.fragments === 1 && cr67.out.orphans === 0 && cr67.out.archived === 1, 'CLI claims-sweep (real run) archives the fragment');
+    o67 = new Orchestrator(base66('s67'));
+    try {
+      const l267 = o67.lint();
+      ok(o67.claims.get(realA67).metadata.archivedBy?.entry === eA67 && o67.claims.get(frag67b).metadata.archivedBy?.reason === 'not-a-claim' && l267.fragmentClaims === 0 && l267.orphanClaims === 0,
+        'the superseded entry\'s claim was archived with archivedBy.entry = the old entry; the queue is empty');
+    } finally { o67.close(); }
+  }
+
+  // 68. The embedder retries with backoff before falling back (2026-10-19). Measured: one agent process
+  //     wrote 37 placeholder vectors in a day after single embed timeouts, while CLI ingests in the same
+  //     hours embedded normally. A timeout, a refused connection or a 5xx / 429 is retried (embedRetries,
+  //     backoff embedRetryMs × 2^attempt); another 4xx falls back at once. The fake endpoint scripts it.
+  {
+    const { startFakeOpenAI: startFake68 } = await import('./helpers/fake-openai.mjs');
+    const { Embedder: Embedder68, loadConfig: loadConfig68 } = await import('../src/index.mjs');
+    const fake68 = await startFake68({ dim: 16 });
+    const dead68 = await deadUrl66();
+    let o68 = null;
+    try {
+      const d68 = loadConfig68();
+      ok(d68.embedRetries === 2 && d68.embedRetryMs === 250, 'defaults: embedRetries 2 (MIDMEM_EMBED_RETRIES), embedRetryMs 250 (MIDMEM_EMBED_RETRY_MS)');
+      const em68 = (over = {}) => new Embedder68({ ...d68, llmEnabled: true, llmEndpoint: fake68.url, embedModel: 'stub-embed', llmTimeoutMs: 2000, embedRetries: 2, embedRetryMs: 25, ...over });
+      const run68 = async (mode, over) => {
+        fake68.state.embed = mode; fake68.state.embedFailures = 0; fake68.state.embedLog = [];
+        const r = await em68(over).embed('kelvorn68 quayside telemetry');
+        return { r, log: fake68.state.embedLog.slice() };
+      };
+      const a68 = await run68('fail-then-ok:1');
+      ok(a68.r.mode === 'lmstudio' && a68.r.attempts === 2 && a68.r.vector.length === 16 && a68.r.model === 'stub-embed' && !('reason' in a68.r) && JSON.stringify(a68.log.map((x) => x.status)) === '[503,200]',
+        'fail-then-ok:1 → a real vector on attempt 2 (attempts 2, mode lmstudio)');
+      const b68 = await run68('fail-then-ok:3');
+      ok(b68.r.mode === 'fallback' && b68.r.attempts === 3 && b68.r.reason === 'http-503' && b68.r.model === 'fallback-hash-256' && b68.log.length === 3,
+        'fail-then-ok:3 with retries 2 → fallback after 3 attempts, reason http-503');
+      // Timers may fire up to ~1 ms early (millisecond rounding), hence the 1 ms tolerance.
+      const gap1_68 = b68.log[1].at - b68.log[0].at, gap2_68 = b68.log[2].at - b68.log[1].at;
+      ok(gap1_68 >= 24 && gap2_68 >= 49, `backoff honoured: attempt 2 starts ${gap1_68.toFixed(1)} ms after the 1st failure (≥ 25 = embedRetryMs), attempt 3 ${gap2_68.toFixed(1)} ms after the 2nd (≥ 50 = 25 × 2)`);
+      const c68 = await run68('http-400');
+      ok(c68.r.mode === 'fallback' && c68.r.attempts === 1 && c68.r.reason === 'http-400' && c68.log.length === 1, 'http-400 → no retry (the request is wrong, not the box): fallback at once');
+      const t68 = await run68('http-429');
+      ok(t68.r.attempts === 3 && t68.r.reason === 'http-429' && t68.log.length === 3, 'http-429 → retried (rate-limited), then fallback');
+      const h68 = await run68('hang', { llmTimeoutMs: 80, embedRetryMs: 5 });
+      ok(h68.r.mode === 'fallback' && h68.r.attempts === 3 && h68.r.reason === 'timeout' && h68.log.length === 3, 'hang with a short timeout → retried, then fallback with reason timeout');
+      fake68.state.embed = 'ok';
+      const u68 = await em68({ llmEndpoint: dead68, embedRetryMs: 5 }).embed('kelvorn68 quayside');
+      ok(u68.mode === 'fallback' && u68.attempts === 3 && u68.reason === 'unreachable', 'a refused connection → retried, then fallback with reason unreachable');
+      const off68 = await em68({ llmEnabled: false }).embed('kelvorn68 quayside');
+      ok(off68.mode === 'fallback' && off68.attempts === 0 && off68.reason === 'disabled', 'model switched off → no call (attempts 0, reason disabled), the offline path as before');
+      const prev68 = [process.env.MIDMEM_EMBED_RETRIES, process.env.MIDMEM_EMBED_RETRY_MS];
+      process.env.MIDMEM_EMBED_RETRIES = '0'; process.env.MIDMEM_EMBED_RETRY_MS = '7';
+      let e68;
+      try { e68 = loadConfig68(); } finally {
+        if (prev68[0] === undefined) delete process.env.MIDMEM_EMBED_RETRIES; else process.env.MIDMEM_EMBED_RETRIES = prev68[0];
+        if (prev68[1] === undefined) delete process.env.MIDMEM_EMBED_RETRY_MS; else process.env.MIDMEM_EMBED_RETRY_MS = prev68[1];
+      }
+      const z68 = await run68('fail-then-ok:1', { embedRetries: e68.embedRetries, embedRetryMs: e68.embedRetryMs });
+      ok(e68.embedRetries === 0 && e68.embedRetryMs === 7 && z68.r.mode === 'fallback' && z68.r.attempts === 1 && z68.log.length === 1, 'MIDMEM_EMBED_RETRIES=0 → one attempt only (MIDMEM_EMBED_RETRY_MS is read too)');
+      // The ingest / remember log rows record embedAttempts when > 1.
+      o68 = new Orchestrator(base66('s68', { llmEnabled: true, llmEndpoint: fake68.url, embedModel: 'stub-embed', extractModel: 'stub/extract-68', llmTimeoutMs: 2000, embedRetryMs: 5 }));
+      const lastLog68 = (op) => JSON.parse(o68.db.prepare('SELECT detail FROM log WHERE operation=? ORDER BY id DESC LIMIT 1').get(op).detail);
+      fake68.state.embed = 'fail-then-ok:1'; fake68.state.embedFailures = 0;
+      const m68 = await o68.storeMemory({ content: 'The kelvorn68 quayside crane lifts brass containers at dusk.', type: 'note' });
+      ok(lastLog68('remember').embedAttempts === 2 && o68.db.prepare('SELECT model FROM vectors WHERE entry_id=?').get(m68.id)?.model === 'stub-embed',
+        'remember after one busy answer: a real vector, and the remember log row records embedAttempts 2');
+      fake68.state.embedFailures = 0;
+      const p68 = path.join(tmp, 's68', 'quay68.md');
+      fs.writeFileSync(p68, 'The kelvorn68 quayside crane lifts brass containers every dusk. Dock pilots log each lift in the harbour book.');
+      const i68 = await o68.ingest({ path: p68, type: 'note' });
+      ok(i68.success && i68.mode === 'lmstudio' && lastLog68('ingest').embedAttempts === 2, 'ingest after one busy answer: the ingest log row records embedAttempts 2');
+      fake68.state.embed = 'ok';
+      await o68.storeMemory({ content: 'The kelvorn68 harbour bell rings at noon each day.', type: 'note' });
+      ok(!('embedAttempts' in lastLog68('remember')), 'a first-try embed adds no embedAttempts field (only > 1 is recorded)');
+    } finally { o68?.close(); await fake68.close(); }
+  }
+
+  // 69. The forced maintain runs bounded re-embed and reextract batches (2026-10-19). Entries extracted by
+  //     the fallback while the model was down, and the placeholder vectors capture children write with the
+  //     model off by contract, were repaired only by hand runs. Forced pass only: reembedFallback (limit
+  //     maintenance.reembedLimit, self-gating on the embedder) first, then reextract (limit
+  //     maintenance.reextractLimit) when the endpoint answers a cheap GET /models probe; skips and errors
+  //     are recorded, never a failed pass.
+  {
+    const { startFakeOpenAI: startFake69 } = await import('./helpers/fake-openai.mjs');
+    const { loadConfig: loadConfig69 } = await import('../src/index.mjs');
+    const fake69 = await startFake69({ dim: 16 });
+    const dead69 = await deadUrl66();
+    const dir69 = path.join(tmp, 's69');
+    fs.mkdirSync(dir69, { recursive: true });
+    const o69 = new Orchestrator(base66('s69', { export: { enabled: false }, embedRetryMs: 1, maintenance: { ...loadConfig69().maintenance, intervalMs: 0 } }));
+    try {
+      const dm69 = loadConfig69().maintenance;
+      ok(dm69.reextractLimit === 20 && dm69.reembedLimit === 200, 'defaults: maintenance.reextractLimit 20 (MIDMEM_MAINTAIN_REEXTRACT), reembedLimit 200 (MIDMEM_MAINTAIN_REEMBED)');
+      const T69 = {
+        harbour: '# Kestrine harbour log\n\nThe kestrine harbour opened its eastern berth at dawn. Pilots guided three trawlers past the breakwater.\n',
+        orchard: '# Velloran orchard notes\n\nThe velloran orchard harvested amber pears this week. Pickers stacked crates beside the cider barn.\n',
+      };
+      const E69 = {};
+      for (const [k, t] of Object.entries(T69)) { const p = path.join(dir69, `${k}69.md`); fs.writeFileSync(p, t); E69[k] = (await o69.ingest({ path: p, type: 'note' })).entry.id; }
+      const mode69 = (id) => o69.recall(id).provenance.extraction?.mode;
+      const fbVec69 = () => o69.db.prepare("SELECT COUNT(*) c FROM vectors WHERE model LIKE 'fallback%'").get().c;
+      const count69 = (op) => o69.db.prepare('SELECT COUNT(*) c FROM log WHERE operation=?').get(op).c;
+      ok(Object.values(E69).every((id) => mode69(id) === 'fallback') && fbVec69() === 2, 'fixture: two entries ingested with the model off (fallback extraction, placeholder vectors)');
+      const off69 = await o69.maintain({ force: true });
+      ok(off69.reembedded?.skipped === true && off69.reembedded.reason === 'disabled' && off69.reextracted?.skipped === true && off69.reextracted.reason === 'disabled' && count69('reembed') === 0,
+        'the model switched off in this process → both batches skip with reason disabled (no call, no failed reembed row)');
+      Object.assign(o69.cfg, { llmEnabled: true, llmEndpoint: fake69.url, embedModel: 'stub-embed', extractModel: 'stub/extract-69', llmTimeoutMs: 2000 });
+      const chat0_69 = fake69.state.chatCalls;
+      const lazy69 = await o69.maintain();
+      ok(!lazy69.skipped && lazy69.forced === false && lazy69.reembedded === null && lazy69.reextracted === null && fake69.state.chatCalls === chat0_69 && fbVec69() === 2 && mode69(E69.harbour) === 'fallback',
+        'the opportunistic (non-forced) pass runs neither batch');
+      o69.cfg.maintenance.reextractLimit = 0; o69.cfg.maintenance.reembedLimit = 0;
+      let zero69;
+      try { zero69 = await o69.maintain({ force: true }); } finally { o69.cfg.maintenance.reextractLimit = 20; o69.cfg.maintenance.reembedLimit = 200; }
+      ok(zero69.reembedded === null && zero69.reextracted === null && fake69.state.chatCalls === chat0_69 && fbVec69() === 2 && count69('reextract-run') === 0,
+        'reextractLimit 0 / reembedLimit 0 → neither batch runs');
+      o69.cfg.llmEndpoint = dead69;
+      let down69;
+      try { down69 = await o69.maintain({ force: true }); } finally { o69.cfg.llmEndpoint = fake69.url; }
+      ok(down69.forced === true && down69.reembedded?.reembedded === 0 && down69.reembedded.reason === 'embedder-offline' && down69.reextracted?.skipped === true && down69.reextracted.reason === 'unreachable'
+        && fbVec69() === 2 && mode69(E69.harbour) === 'fallback' && count69('reextract-run') === 0,
+        `endpoint unreachable → the pass completes; reembedded reason ${down69.reembedded?.reason}, reextracted skipped with reason ${down69.reextracted?.reason}; nothing touched`);
+      const maint0_69 = count69('maintain');
+      const live69 = await o69.maintain({ force: true });
+      ok(live69.reembedded?.reembedded === 2 && live69.reembedded.remaining === 0 && live69.reextracted?.reextracted === 2 && live69.reextracted.remaining === 0 && live69.reextracted.stopped === null,
+        'endpoint ok → reembedded.reembedded 2 (both placeholders), then reextracted.reextracted 2');
+      ok(Object.values(E69).every((id) => mode69(id) === 'lmstudio') && fbVec69() === 0 && fake69.state.chatCalls === chat0_69 + 2, 'both entries now model-extracted with real vectors: 2 model calls, 0 placeholders left');
+      const rows69 = o69.db.prepare("SELECT detail FROM log WHERE operation='reextract' ORDER BY id").all().map((r) => JSON.parse(r.detail));
+      ok(rows69.length === 2 && rows69.every((r) => r.notClaim === 1), 'the model answered each heading-glued first sentence as a claim: dropped as not claim-shaped, notClaim 1 on each reextract log row');
+      const ml69 = JSON.parse(o69.db.prepare("SELECT detail FROM log WHERE operation='maintain' ORDER BY id DESC LIMIT 1").get().detail);
+      ok(count69('maintain') === maint0_69 + 1 && ml69.reembedded?.reembedded === 2 && ml69.reextracted?.reextracted === 2,
+        'one maintain row for the pass (reextract never re-enters maintenance), carrying both summaries');
+      o69.reembedFallback = async () => { throw new Error('reembed boom69'); };
+      o69.reextract = async () => { throw new Error('reextract boom69'); };
+      let err69;
+      try { err69 = await o69.maintain({ force: true }); } finally { delete o69.reembedFallback; delete o69.reextract; }
+      ok(err69.forced === true && err69.reembedded?.error === 'reembed boom69' && err69.reextracted?.error === 'reextract boom69', 'an error in either batch is recorded, never a failed pass');
+    } finally { o69.close(); await fake69.close(); }
+  }
+
+  // 70. Retrieval and the concept refresh embed with ONE attempt (2026-10-19 gate). §68's retries are for
+  //     writes; a query must not wait three timeouts on a hung box (a fallback query vector still serves
+  //     the lexical lanes), and the concept refresh stops at its first fallback instead of storing hash
+  //     vectors into concept nodes.
+  {
+    const { startFakeOpenAI: startFake70 } = await import('./helpers/fake-openai.mjs');
+    const { Embedder: Embedder70, loadConfig: loadConfig70 } = await import('../src/index.mjs');
+    const fake70 = await startFake70({ dim: 16 });
+    const dir70 = path.join(tmp, 's70');
+    fs.mkdirSync(dir70, { recursive: true });
+    const o70 = new Orchestrator(base66('s70', { export: { enabled: false }, maintenance: { ...loadConfig70().maintenance, intervalMs: 0 } }));
+    try {
+      const em70 = new Embedder70({ ...loadConfig70(), llmEnabled: true, llmEndpoint: fake70.url, embedModel: 'stub-embed', llmTimeoutMs: 2000, embedRetries: 2, embedRetryMs: 1 });
+      fake70.state.embed = 'fail-then-ok:1'; fake70.state.embedFailures = 0; fake70.state.embedLog = [];
+      const one70 = await em70.embed('varnholt70 lantern ledger', { retries: 0 });
+      ok(one70.mode === 'fallback' && one70.attempts === 1 && fake70.state.embedLog.length === 1, `embed(text, { retries: 0 }) makes exactly one attempt and falls back — the per-call override beats the knob (${one70.attempts}, ${fake70.state.embedLog.length})`);
+      fake70.state.embed = 'ok'; fake70.state.embedFailures = 0;
+      // Ingest with the model OFF (the suite's offline extractor gives the note its concepts), then turn the
+      // model ON for the reads under test — §59's pattern: the Embedder reads cfg.llmEnabled live.
+      await o70.ingest({ path: (() => { const f = path.join(dir70, 'ledger70.md'); fs.writeFileSync(f, '# Varnholt lantern ledger\n\nThe varnholt70 lantern keeper logs every lamp relit before dusk on the quay.\n'); return f; })(), type: 'note' });
+      for (const c of [o70.cfg, o70.embedder.cfg]) { c.llmEnabled = true; c.llmEndpoint = fake70.url; c.embedModel = 'stub-embed'; c.llmTimeoutMs = 2000; c.embedRetries = 2; c.embedRetryMs = 1; }
+      fake70.state.embed = 'http-500'; fake70.state.embedLog = [];
+      // deep:true forces the vector lane (the gate would otherwise stop at a sufficient lexical pass)
+      const q70 = await o70.query('varnholt70 lantern keeper quay', { limit: 3, deep: true });
+      ok(fake70.state.embedLog.length === 1 && q70.results.some((r) => /varnholt70/.test(r.content)), `a deep query against a 500-ing embedder makes ONE embed attempt and the lexical lanes still answer (attempts ${fake70.state.embedLog.length}, hits ${q70.results.length})`);
+      fake70.state.embedLog = [];
+      const rc70 = await o70.refreshConcepts({ maxEmbedPerPass: 60 });
+      const stored70 = o70.graph.allNodes().filter((n) => n.type !== 'community' && Array.isArray(n.properties?.embedding));
+      ok(rc70.stopped === 'embedder-offline' && rc70.embedded === 0 && fake70.state.embedLog.length === 1 && stored70.length === 0, `the concept refresh stops at its first fallback (one attempt) and stores no hash vector (stopped ${rc70.stopped}, embedded ${rc70.embedded}, calls ${fake70.state.embedLog.length}, stored ${stored70.length})`);
+      fake70.state.embed = 'ok'; fake70.state.embedFailures = 0;
+      const rc70b = await o70.refreshConcepts({ maxEmbedPerPass: 60 });
+      ok(!rc70b.stopped && rc70b.embedded >= 1, `with the embedder back the refresh embeds the concept nodes (${rc70b.embedded})`);
+    } finally { o70.close(); await fake70.close(); }
   }
 
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);

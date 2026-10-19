@@ -83,6 +83,11 @@ export function loadConfig(overrides = {}) {
     llmEnabled: env('LLM_ENABLED') !== '0',
     /** Per-call timeout for LLM (ms) — the local model can saturate; keep tight. */
     llmTimeoutMs: Number(env('LLM_TIMEOUT_MS') || 20000),
+    /** Embed retries (2026-10-19): a timeout, a refused connection or a 5xx / 429 is retried this many
+     *  times, waiting embedRetryMs × 2^attempt between tries, before the hash-placeholder fallback (one
+     *  busy moment used to cost a placeholder vector). Other 4xx never retry. 0 = one attempt only. */
+    embedRetries: Number(env('EMBED_RETRIES') ?? 2),
+    embedRetryMs: Number(env('EMBED_RETRY_MS') ?? 250),
     /** Hybrid fusion: RRF constant + per-lane weights (fts token, trigram substring, vector). */
     rrfK: 60,
     fusionWeights: { fts: 1.0, trigram: 0.5, vector: 1.0 },
@@ -160,6 +165,16 @@ export function loadConfig(overrides = {}) {
       /** Bounded history: forced/daily maintain prunes log/audit rows older than this and
        *  vectors orphaned by hard-deleted entries. 0 disables pruning. */
       retentionDays: Number(env('RETENTION_DAYS') || 90),
+      /** Nightly reextract batch (2026-10-19): the forced/daily maintain re-runs model extraction on at
+       *  most this many fallback-extracted entries (`reextract({ limit })`) when the model endpoint
+       *  answers a cheap probe — entries ingested while the box was down are repaired without a hand
+       *  run. MIDMEM_MAINTAIN_REEXTRACT=0 disables. Never on the opportunistic pass. */
+      reextractLimit: Number(env('MAINTAIN_REEXTRACT') ?? 20),
+      /** Nightly re-embed batch (2026-10-19): the same pass first swaps at most this many hash-placeholder
+       *  vectors for real ones (`reembedFallback({ limit })`, self-gating on the embedder). Capture
+       *  children that run with MIDMEM_LLM_ENABLED=0 by contract write placeholders for every event
+       *  until something re-embeds them. MIDMEM_MAINTAIN_REEMBED=0 disables. Never on the opportunistic pass. */
+      reembedLimit: Number(env('MAINTAIN_REEMBED') ?? 200),
     },
     /** Work-memory (Perplexity-Brain-style "memory about work"): record agent task attempts,
      *  sources used, dead ends, corrections, artifacts, decisions as first-class entries + graph

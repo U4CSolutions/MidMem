@@ -90,6 +90,33 @@ export function unitDrift(sourceText, claimText) {
   return drifts;
 }
 
+/** Markdown structure a claim never starts with: an ATX heading, a table row, a block quote, a bullet
+ *  with a bold lead (`- **Owner:** …`), a `* ` bullet, a bold lead-in, an italic-wrapped lead-in
+ *  (`*Backlog check* — …`), a numbered item with a bold lead (`2. **Step**`), a code fence. */
+const STRUCTURE_LEAD_RE = /^(?:#|\||>|- \*\*|\* |\*\*|\*[^*\s][^*]*\*|\d+[.)]\s*\*\*|```|~~~)/;
+/** Label lines from session/log templates — a field name, not a statement. Case-sensitive on purpose:
+ *  prose about "the session key" stays a claim; the Title-cased label and the bold form do not. */
+const LABEL_RE = /Session Key|Session ID|\*\*Session/;
+/**
+ * Claim shape (2026-10-19). Measured: with the model timing out, the fallback extractor turned the first
+ * five "sentences" of a markdown file into claims — headings, table rows, bullets, session-log labels —
+ * and 125 such fragments were live, colliding with real claims as false contradictions. Token overlap
+ * cannot see this (a heading copied from the source is perfectly grounded), so the shape is its own
+ * deterministic check. False when the trimmed text opens with markdown structure (STRUCTURE_LEAD_RE),
+ * carries a session-label (LABEL_RE), has fewer than 3 words, has no letter, or is more than 60 %
+ * non-alphabetic (whitespace excluded — it separates words, it is not content: a run of ids, dates
+ * and numbers is a log line, not a statement). A plain sentence with `**bold**` mid-way, or one that
+ * starts with a number, is a claim. No model, no config: same text, same verdict.
+ */
+export function isClaimShaped(text) {
+  const t = String(text ?? '').trim();
+  if (!t || STRUCTURE_LEAD_RE.test(t) || LABEL_RE.test(t)) return false;
+  if (t.split(/\s+/).length < 3) return false;
+  const chars = t.replace(/\s+/g, '');
+  const letters = (chars.match(/\p{L}/gu) || []).length;
+  return letters > 0 && (chars.length - letters) / chars.length <= 0.6;
+}
+
 /**
  * Split `items` into {grounded, ungrounded} by content-word overlap with `sourceText`.
  * @param getText maps an item to the string to ground (e.g. c => c.content)
@@ -97,21 +124,26 @@ export function unitDrift(sourceText, claimText) {
  * @param opts.unitCheck the source text to check numbers' units against (claims): an item that passes
  *   the overlap but carries a unit drift is quarantined too, with `reason: 'unit-drift'` + `unitDrift`
  *   (the details). Off when omitted, so concept checks are unchanged.
- * Each returned item carries `groundingScore`; `unitDrift` counts the items quarantined for a drift.
+ * @param opts.claimShape true for claims (2026-10-19): an item that is not `isClaimShaped` is quarantined
+ *   BEFORE the overlap check, with `reason: 'not-a-claim'` — a grounded heading is still not a claim.
+ *   Off when omitted (concept names are short labels by design).
+ * Each returned item carries `groundingScore`; `unitDrift` counts the items quarantined for a drift,
+ * `notClaim` those quarantined for their shape.
  */
-export function checkGrounding(sourceText, items, getText, minOverlap = 0.5, { unitCheck = null } = {}) {
+export function checkGrounding(sourceText, items, getText, minOverlap = 0.5, { unitCheck = null, claimShape = false } = {}) {
   const hay = new Set(contentWords(sourceText));
   const grounded = [];
   const ungrounded = [];
-  let drifted = 0;
+  let drifted = 0, notClaim = 0;
   for (const it of items || []) {
     const text = getText(it);
     const score = Number(scoreAgainst(hay, text).toFixed(3));
     const rec = { ...it, groundingScore: score };
+    if (claimShape && !isClaimShaped(text)) { notClaim++; ungrounded.push({ ...rec, reason: 'not-a-claim' }); continue; }
     if (score < minOverlap) { ungrounded.push(rec); continue; }
     const drift = typeof unitCheck === 'string' ? unitDrift(unitCheck, text) : [];
     if (drift.length) { drifted++; ungrounded.push({ ...rec, reason: 'unit-drift', unitDrift: drift }); continue; }
     grounded.push(rec);
   }
-  return { grounded, ungrounded, unitDrift: drifted };
+  return { grounded, ungrounded, unitDrift: drifted, notClaim };
 }

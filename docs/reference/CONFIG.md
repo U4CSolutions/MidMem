@@ -17,6 +17,8 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_EXTRACT_MODEL` | `extractModel: env('EXTRACT_MODEL') \|\| 'qwen/qwen3.6-35b-a3b',` |
 | `MIDMEM_LLM_ENABLED` | `llmEnabled: env('LLM_ENABLED') !== '0',` |
 | `MIDMEM_LLM_TIMEOUT_MS` | `llmTimeoutMs: Number(env('LLM_TIMEOUT_MS') \|\| 20000),` |
+| `MIDMEM_EMBED_RETRIES` | `embedRetries: Number(env('EMBED_RETRIES') ?? 2),` |
+| `MIDMEM_EMBED_RETRY_MS` | `embedRetryMs: Number(env('EMBED_RETRY_MS') ?? 250),` |
 | `MIDMEM_WORKFLOW_BOOST` | `enabled: env('WORKFLOW_BOOST') !== '0',` |
 | `MIDMEM_VECTOR_BACKEND` | `vectorBackend: env('VECTOR_BACKEND') \|\| 'sqlite',` |
 | `MIDMEM_QDRANT_URL` | `qdrantUrl: env('QDRANT_URL') \|\| 'http://localhost:6333',` |
@@ -37,6 +39,8 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_MAINTENANCE` | `enabled: env('MAINTENANCE') !== '0',` |
 | `MIDMEM_MAINT_INTERVAL_MS` | `intervalMs: Number(env('MAINT_INTERVAL_MS') \|\| 3600e3), // lazy sweep ≤ 1/hour` |
 | `MIDMEM_RETENTION_DAYS` | `retentionDays: Number(env('RETENTION_DAYS') \|\| 90),` |
+| `MIDMEM_MAINTAIN_REEXTRACT` | `reextractLimit: Number(env('MAINTAIN_REEXTRACT') ?? 20),` |
+| `MIDMEM_MAINTAIN_REEMBED` | `reembedLimit: Number(env('MAINTAIN_REEMBED') ?? 200),` |
 | `MIDMEM_EXPORT_ENABLED` | `enabled: env('EXPORT_ENABLED') !== '0',` |
 | `MIDMEM_EXPORT_PATH` | `path: env('EXPORT_PATH') \|\| path.join(REPO, 'snapshots', 'state-export.jsonl'),` |
 | `MIDMEM_CAPTURE_PACKS_ENABLED` | `enabled: env('CAPTURE_PACKS_ENABLED') !== '0',` |
@@ -89,4 +93,4 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_PROJECT` | `project: normalizeProject(env('PROJECT')),` |
 | `MIDMEM_PROJECT_LIFT` | `liftOnCurated: env('PROJECT_LIFT') !== '0',` |
 
-_82 env knobs._
+_86 env knobs._
