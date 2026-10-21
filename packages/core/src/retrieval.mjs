@@ -24,29 +24,69 @@ const LIBRARY_REPORT = new WeakMap();
 /** A configured ranking boost: a finite positive number, else 0 (off) — a typo in an env knob never scores NaN. */
 const boostWeight = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
 
+/** Scripts written without spaces between words: a run of their letters is cut into character bigrams. */
+const UNSPACED_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+
+/**
+ * The words a favorite's relevance guard compares (2026-10-21 review: the guard was ASCII-only). Unicode letters
+ * and digits (\p{L}\p{N}), lowercased and NFKC-folded; a run of 3+ code points counts unless it is an English
+ * stopword (grounding.mjs contentWords judges the ASCII runs); a run in a script without word spaces (Han, kana,
+ * Thai, …) counts as its character bigrams. Deterministic and local to ranking — grounding keeps its own words.
+ */
+export function coverageWords(s) {
+  const out = [];
+  for (const run of String(s ?? '').normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu) || []) {
+    const chars = [...run];
+    if (UNSPACED_SCRIPT.test(run)) { if (chars.length === 1) out.push(run); else for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i] + chars[i + 1]); }
+    else if (/^[a-z0-9]+$/.test(run)) out.push(...contentWords(run));
+    else if (chars.length > 2) out.push(run);
+  }
+  return out;
+}
+
 /**
  * The favorites' relevance guard (2026-10-21; see hybridSearch). `favs` = [{ c, lift }]: each favorite candidate
- * and the part of its score that being a favorite added. A favorite whose lift carried it past a candidate with a
- * larger share of the query's content words is put just below the lowest such candidate — never below its own
- * score without the lift. Coverage is computed only for the candidates a lift overtook (memoized).
+ * and the part of its score above its relevance alone (its favorite boosts and its trust boost). A favorite whose
+ * lift carried it past a candidate holding a larger share of the query's coverage words is held below the lowest
+ * such candidate (its cap) — never below its relevance alone. Coverage levels run from the highest down, so a
+ * favorite that holds back a weaker one is final before it is compared; favorites held under one cap keep their
+ * unguarded order (favorite + helpful above a favorite, the more relevant above the less), packed in a band just
+ * under the cap. Coverage is memoized.
  */
 function holdFavoritesBelowBetterMatches(cand, favs, query) {
-  const words = [...new Set(contentWords(query))];
+  const words = [...new Set(coverageWords(query))];
   const memo = new Map();
   const coverage = (c) => {
     if (!memo.has(c)) {
-      const have = new Set(contentWords(c.entry.content));
+      const have = new Set(coverageWords(c.entry.content));
       memo.set(c, words.length ? words.filter((w) => have.has(w)).length / words.length : 0);
     }
     return memo.get(c);
   };
-  favs.sort((a, b) => coverage(b.c) - coverage(a.c) || b.c.score - a.c.score);
-  for (const { c: f, lift } of favs) {
-    const base = f.score - lift;
-    let cap = Infinity;
-    for (const c of cand) if (c !== f && c.score > base && c.score <= f.score && c.score < cap && coverage(c) > coverage(f)) cap = c.score;
-    if (cap !== Infinity) { f.score = Math.max(base, cap - 1e-6); f.ranks.favoriteGuard = true; }
+  const levels = [...new Set(favs.map((f) => coverage(f.c)))].sort((a, b) => b - a);
+  for (const level of levels) {
+    const held = new Map(); // cap → [{ c, base, unguarded }]
+    for (const { c: f, lift } of favs) {
+      if (coverage(f) !== level) continue;
+      const base = f.score - lift;
+      let cap = Infinity;
+      for (const c of cand) if (c !== f && c.score > base && c.score <= f.score && c.score < cap && coverage(c) > level) cap = c.score;
+      if (cap === Infinity) continue;
+      if (!held.has(cap)) held.set(cap, []);
+      held.get(cap).push({ c: f, base, unguarded: f.score });
+    }
+    for (const [cap, group] of held) placeUnderCap(cap, group);
   }
+}
+
+/** Held favorites under one cap, in their unguarded order: strictly decreasing scores below `cap`, none below its
+ *  own base. The step is 1e-6, smaller when the bases crowd the cap (then the band fits between them and the cap). */
+function placeUnderCap(cap, group) {
+  group.sort((a, b) => b.unguarded - a.unguarded);
+  const step = Math.min(1e-6, (cap - Math.max(...group.map((h) => h.base))) / (group.length + 1));
+  const floor = new Array(group.length);
+  for (let i = group.length - 1; i >= 0; i--) floor[i] = Math.max(group[i].base, i + 1 < group.length ? floor[i + 1] + step : -Infinity);
+  group.forEach((h, i) => { h.c.score = Math.max(floor[i], cap - step * (i + 1)); h.c.ranks.favoriteGuard = true; });
 }
 
 /** One FTS lane (token or trigram), scope/tier/project filtered. Returns ranked entry ids.
@@ -242,8 +282,10 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
 
   // --- Graph ref-chain boost: concepts of the current top hits lift entries that share them. The top hits are
   //     chosen without the trust nudge of a favorite's own vote (schema 6), so being a favorite never decides
-  //     whose concepts lift the others — or lifts the favorite itself through its own concepts. ---
-  const favVote = (c) => (c.entry.favorite_helpful === 1 ? (Number(cfg.trustWeight) || 0) * HELPFUL_TRUST_DELTA : 0);
+  //     whose concepts lift the others — or lifts the favorite itself through its own concepts. A favorite is a
+  //     LIVE flag: an archived or deleted row (a historical read) is no favorite; its votes are plain history. ---
+  const isFavorite = (e) => e.favorite === 1 && e.status === 'active';
+  const favVote = (c) => (isFavorite(c.entry) && c.entry.favorite_helpful === 1 ? (Number(cfg.trustWeight) || 0) * HELPFUL_TRUST_DELTA : 0);
   const prelim = [...cand].sort((a, b) => (b.score - favVote(b)) - (a.score - favVote(a)));
   const topConcepts = new Set();
   for (const c of prelim.slice(0, 5)) for (const k2 of (c.entry.concepts || [])) topConcepts.add(String(k2.name || '').toLowerCase());
@@ -256,20 +298,27 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
   }
 
   // --- Favorite boost (2026-10-21, schema 6): the operator's favorite gets favoriteWeight, and a favorite that
-  //     ALSO has an explicit helpful vote (helpful_count − favorite_helpful ≥ 1) favoriteHelpfulWeight on top.
-  //     Only candidates the lanes (or concept routing) returned — a favorite is never added to a result set —
-  //     and after the ref-chain prelim. Its lift (these boosts + the trust nudge of the favorite's own vote) is
-  //     then exactly what it scores above the same entry without the favorite, and the relevance guard below
-  //     bounds it. An explicit helpful vote moves a favorite's trust as it moves any entry's. ---
+  //     ALSO has an explicit helpful vote (helpful_count − favorite_helpful ≥ 1) favoriteHelpfulWeight on top —
+  //     after the ref-chain prelim, and only for a favorite the query MATCHES: one a lexical lane returned, or one
+  //     the vector lane ranked in its top favoriteVectorTopK (10). A dense embedder gives every entry a positive
+  //     cosine, so the vector lane alone returns up to 200 candidates for any query: past its top 10 a favorite
+  //     earns its place by relevance only (concept-routing seeds, which no lane ranked, get nothing either). A
+  //     favorite is never added to a result set. Its lift — the boosts plus its whole trust boost (every vote on it,
+  //     its own included) — is what it scores above its relevance alone, and the relevance guard below bounds all
+  //     of it: one explicit vote (+0.0005) outweighs a one-rank lexical gap at the top (0.0004), so a favorite +
+  //     helpful must not pass a better match on its votes either. ---
   const favW = boostWeight(cfg.favoriteWeight);
   const favHW = boostWeight(cfg.favoriteHelpfulWeight);
+  const vecTopK = Number.isInteger(cfg.favoriteVectorTopK) && cfg.favoriteVectorTopK >= 0 ? cfg.favoriteVectorTopK : 10;
   const favs = [];
   for (const c of cand) {
     const e = c.entry;
-    if (e.favorite !== 1) continue;
-    let lift = favVote(c);
-    if (favW) { c.score += favW; lift += favW; c.ranks.favorite = favW; }
-    if (favHW && (e.helpful_count ?? 0) - (e.favorite_helpful ?? 0) >= 1) { c.score += favHW; lift += favHW; c.ranks.favoriteHelpful = favHW; }
+    if (!isFavorite(e)) continue;
+    let lift = (Number(cfg.trustWeight) || 0) * ((e.trust_score ?? 0.5) - 0.5);
+    if (c.ranks.fts || c.ranks.trigram || (c.ranks.vector && c.ranks.vector <= vecTopK)) {
+      if (favW) { c.score += favW; lift += favW; c.ranks.favorite = favW; }
+      if (favHW && (e.helpful_count ?? 0) - (e.favorite_helpful ?? 0) >= 1) { c.score += favHW; lift += favHW; c.ranks.favoriteHelpful = favHW; }
+    }
     favs.push({ c, lift });
   }
 
@@ -315,9 +364,9 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
 
   // --- Relevance guard for favorites (2026-10-21): RRF keeps ranks, not margins — a weak match one rank under a
   //     strong one scores a hair below it — so a favorite's lift may reorder comparable matches but never carries
-  //     it past a candidate that holds MORE of the query's content words (grounding.mjs contentWords, over the
-  //     entry content the lanes index). Such a favorite is held just below the lowest of those candidates
-  //     (rank.favoriteGuard). Highest coverage first: a favorite compared with another favorite sees its final score. ---
+  //     it past a candidate that holds MORE of the query's words (coverageWords: Unicode letters and digits, over
+  //     the entry content the lanes index). Such favorites are held just below the lowest of those candidates, in
+  //     their unguarded order (rank.favoriteGuard). ---
   if (favs.length) holdFavoritesBelowBetterMatches(cand, favs, query);
 
   cand.sort((a, b) => b.score - a.score);
@@ -374,7 +423,7 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
       content: r.text,
       score: Number(c.score.toFixed(6)),
       trust: c.entry.trust_score,
-      favorite: c.entry.favorite === 1, // schema 6: the operator's favorite (its boosts are in `rank`)
+      favorite: isFavorite(c.entry), // schema 6: the operator's favorite, on live rows only (its boosts are in `rank`)
       authority: c.entry.provenance?.authority ?? null,
       rank: c.ranks,
       provenance: includeProvenance ? c.entry.provenance ?? null : undefined,

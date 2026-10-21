@@ -39,7 +39,7 @@ Ingest text that has no file of its own (a captured web page, a library document
 
 ## `query`
 
-Hybrid (lexical+vector) search of the knowledge store with provenance. Defaults to this agent's scope + shared (and this process's project + global); pass scopes/projects to override. Each row carries favorite (an operator's favorite, set by a capture system); rank.favorite / rank.favoriteHelpful show its small ranking boosts, which only reorder rows the query already matched and never lift a favorite past a row holding more of the query's words (rank.favoriteGuard).
+Hybrid (lexical+vector) search of the knowledge store with provenance. Defaults to this agent's scope + shared (and this process's project + global); pass scopes/projects to override. Each row carries favorite (an operator's favorite, set by a capture system; live entries only); rank.favorite / rank.favoriteHelpful show its small ranking boosts, given only to a favorite a lexical lane returned or the vector lane ranked in its top 10 (a dense embedder makes every entry a vector candidate), and never lifting a favorite past a row holding more of the query's words (rank.favoriteGuard).
 
 | arg | type | required | notes |
 |---|---|---|---|

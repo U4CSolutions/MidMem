@@ -244,8 +244,14 @@ export class Orchestrator {
       if (samePath) {
         this.db.logOp('ingest-skip', { path: canon, hash, sourceId: samePath.id });
         const res = { success: true, skipped: true, reason: 'unchanged', sourceId: samePath.id };
-        // --favorite on an unchanged source: the active entry standing for it (its own, or a holder linking it).
-        if (favorite) { const live = this.#entryIdOf(res); res.favorite = live ? this.favorite(live, true, { activeOnly: true, via: 'ingest' }) : { success: false, reason: 'no-active-entry' }; }
+        // --favorite on an unchanged source: the active entry standing for it — its own, or the holder of a linked
+        // duplicate, which several sources share (marked, so the capture system counts its stars per holder).
+        if (favorite) {
+          const live = this.#entryIdOf(res);
+          const linkedTo = live && this.db.prepare('SELECT source_id FROM entries WHERE id=?').get(live)?.source_id !== samePath.id;
+          res.favorite = !live ? { success: false, reason: 'no-active-entry' }
+            : { ...this.favorite(live, true, { activeOnly: true, via: 'ingest' }), ...(linkedTo ? { linkedDuplicate: true, holder: live } : {}) };
+        }
         return res;
       }
       if (same.length) {
@@ -266,7 +272,9 @@ export class Orchestrator {
           // Metadata-only: updated_at stays untouched (the knowledge did not change).
           this.db.prepare('UPDATE entries SET provenance=? WHERE id=?').run(JSON.stringify(p), live.id);
           this.db.logOp('ingest-link', { path: canon, entry: live.id, sourceId: newSourceId });
-          const fav = favorite ? this.favorite(live.id, true, { via: 'ingest' }) : null; // the holder now stands for this source too
+          // The holder now stands for this source too: N sources, ONE favorite (marked, so the caller counts its stars
+          // per holder and unfavorites only when none remain).
+          const fav = favorite ? { ...this.favorite(live.id, true, { via: 'ingest' }), linkedDuplicate: true, holder: live.id } : null;
           return { success: true, skipped: true, reason: 'linked-duplicate', entry: live.id, sourceId: newSourceId, ...(fav ? { favorite: fav } : {}) };
         });
         if (linked) return linked;

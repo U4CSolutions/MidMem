@@ -275,7 +275,12 @@ INSERT INTO meta(key, value) VALUES ('schema_version', '6')
   stored but boost nothing until a schema-6 release reopens the store, which writes 6 again). But the older
   CLI ignores switches it does not know: it counts `feedback <id> --favorite` AND `--unfavorite` as plain
   helpful votes and drops `ingest --favorite`, so **stop the capture system's favorite sends before rolling
-  MidMem back**.
+  MidMem back**. Re-captures go on during the rollback, and the schema-5 code knows no carry-over: a changed
+  source re-ingested then supersedes its favorite entry with a new entry that is NOT a favorite, and a
+  `--favorite` on that ingest is dropped. After the re-upgrade the head entry of such a capture is therefore
+  not a favorite: **the capture system re-sends the favorites of every starred capture it re-ingested during
+  the rollback window** (`feedback <new entry id> --favorite`; idempotent, so re-sending all its starred
+  captures is safe too).
 - **The revision export** keeps both columns, so the first export after the upgrade differs on every entry
   line (once). Long-lived MCP servers show no favorite fields until they reconnect.
 
@@ -283,11 +288,15 @@ INSERT INTO meta(key, value) VALUES ('schema_version', '6')
 (and `rank.favorite` / `rank.favoriteHelpful` / `rank.favoriteGuard` on query rows); every answered favorite
 call leaves a `favorite` log row (`changed`, `via`: feedback, ingest or carry-over). The boosts are
 `MIDMEM_FAVORITE_WEIGHT` (0.004) and `MIDMEM_FAVORITE_HELPFUL_WEIGHT` (0.002) in `midmem.env`; `0` turns
-one off (the favorite's helpful vote stays — it is feedback). After changing either, or anything in fusion,
-re-run `node packages/core/test/favorite-ranking.mjs`: it measures the fused scores on a seeded corpus and
-checks that favorite + helpful > favorite > neither at equal relevance and that no favorite passes a
-clearly better match. A favorite does not pin an entry: lease expiry and distrust archival apply as to any
-entry, and a source whose entry has expired stays `unchanged` on re-ingest.
+one off (the favorite's helpful vote stays — it is feedback). They reach a favorite only when a lexical lane
+returned it or the vector lane ranked it in its top `MIDMEM_FAVORITE_VECTOR_TOP_K` (10): with a dense
+embedder every entry is a vector candidate of every query. After changing any of the three, or anything in
+fusion, re-run `node packages/core/test/favorite-ranking.mjs`: it measures the fused scores on a seeded corpus
+with hash vectors and again with dense 1024-dimension vectors, and checks that favorite + helpful > favorite >
+neither at equal relevance (also under one better match), that no favorite passes a clearly better match
+(Cyrillic and CJK queries included) and that past the vector top K a favorite gains nothing. A favorite does
+not pin an entry: lease expiry and distrust archival apply as to any entry, and a source whose entry has
+expired stays `unchanged` on re-ingest.
 
 ## When things look wrong
 

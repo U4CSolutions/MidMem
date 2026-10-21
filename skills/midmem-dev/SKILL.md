@@ -51,7 +51,7 @@ Paths below are repo-relative; `<repo>` = the `midmem-kb-store` checkout root.
 ## Test → verify → commit → record
 ```bash
 cd <repo>
-node packages/core/test/smoke.mjs        # MUST stay green (802/802 as of 2026-10-21)
+node packages/core/test/smoke.mjs        # MUST stay green (818/818 as of 2026-10-21)
 node packages/core/test/bench.mjs        # Brain-style regression gate (recall/correction/dead-end/current/budget)
 # live sanity (real shared db), keep the heavy bridge off:
 printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' | \

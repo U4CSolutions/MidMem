@@ -95,8 +95,9 @@ function view(o, e, withClaims) {
     authority: p.authority ?? null, memFunction: e.mem_function ?? null, category: p.category ?? null,
     createdAt: e.created_at, updatedAt: e.updated_at, expiresAt: e.expires_at ?? null,
     trustScore: round3(e.trust_score), retrievalCount: e.retrieval_count, helpfulCount: e.helpful_count,
-    // Schema 6: the operator's favorite, and whether its one helpful vote is inside helpfulCount.
-    favorite: e.favorite === 1, favoriteHelpful: e.favorite_helpful === 1,
+    // Schema 6: the operator's favorite — a live flag, so an archived / deleted row is no favorite — and whether a
+    // favorite's one helpful vote is inside helpfulCount (vote history, kept on every row).
+    favorite: e.status === 'active' && e.favorite === 1, favoriteHelpful: e.favorite_helpful === 1,
     lastAccessedAt: e.last_accessed_at ?? null,
     summary: clip(e.content, 600),
     concepts: (Array.isArray(e.concepts) ? e.concepts : []).slice(0, MAX_CONCEPTS).map((c) => ({

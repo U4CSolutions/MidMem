@@ -2863,7 +2863,7 @@ try {
   //     store. Own temp stores, so rankings see only these fixtures.
   {
     const { DatabaseSync } = await import('node:sqlite');
-    const { hybridSearch } = await import('../src/retrieval.mjs');
+    const { hybridSearch, coverageWords } = await import('../src/retrieval.mjs');
     const { HELPFUL_TRUST_DELTA } = await import('../src/memory.mjs');
     const { FEEDBACK_TRUST_DELTAS } = await import('../src/entrystatus.mjs');
     const dir60 = path.join(tmp, 'fav60');
@@ -3201,6 +3201,146 @@ try {
       const om3 = new Orchestrator(base60(mdb));
       others60.push(om3);
       ok(om3.db.prepare('PRAGMA table_info(entries)').all().filter((c) => c.name.startsWith('favorite')).length === 2 && om3.recall(m1).favorite === 1, 'reopening a schema-6 store is a no-op (idempotent migration; the favorite stays)');
+
+      // 60.8 — the 2026-10-21 review fixes.
+      // (1) One better match above an equal trio: the favorites the guard holds under it keep their order —
+      //     strong > favorite + helpful > favorite > neither, every role assignment, both passes.
+      const o60b = new Orchestrator(base60(path.join(dir60, 'better.db')));
+      others60.push(o60b);
+      const capB = async (docId, content) => (await o60b.ingestContent({ content, source: { libraryId: L60, docId, canonicalUri: `https://news.example.test/60b/${docId}` }, type: 'web-article', authority: 'web', project: 'library' })).entry.id;
+      const strongB = await capB('better-strong', 'Lighthouse beacon restoration: the volunteers finished the lighthouse beacon restoration on the headland.');
+      const trioB = [];
+      for (const tag of ['KXQ', 'KXR', 'KXS']) trioB.push(await capB(`better-${tag}`, `${tag} the volunteers repainted the lighthouse on the headland before the winter storms arrived.`));
+      const resetB = () => { for (const id of trioB) o60b.db.prepare('UPDATE entries SET favorite = 0, favorite_helpful = 0, helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(id); };
+      let orderedB = 0, heldB = 0;
+      for (const [fh, f, n] of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]) {
+        resetB();
+        o60b.memory.setFavorite(trioB[fh], true); o60b.memory.recordFeedback(trioB[fh], true);
+        o60b.memory.setFavorite(trioB[f], true);
+        for (const lexicalOnly of [true, false]) {
+          const res = await hybridSearch(o60b.db, o60b.memory, o60b.embedder, 'lighthouse beacon restoration', { limit: 10, lexicalOnly });
+          const ids = res.map((r) => r.id);
+          if (JSON.stringify(ids.slice(0, 4)) === JSON.stringify([strongB, trioB[fh], trioB[f], trioB[n]])) orderedB++;
+          if (res[1].rank.favoriteGuard && res[2].rank.favoriteGuard && res[1].score > res[2].score && res[2].score > res[3].score && res[1].score < res[0].score) heldB++;
+        }
+      }
+      ok(orderedB === 12 && heldB === 12, `held under one better match, the favorites keep their order: strong > favorite + helpful > favorite > neither (${orderedB}/12 ordered, ${heldB}/12 held with distinct scores)`);
+      resetB();
+      // (2a) Coverage words are Unicode-aware: Cyrillic / accented runs, CJK bigrams, NFKC, English stopwords out.
+      ok(JSON.stringify(coverageWords('Маяк, реставрация и берег')) === '["маяк","реставрация","берег"]' && JSON.stringify(coverageWords('The café résumé')) === '["café","résumé"]'
+        && JSON.stringify(coverageWords('灯塔修复')) === '["灯塔","塔修","修复"]' && JSON.stringify(coverageWords('ＦＵＬＬ width')) === '["full","width"]',
+        'coverageWords: \\p{L}\\p{N} runs (Cyrillic, accents), character bigrams for unspaced scripts, NFKC-folded, stopwords dropped');
+      // (2b) A dense embedder makes every entry a vector candidate: a favorite the query does not match lexically is
+      //      lifted only inside the vector lane's top favoriteVectorTopK (10). Hand-made 8-dim vectors, all cos > 0.
+      const unit60 = (v) => { const n = Math.hypot(...v); return v.map((x) => x / n); };
+      const q8 = [1, 0, 0, 0, 0, 0, 0, 0];
+      const denseEmb = (vec) => ({ embed: async () => ({ vector: vec, model: 'smoke-dense-8', mode: 'lmstudio' }) });
+      const o60d = new Orchestrator(base60(path.join(dir60, 'dense.db')));
+      others60.push(o60d);
+      const vecIds = [];
+      for (let r = 1; r <= 14; r++) {
+        const id = (await o60d.storeMemory({ content: `Filler note ${'abcdefghijklmn'[r - 1].repeat(4)} about the harbour authority and the night ferry timetable.`, tier: 'memory', type: 'note', scope: 'shared' })).id;
+        await o60d.memory.upsertVector(id, unit60([1, 0.08 * r, 0, 0, 0, 0, 0, 0]), 'smoke-dense-8', 'lmstudio');
+        vecIds.push(id);
+      }
+      const denseQ = (oo = o60d) => hybridSearch(oo.db, oo.memory, denseEmb(q8), 'zylophant quarvex', { limit: 20 });
+      const d0 = await denseQ();
+      ok(d0.length === 14 && d0.every((r, i) => r.id === vecIds[i] && r.rank.vector === i + 1 && !r.rank.fts && !r.rank.trigram), 'dense fixture: no lexical hit; the vector lane returns all 14 entries, ranked 1..14');
+      // Where two helpful votes alone put the vector-rank-11 entry (no favorite): votes move any entry's trust.
+      o60d.memory.recordFeedback(vecIds[10], true); o60d.memory.recordFeedback(vecIds[10], true);
+      const votesOnly11 = (await denseQ()).findIndex((r) => r.id === vecIds[10]);
+      o60d.db.prepare('UPDATE entries SET helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(vecIds[10]);
+      o60d.memory.setFavorite(vecIds[10], true); o60d.memory.recordFeedback(vecIds[10], true); // vector rank 11, favorite + helpful
+      const d1 = await denseQ();
+      const p11 = d1.findIndex((r) => r.id === vecIds[10]);
+      ok(p11 === votesOnly11 && d1[p11].favorite === true && d1[p11].rank.favorite === undefined && d1[p11].rank.favoriteHelpful === undefined,
+        `vector rank 11 (past the top 10), no lexical hit: no favorite boost — it ranks where its votes alone put it (#${p11 + 1})`);
+      o60d.memory.setFavorite(vecIds[4], true); // vector rank 5
+      const d2 = await denseQ();
+      ok(d2[0].id === vecIds[4] && d2[0].rank.favorite === o60d.cfg.favoriteWeight && d2.findIndex((r) => r.id === vecIds[10]) === p11, 'vector rank 5 (inside the top 10): boosted, so it is reordered among the ten nearest (here to the top)');
+      const o60k = new Orchestrator(base60(path.join(dir60, 'dense.db'), { favoriteVectorTopK: 0 }));
+      others60.push(o60k);
+      const dk = await denseQ(o60k);
+      ok(dk.every((r) => r.rank.favorite === undefined && r.rank.favoriteHelpful === undefined) && dk[0].id === vecIds[0], 'favoriteVectorTopK 0 → vector-only favorites get no boost at all (the vector top hit stays first)');
+      // (2c) A non-Latin query: no lexical lane answers it (the FTS lanes tokenize ASCII), and the Unicode guard keeps
+      //      an unrelated favorite inside the vector top 10 below the entry holding all three words.
+      const o60c = new Orchestrator(base60(path.join(dir60, 'cyrillic.db')));
+      others60.push(o60c);
+      const cyr = async (content, vec) => { const id = (await o60c.storeMemory({ content, tier: 'memory', type: 'note', scope: 'shared' })).id; await o60c.memory.upsertVector(id, unit60(vec), 'smoke-dense-8', 'lmstudio'); return id; };
+      const cStrong = await cyr('Маяк, реставрация, берег: волонтёры закончили реставрацию на берегу.', [1, 0.05, 0, 0, 0, 0, 0, 0]);
+      for (let i = 0; i < 2; i++) await cyr(`Заметка ${i + 1}: расписание ночного парома у старой пристани.`, [1, 0.1 + 0.02 * i, 0, 0, 0, 0, 0, 0]);
+      const cFav = await cyr('Волонтёры покрасили ограду у школы до первых холодов.', [1, 0.2, 0, 0, 0, 0, 0, 0]);
+      o60c.memory.setFavorite(cFav, true); o60c.memory.recordFeedback(cFav, true);
+      const cy1 = await hybridSearch(o60c.db, o60c.memory, denseEmb(q8), 'маяк реставрация берег', { limit: 10 });
+      const cyF = cy1.find((r) => r.id === cFav);
+      ok(cy1[0].id === cStrong && cyF.rank.favorite === o60c.cfg.favoriteWeight && cyF.rank.favoriteGuard === true && cy1.findIndex((r) => r.id === cFav) === 1 && cy1.every((r) => !r.rank.fts && !r.rank.trigram),
+        'Cyrillic query (vector-only): the boosted unrelated favorite is held below the entry holding маяк / реставрация / берег (rank.favoriteGuard)');
+      // (3) A favorite set through a linked duplicate lands on the holder that N sources share: the result says so.
+      const tL60 = 'FAVSIXTY lima-two: the coastguard station reopened its visitor gallery on the cliff.';
+      const iL1 = await cap60('fav60-l1', tL60);
+      const iL2 = await cap60('fav60-l2', tL60, { favorite: true });
+      ok(iL2.reason === 'linked-duplicate' && iL2.favorite?.linkedDuplicate === true && iL2.favorite.holder === iL1.entry.id && iL2.favorite.id === iL1.entry.id && keys60(iL2.favorite) === 'changed,favorite,helpful_count,holder,id,linkedDuplicate,success,trust_score',
+        'ingest --favorite of a linked duplicate → favorite.linkedDuplicate true + holder (the shared entry)');
+      const iL3 = await cap60('fav60-l2', tL60, { favorite: true });
+      const iL4 = await cap60('fav60-l1', tL60, { favorite: true });
+      ok(iL3.reason === 'unchanged' && iL3.favorite?.linkedDuplicate === true && iL3.favorite.holder === iL1.entry.id && iL3.favorite.changed === false && iL4.reason === 'unchanged' && iL4.favorite?.linkedDuplicate === undefined && iL4.favorite.id === iL1.entry.id,
+        'unchanged re-ingest: through the linked source → linkedDuplicate + holder; through the holder\'s own source → no marker');
+      // (5) A favorite is a LIVE flag: an archived version (a historical read) is no favorite and gets no boost.
+      const iH1 = await cap60('fav60-h', 'FAVSIXTY history one: the pier lights were replaced with low-glare lamps.', { favorite: true });
+      const iH2 = await cap60('fav60-h', 'FAVSIXTY history two: the pier lights were replaced with low-glare amber lamps.');
+      o60.feedbackIfActive(iH2.entry.id, true, { favorite: false });
+      ok(row60(iH1.entry.id).status === 'archived' && row60(iH1.entry.id).favorite === 1 && row60(iH1.entry.id).favorite_helpful === 1 && row60(iH2.entry.id).favorite === 0, 'fixture: the archived version keeps favorite = 1 as history; the live version was unstarred');
+      const hq = await hybridSearch(o60.db, o60.memory, o60.embedder, 'FAVSIXTY pier lights lamps', { limit: 20, historical: true, lexicalOnly: true });
+      const hOld = hq.find((r) => r.id === iH1.entry.id);
+      ok(hOld && hOld.status === 'archived' && hOld.favorite === false && hOld.rank.favorite === undefined && hOld.rank.favoriteGuard === undefined && hq.find((r) => r.id === iH2.entry.id)?.favorite === false,
+        'query --historical: the archived favorite reports favorite false and gets no boost');
+      const hv = o60.entryStatus({ ids: [iH1.entry.id] }).entries[0];
+      ok(hv.favorite === false && hv.favoriteHelpful === true && hv.helpfulCount === 1, 'entries on the archived version: favorite false; favoriteHelpful / helpfulCount stay as vote history');
+      // (6) feedback refuses every switch but its three, and a second id — a misspelt '--favourite' never votes.
+      const eS60 = (await cap60('fav60-s', 'FAVSIXTY sierra: the ferry pier got a new gangway for wheelchair users.')).entry.id;
+      const rowS0 = JSON.stringify(row60(eS60));
+      const s1 = cli60('feedback', eS60, '--favourite');
+      const s2 = cli60('feedback', eS60, '--favorite', '--project', 'library');
+      const s3 = cli60('feedback', eS60, eG60);
+      const s4 = cli60('feedback', '--favourite', eS60);
+      ok(s1.code === 1 && /^ERROR: feedback takes only --unhelpful, --favorite or --unfavorite \(got --favourite\)/.test(s1.err) && s2.code === 1 && /\(got --project\)/.test(s2.err)
+        && s3.code === 1 && /^ERROR: feedback takes one <entryId>/.test(s3.err) && s4.code === 1 && JSON.stringify(row60(eS60)) === rowS0,
+        'CLI feedback: an unknown switch (--favourite, --project) or a second id → exit 1 + ERROR:, nothing written');
+      // (7) The mutants that survived the first round. (7.1) The in-UPDATE status clause: a NON-favorite archived row
+      //     is refused by setFavorite({ activeOnly }) itself, both ways, and the row is unchanged.
+      const eT60 = (await cap60('fav60-t', 'FAVSIXTY tango: the tide mill museum restored its waterwheel.')).entry.id;
+      await o60.archiveEntries({ ids: [eT60], reason: 'smoke 60.8' });
+      const rowT0 = JSON.stringify(row60(eT60));
+      const t1 = o60.memory.setFavorite(eT60, true, { activeOnly: true });
+      o60.db.prepare('UPDATE entries SET favorite = 1, favorite_helpful = 1 WHERE id = ?').run(eT60);
+      const rowT1 = JSON.stringify(row60(eT60));
+      const t2 = o60.memory.setFavorite(eT60, false, { activeOnly: true });
+      ok(t1.reason === 'not-active' && t1.status === 'archived' && JSON.stringify(row60(eT60)) === rowT1 && t2.reason === 'not-active' && rowT0 !== rowT1,
+        'setFavorite({ activeOnly }) refuses an archived row in the UPDATE itself: a non-favorite is not favorited, a favorite is not taken back');
+      // (7.2) The prelim ignores a favorite's own vote: here that vote (+0.0005) would lift the 6th hit into the top 5,
+      //       whose concepts decide the ref-chain boost — the 7th hit shares the 6th's concept and must get no boost.
+      const o60p = new Orchestrator(base60(path.join(dir60, 'prelim.db')));
+      others60.push(o60p);
+      const pIds = [];
+      for (const [i, tag] of ['kaa', 'kab', 'kac', 'kad', 'kae', 'kaf', 'kag'].entries()) {
+        pIds.push((await o60p.storeMemory({ content: `GRAPHSIX ${tag} note on the shared marker.`, tier: 'memory', type: 'note', scope: 'shared', concepts: [{ name: i < 5 ? 'alphaconcept' : 'zetaconcept', type: 'concept' }] })).id);
+      }
+      const p0 = await hybridSearch(o60p.db, o60p.memory, o60p.embedder, 'graphsix marker', { limit: 10, lexicalOnly: true });
+      o60p.memory.setFavorite(pIds[5], true);
+      const p1 = await hybridSearch(o60p.db, o60p.memory, o60p.embedder, 'graphsix marker', { limit: 10, lexicalOnly: true });
+      // The prelim compares scores before the ref-chain boost: here the fused lanes (+ equal authority / recency).
+      const rrf = (r) => 1 / (60 + r.rank.fts - 1) + 0.5 / (60 + r.rank.trigram - 1);
+      const gap56 = rrf(p0.find((r) => r.id === pIds[4])) - rrf(p0.find((r) => r.id === pIds[5]));
+      ok(p0.map((r) => r.id).join() === pIds.join() && gap56 > 0 && gap56 < 0.0005 && p0.find((r) => r.id === pIds[6]).rank.graph === undefined
+        && p1.find((r) => r.id === pIds[6]).rank.graph === undefined && p1.find((r) => r.id === pIds[5]).rank.graph === undefined && p1.find((r) => r.id === pIds[0]).rank.graph === 1,
+        `prelim: the favorite's vote (+0.0005 > the 5th/6th prelim gap ${gap56.toFixed(6)}) does not pull its concept into the top 5 — the 7th hit gets no ref-chain boost`);
+      // (7.3) An unfavorite takes back only a vote the favorite added: favorite_helpful = 0 → counters untouched.
+      const eU60 = (await cap60('fav60-u', 'FAVSIXTY uniform: the boatyard relaunched the restored pilot cutter.')).entry.id;
+      o60.feedbackIfActive(eU60, true); o60.feedbackIfActive(eU60, true);
+      o60.db.prepare('UPDATE entries SET favorite = 1, favorite_helpful = 0 WHERE id = ?').run(eU60);
+      const u60 = o60.feedbackIfActive(eU60, true, { favorite: false });
+      ok(u60.changed === true && u60.favorite === false && u60.helpful_count === 2 && u60.trust_score === 0.6 && JSON.stringify(pick60(row60(eU60))) === '{"favorite":0,"favorite_helpful":0,"helpful_count":2,"trust":0.6}',
+        'unfavorite with favorite_helpful = 0 clears the favorite and takes back no vote (helpful_count 2, trust 0.6 stay)');
     } finally {
       for (const x of others60) x.close();
       o60.close();

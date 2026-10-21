@@ -3,24 +3,30 @@
  *
  * Measures the REAL fused scores (hybridSearch: RRF over the fts / trigram / vector lanes plus every post-RRF
  * boost) on a seeded corpus shaped like the knowledge-capture store (web-article captures, project `library`,
- * authority web, summaries of one or two sentences), prints the numbers that justify the defaults
- * favoriteWeight / favoriteHelpfulWeight, and checks the two promises:
+ * authority web, summaries of one or two sentences), prints the numbers behind the defaults favoriteWeight /
+ * favoriteHelpfulWeight / favoriteVectorTopK, and checks the promises:
  *
- *   1. among equally relevant candidates: favorite + helpful > favorite > neither — every assignment of the
- *      three roles over three equally relevant captures, lexical pass and deep pass;
- *   2. a favorite never outranks a clearly more relevant entry: over every corpus query, no favorite that holds
- *      fewer of the query's words than the target is placed above it (and the corpus margins show the guard is
- *      only ever needed where RRF ranks sit one step apart).
+ *   1. among equally relevant candidates: favorite + helpful > favorite > neither — every assignment of the three
+ *      roles, lexical pass and deep pass — also when one better match sits above the three (the relevance guard
+ *      holds both favorites under it and keeps their order);
+ *   2. a favorite never outranks a clearly more relevant entry: no favorite that holds fewer of the query's words
+ *      than the target is placed above it, by its boosts or its votes.
  *
- * hybridSearch is called directly (a pure read: no retrieval counts, no lease renewal), so baseline and
- * favorite runs see identical stores. Run: `node packages/core/test/favorite-ranking.mjs` (exit 1 on a broken
- * promise). `--json` prints only the numbers.
+ * Two vector spaces: the offline hash embedder (sections 1–5: only entries sharing a hashed word with the query
+ * are vector candidates) and a DENSE pass (section 6): pseudo-semantic 1024-dim vectors sharing one mean direction,
+ * as a real embedder (bge-m3) gives them — every entry has a positive cosine with every query, so the vector lane
+ * returns the whole store. That pass checks the vector top-k gate (a favorite the query does not match lexically is
+ * lifted only inside the vector lane's top favoriteVectorTopK) and the Unicode guard on a Cyrillic query.
+ *
+ * hybridSearch is called directly (a pure read: no retrieval counts, no lease renewal), so baseline and favorite
+ * runs see identical stores. Run: `node packages/core/test/favorite-ranking.mjs` (exit 1 on a broken promise);
+ * `--json` prints only the numbers.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Orchestrator } from '../src/index.mjs';
-import { hybridSearch } from '../src/retrieval.mjs';
+import { hybridSearch, coverageWords } from '../src/retrieval.mjs';
 import { contentWords } from '../src/grounding.mjs';
 
 const JSON_ONLY = process.argv.includes('--json');
@@ -49,6 +55,8 @@ const TOPICS = {
   farming: 'harvest wheat tractor irrigation livestock orchard soil fertilizer barley dairy greenhouse pasture seedling crop silo vineyard',
   security: 'malware phishing firewall encryption breach ransomware password vulnerability exploit botnet patch audit credential intrusion certificate token',
 };
+// Words no capture contains, tied to a topic only in the dense pass's embedder (a paraphrase query: no lexical hit).
+const SYNONYMS = { astronomy: ['stargazing', 'skywatching', 'heavens'], medicine: ['wellbeing', 'physician', 'remedies'] };
 const SHARED = ('report study team data city year group local national public service program research analysis effect impact change growth '
   + 'project system market region official result period review plan network center level process support series community future record '
   + 'source value industry council survey sector agency standard quality model track').split(' ');
@@ -67,14 +75,17 @@ const o = new Orchestrator({
   autoIngest: { enabled: false, onMaintain: false }, maintenance: { enabled: false, intervalMs: 3600e3, distrustBelow: 0.2, factPromote: { minRetrievals: 3, minTrust: 0.6 }, wisdomPromote: { minRetrievals: 5, minTrust: 0.7, minHelpful: 2 } },
 });
 const capture = async (docId, content) => (await o.ingestContent({ content, source: { libraryId: 'kb-article-library', docId, canonicalUri: `https://news.example.test/${docId}` }, type: 'web-article', authority: 'web', project: 'library' })).entry.id;
-const search = (q, lexicalOnly) => hybridSearch(o.db, o.memory, o.embedder, q, { limit: 400, scopes: ['shared'], projects: ['library'], lexicalOnly });
+let embedder = o.embedder; // the offline hash embedder; section 6 swaps in the dense one
+const search = (q, lexicalOnly, limit = 400) => hybridSearch(o.db, o.memory, embedder, q, { limit, scopes: ['shared'], projects: ['library'], lexicalOnly });
 const round6 = (x) => Number(x.toFixed(6));
 const pct = (xs, p) => { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.min(s.length - 1, Math.floor(p * (s.length - 1)))] : null; };
+const resetVotes = (ids) => { for (const id of ids) o.db.prepare('UPDATE entries SET favorite = 0, favorite_helpful = 0, helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(id); };
+const PERMS = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
 const numbers = {};
 
 try {
   say('Favorite ranking calibration (offline, deterministic)\n');
-  say(`weights: favoriteWeight ${o.cfg.favoriteWeight}, favoriteHelpfulWeight ${o.cfg.favoriteHelpfulWeight}, trustWeight ${o.cfg.trustWeight} (a vote = +${o.cfg.trustWeight * 0.05} trust boost), rrfK ${o.cfg.rrfK}, lanes ${JSON.stringify(o.cfg.fusionWeights)}`);
+  say(`weights: favoriteWeight ${o.cfg.favoriteWeight}, favoriteHelpfulWeight ${o.cfg.favoriteHelpfulWeight}, favoriteVectorTopK ${o.cfg.favoriteVectorTopK}, trustWeight ${o.cfg.trustWeight} (a vote = +${o.cfg.trustWeight * 0.05} trust boost), rrfK ${o.cfg.rrfK}, lanes ${JSON.stringify(o.cfg.fusionWeights)}`);
   const corpus = [];
   for (const t of topicNames) for (let i = 0; i < 10; i++) {
     const docId = `${t.slice(0, 4)}${String(i).padStart(2, '0')}`;
@@ -86,29 +97,39 @@ try {
     const lead = `${sentence(topic, 12)} ${sentence(topic, 12)}`;
     const ids = [];
     for (const tag of ['kxq', 'kxr', 'kxs', 'kxt', 'kxu', 'kxv', 'kxw', 'kxz']) ids.push(await capture(`${g}-${tag}`, `${tag.toUpperCase()} ${lead}`));
-    const words = [...new Set(contentWords(lead))].filter((w) => topicWords[topic].includes(w));
+    const words = [...new Set(coverageWords(lead))].filter((w) => topicWords[topic].includes(w));
     groups.push({ g, ids, query: words.slice(0, 3).join(' ') });
   }
-  say(`corpus: ${corpus.length} captures + ${groups.length} groups of 8 equally relevant captures (${o.memory.stats().memory} active memory entries)\n`);
+  // One better match above an equal trio (the 2026-10-21 review fixture, plus two variants).
+  const betters = [];
+  for (const [g, strong, weak, query] of [
+    ['lighthouse', 'Lighthouse beacon restoration: the volunteers finished the lighthouse beacon restoration on the headland.', 'the volunteers repainted the lighthouse on the headland before the winter storms arrived.', 'lighthouse beacon restoration'],
+    ['orchard', 'Orchard frost protection: growers installed orchard frost protection fans across the valley.', 'growers walked the orchard at dawn to count the blossoms on every row.', 'orchard frost protection'],
+    ['tunnel', 'Tunnel ventilation upgrade: engineers completed the tunnel ventilation upgrade under the river.', 'engineers inspected the tunnel walls for cracks during the night closure.', 'tunnel ventilation upgrade'],
+  ]) {
+    const strongId = await capture(`${g}-strong`, strong);
+    const trio = [];
+    for (const tag of ['KXQ', 'KXR', 'KXS']) trio.push(await capture(`${g}-${tag.toLowerCase()}`, `${tag} ${weak}`));
+    betters.push({ g, strongId, trio, query });
+  }
+  say(`corpus: ${corpus.length} captures + ${groups.length} groups of 8 equally relevant captures + ${betters.length} better-match fixtures (${o.memory.stats().memory} active memory entries)\n`);
 
   // --- Measure 1: the fused-score spread among k equally relevant candidates (no favorites yet).
   say('1. spread among equally relevant captures (score of the best − score of the k-th, no favorites):');
   const spread = { lexical: {}, deep: {} };
   for (const lexical of [true, false]) {
-    const pass2 = lexical ? 'lexical' : 'deep';
+    const p = lexical ? 'lexical' : 'deep';
     for (const { ids, query } of groups) {
-      const res = await search(query, lexical);
-      const rows = res.filter((r) => ids.includes(r.id));
-      for (let k = 2; k <= rows.length; k++) (spread[pass2][k] ||= []).push(rows[0].score - rows[k - 1].score);
+      const rows = (await search(query, lexical)).filter((r) => ids.includes(r.id));
+      for (let k = 2; k <= rows.length; k++) (spread[p][k] ||= []).push(rows[0].score - rows[k - 1].score);
     }
-    const line = Object.entries(spread[pass2]).map(([k, v]) => `k=${k} ${round6(Math.max(...v))}`).join('  ');
-    say(`   ${pass2.padEnd(7)} max ${line}`);
+    say(`   ${p.padEnd(7)} max ${Object.entries(spread[p]).map(([k, v]) => `k=${k} ${round6(Math.max(...v))}`).join('  ')}`);
   }
   numbers.equalRelevanceSpreadMax = Object.fromEntries(Object.entries(spread).map(([p, byK]) => [p, Object.fromEntries(Object.entries(byK).map(([k, v]) => [k, round6(Math.max(...v))]))]));
 
-  // --- Measure 2: adjacent-rank gaps and the gap from the target to weaker matches over corpus queries.
+  // --- Measure 2: adjacent-rank gaps in the top 10 over corpus queries.
   const queries = corpus.filter((_, i) => i % 3 === 0).map((c) => {
-    const words = [...new Set(contentWords(o.recall(c.id).content))].filter((w) => topicWords[c.topic].includes(w));
+    const words = [...new Set(coverageWords(o.recall(c.id).content))].filter((w) => topicWords[c.topic].includes(w));
     return { target: c.id, topic: c.topic, query: words.slice(0, 3).join(' ') };
   }).filter((q) => q.query.split(' ').length === 3);
   const adjacent = { lexical: [], deep: [] };
@@ -125,30 +146,37 @@ try {
   for (const p of ['lexical', 'deep']) say(`   ${p.padEnd(7)} median ${round6(pct(adjacent[p], 0.5))}  p90 ${round6(pct(adjacent[p], 0.9))}  max ${round6(Math.max(...adjacent[p]))}`);
   numbers.adjacentGap = Object.fromEntries(['lexical', 'deep'].map((p) => [p, { median: round6(pct(adjacent[p], 0.5)), p90: round6(pct(adjacent[p], 0.9)), max: round6(Math.max(...adjacent[p])) }]));
 
-  // --- Promise 1: every assignment of (favorite+helpful, favorite, neither) over three equally relevant captures.
-  say('\n3. favorite + helpful > favorite > neither among equally relevant captures (all 6 role assignments × 3 groups × 2 passes):');
-  const perms = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
-  let orderOk = 0, orderAll = 0, minMargin = Infinity;
-  for (const { ids, query } of groups) {
-    const trio = ids.slice(0, 3);
-    for (const [fh, f, n] of perms) {
-      for (const id of trio) { o.memory.setFavorite(id, false); o.db.prepare('UPDATE entries SET helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(id); }
+  // --- Promise 1: every assignment of (favorite+helpful, favorite, neither) over three equally relevant captures,
+  //     alone (3a) and under one better match (3b), in both passes.
+  const rolePass = async (trio, query, above = null) => {
+    let ordered = 0, total = 0, minMargin = Infinity;
+    for (const [fh, f, n] of PERMS) {
+      resetVotes(trio);
       o.memory.setFavorite(trio[fh], true); o.memory.recordFeedback(trio[fh], true); // favorite + an explicit helpful vote
       o.memory.setFavorite(trio[f], true);
       for (const lexical of [true, false]) {
         const res = await search(query, lexical);
         const at = (id) => res.findIndex((r) => r.id === id);
-        const s = (id) => res[at(id)].score;
-        orderAll++;
-        if (at(trio[fh]) < at(trio[f]) && at(trio[f]) < at(trio[n])) orderOk++;
-        minMargin = Math.min(minMargin, s(trio[fh]) - s(trio[f]), s(trio[f]) - s(trio[n]));
+        total++;
+        const order = [trio[fh], trio[f], trio[n]].map(at);
+        if (order[0] < order[1] && order[1] < order[2] && (above === null || at(above) < order[0])) ordered++;
+        minMargin = Math.min(minMargin, res[order[0]].score - res[order[1]].score, res[order[1]].score - res[order[2]].score);
       }
     }
-    for (const id of trio) { o.memory.setFavorite(id, false); o.db.prepare('UPDATE entries SET helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(id); }
-  }
-  say(`   ordered ${orderOk}/${orderAll}; smallest winning margin ${round6(minMargin)}`);
-  numbers.equalRelevanceOrder = { ordered: orderOk, of: orderAll, minMargin: round6(minMargin) };
-  ok(orderOk === orderAll && minMargin > 0, `favorite + helpful > favorite > neither in every assignment and pass (${orderOk}/${orderAll})`);
+    resetVotes(trio);
+    return { ordered, total, minMargin };
+  };
+  say('\n3a. favorite + helpful > favorite > neither among equally relevant captures (6 role assignments × 3 groups × 2 passes):');
+  let o3 = 0, t3 = 0, m3 = Infinity;
+  for (const { ids, query } of groups) { const r = await rolePass(ids.slice(0, 3), query); o3 += r.ordered; t3 += r.total; m3 = Math.min(m3, r.minMargin); }
+  say(`    ordered ${o3}/${t3}; smallest winning margin ${round6(m3)}`);
+  ok(o3 === t3 && m3 > 0, `favorite + helpful > favorite > neither in every assignment and pass (${o3}/${t3})`);
+  say('3b. the same trio under ONE better match (all words vs one of three; the guard holds both favorites under it):');
+  let o3b = 0, t3b = 0, m3b = Infinity;
+  for (const { strongId, trio, query } of betters) { const r = await rolePass(trio, query, strongId); o3b += r.ordered; t3b += r.total; m3b = Math.min(m3b, r.minMargin); }
+  say(`    better match > favorite + helpful > favorite > neither: ${o3b}/${t3b}; smallest margin inside the trio ${m3b.toExponential(2)}`);
+  numbers.equalRelevanceOrder = { alone: { ordered: o3, of: t3, minMargin: round6(m3) }, underBetterMatch: { ordered: o3b, of: t3b, minMargin: m3b } };
+  ok(o3b === t3b && m3b > 0, `under one better match the held favorites keep their order (${o3b}/${t3b})`);
 
   // --- How deep a favorite climbs inside one group of 8 equally relevant captures (the k-th one made a favorite).
   const climb = { lexical: 0, deep: 0 };
@@ -163,64 +191,68 @@ try {
       if (top === order[k]) { climb[p] = k + 1; break; }
     }
   }
-  say(`   a favorite reaches the top of 8 equally relevant captures from rank ≤ ${climb.lexical} (lexical) / ≤ ${climb.deep} (deep)`);
+  say(`    a favorite reaches the top of 8 equally relevant captures from rank ≤ ${climb.lexical} (lexical) / ≤ ${climb.deep} (deep)`);
   numbers.favoriteClimbsFromRank = climb;
 
   // --- Promise 2: favorites never outrank a clearly more relevant entry. Favorites: one capture in five, none of
-  //     them a query target; every other one also carries an explicit helpful vote (the strongest lift). A vote
-  //     moves trust for a favorite as for any entry, so a favorite above the target counts as a broken promise
-  //     only when the same entry WITHOUT the favorite (its baseline + its explicit vote) would sit below it.
+  //     them a query target; every other one also carries an explicit helpful vote (the strongest lift). The guard
+  //     holds a favorite's boosts AND its votes, so none may sit above a target holding more of the query's words.
   const targets = new Set(queries.map((q) => q.target));
   const favorites = corpus.filter((c, i) => i % 5 === 2 && !targets.has(c.id)).map((c) => c.id);
   const voted = new Set(favorites.filter((_, i) => i % 2 === 1));
-  for (const id of favorites) { o.memory.setFavorite(id, true); if (voted.has(id)) o.memory.recordFeedback(id, true); }
   const vote = o.cfg.trustWeight * 0.05;
-  say(`\n4. ${favorites.length} favorites (${voted.size} also voted helpful: gain ${o.cfg.favoriteWeight} + ${o.cfg.favoriteHelpfulWeight} + 2 × ${vote}; the others ${o.cfg.favoriteWeight} + ${vote}), ${queries.length} queries × 2 passes:`);
-  let above = 0, byVote = 0, guardFired = 0, unguardedAbove = 0, compared = 0;
-  const unrelatedMargin = [], weakerMargin = [];
   const gainOf = (id) => o.cfg.favoriteWeight + vote + (voted.has(id) ? o.cfg.favoriteHelpfulWeight + vote : 0);
-  const lift = gainOf([...voted][0]);
-  for (const lexical of [true, false]) {
-    const p = lexical ? 'lexical' : 'deep';
-    for (const q of queries) {
-      const words = [...new Set(contentWords(q.query))];
-      const cov = (id) => { const have = new Set(contentWords(o.recall(id).content)); return words.filter((w) => have.has(w)).length / words.length; };
-      const before = baseline.get(`${p}|${q.query}`);
-      const res = await search(q.query, lexical);
-      const tPos = res.findIndex((r) => r.id === q.target);
-      if (tPos < 0) continue;
-      const tCov = cov(q.target);
-      for (const f of favorites) {
-        const fPos = res.findIndex((r) => r.id === f);
-        if (fPos < 0) continue;
-        const fCov = cov(f);
-        if (fCov >= tCov) continue; // only favorites the target clearly out-matches
-        const b = before.find((r) => r.id === f);
-        const bt = before.find((r) => r.id === q.target);
-        if (!b || !bt) continue;
-        compared++;
-        if (res[fPos].rank.favoriteGuard) guardFired++;
-        const own = b.score + (voted.has(f) ? vote : 0); // the same entry without the favorite: baseline + its explicit vote
-        if (fPos < tPos) { if (own > res[tPos].score) byVote++; else above++; }
-        const margin = bt.score - b.score; // how far below the target the favorite sat before any favorite or vote
-        (fCov === 0 ? unrelatedMargin : weakerMargin).push(margin);
-        if (margin < gainOf(f)) unguardedAbove++; // its gain would carry it past the target without the guard
+  const promise2 = async (passes) => {
+    let above = 0, aboveByRelevance = 0, guardFired = 0, unguardedAbove = 0, compared = 0;
+    const unrelatedMargin = [], weakerMargin = [];
+    for (const lexical of passes) {
+      const p = lexical ? 'lexical' : 'deep';
+      for (const q of queries) {
+        const words = [...new Set(coverageWords(q.query))];
+        const cov = (id) => { const have = new Set(coverageWords(o.recall(id).content)); return words.filter((w) => have.has(w)).length / words.length; };
+        const before = baseline.get(`${p}|${q.query}`);
+        const res = await search(q.query, lexical);
+        const tPos = res.findIndex((r) => r.id === q.target);
+        if (tPos < 0) continue;
+        const tCov = cov(q.target);
+        for (const f of favorites) {
+          const fPos = res.findIndex((r) => r.id === f);
+          if (fPos < 0) continue;
+          const fCov = cov(f);
+          if (fCov >= tCov) continue; // only favorites the target clearly out-matches
+          const b = before.find((r) => r.id === f);
+          const bt = before.find((r) => r.id === q.target);
+          if (!b || !bt) continue;
+          compared++;
+          if (res[fPos].rank.favoriteGuard) guardFired++;
+          const margin = bt.score - b.score; // how far below the target the favorite sat before any favorite or vote
+          // Above the target by its own relevance already (a dense vector lane can rank a weaker word match first):
+          // not the favorite's doing. Above it after starting below: the promise is broken.
+          if (fPos < tPos) { if (margin <= 0) aboveByRelevance++; else above++; }
+          (fCov === 0 ? unrelatedMargin : weakerMargin).push(margin);
+          if (margin > 0 && margin < gainOf(f)) unguardedAbove++;
+        }
       }
     }
-  }
+    return { above, aboveByRelevance, guardFired, unguardedAbove, compared, unrelatedMargin, weakerMargin };
+  };
+  for (const id of favorites) { o.memory.setFavorite(id, true); if (voted.has(id)) o.memory.recordFeedback(id, true); }
   const mm = (xs) => (xs.length ? `min ${round6(Math.min(...xs))} median ${round6(pct(xs, 0.5))}` : 'n/a');
-  say(`   comparisons (a favorite holding fewer of the query's words than the target): ${compared}`);
-  say(`   base margin target − favorite, unrelated favorites (none of the words): ${unrelatedMargin.length} × ${mm(unrelatedMargin)}`);
-  say(`   base margin target − favorite, partly matching favorites:               ${weakerMargin.length} × ${mm(weakerMargin)}`);
-  say(`   the gain would carry ${unguardedAbove} of them past the target without the guard; guard fired ${guardFired}×`);
-  say(`   placed above the target by the favorite: ${above}; by its explicit helpful vote alone (as for any entry, one rank step): ${byVote}`);
-  numbers.unrelated = { compared, unrelatedMarginMin: unrelatedMargin.length ? round6(Math.min(...unrelatedMargin)) : null, unrelatedMarginMedian: round6(pct(unrelatedMargin, 0.5)), weakerMarginMin: weakerMargin.length ? round6(Math.min(...weakerMargin)) : null, weakerMarginMedian: round6(pct(weakerMargin, 0.5)), gainMax: round6(lift), wouldPassWithoutGuard: unguardedAbove, guardFired, placedAboveByFavorite: above, placedAboveByExplicitVote: byVote };
-  ok(compared > 0 && above === 0, `no favorite carried by being a favorite above a target that holds more of the query's words (${compared} comparisons)`);
-  ok(unrelatedMargin.length > 0 && Math.min(...unrelatedMargin) > 3 * lift, `an unrelated favorite sits far below the target: min margin ${round6(Math.min(...unrelatedMargin))} > 3 × the largest gain ${round6(lift)}`);
+  const lift = gainOf([...voted][0]);
+  say(`\n4. ${favorites.length} favorites (${voted.size} also voted helpful: gain ${o.cfg.favoriteWeight} + ${o.cfg.favoriteHelpfulWeight} + 2 × ${vote}; the others ${o.cfg.favoriteWeight} + ${vote}), ${queries.length} queries × 2 passes, hash vectors:`);
+  const p2 = await promise2([true, false]);
+  say(`   comparisons (a favorite holding fewer of the query's words than the target): ${p2.compared}`);
+  say(`   base margin target − favorite, unrelated favorites (none of the words): ${p2.unrelatedMargin.length} × ${mm(p2.unrelatedMargin)}`);
+  say(`   base margin target − favorite, partly matching favorites:               ${p2.weakerMargin.length} × ${mm(p2.weakerMargin)}`);
+  say(`   the gain would carry ${p2.unguardedAbove} of them past the target without the guard; guard fired ${p2.guardFired}×; placed above the target: ${p2.above}`);
+  numbers.promise2Hash = { compared: p2.compared, unrelatedMarginMin: round6(Math.min(...p2.unrelatedMargin)), unrelatedMarginMedian: round6(pct(p2.unrelatedMargin, 0.5)), weakerMarginMin: round6(Math.min(...p2.weakerMargin)), weakerMarginMedian: round6(pct(p2.weakerMargin, 0.5)), gainMax: round6(lift), wouldPassWithoutGuard: p2.unguardedAbove, guardFired: p2.guardFired, placedAbove: p2.above };
+  ok(p2.compared > 0 && p2.above === 0, `no favorite placed above a target that holds more of the query's words (${p2.compared} comparisons)`);
+  ok(p2.unrelatedMargin.length > 0 && Math.min(...p2.unrelatedMargin) > 3 * lift, `hash vectors: an unrelated favorite sits far below the target: min margin ${round6(Math.min(...p2.unrelatedMargin))} > 3 × the largest gain ${round6(lift)}`);
+  for (const id of favorites) o.memory.setFavorite(id, false);
+  resetVotes(favorites);
 
   // --- The adjacent-rank case the guard exists for: a favorite holding one of three words, one rank under the
-  //     entry holding all three (a store this small has nothing between them). Lexical pass: a favorite alone;
-  //     deep pass (three lanes, so one rank is worth more than one vote's trust nudge): favorite + helpful.
+  //     entry holding all three. Lexical pass: a favorite alone; deep pass: favorite + helpful.
   const tiny = new Orchestrator({ dbPath: path.join(tmp, 'tiny.db'), vaultPath: path.join(tmp, 'vault'), llmEnabled: false, sourceRoots: [tmp], autoIngest: { enabled: false, onMaintain: false }, maintenance: { enabled: false, intervalMs: 3600e3 } });
   try {
     const strong = (await tiny.storeMemory({ content: 'Quorvex zibbon plavet: the quorvex ledger syncs zibbon shards across the plavet mesh.', tier: 'memory', type: 'note', scope: 'shared' })).id;
@@ -228,21 +260,141 @@ try {
     const run = (lexicalOnly) => hybridSearch(tiny.db, tiny.memory, tiny.embedder, 'quorvex zibbon plavet', { limit: 5, lexicalOnly });
     const label = (rows) => rows.map((r) => `${r.id === strong ? 'strong' : 'weak'} ${r.score}${r.rank.favoriteGuard ? ' (guard)' : ''}`).join(', ');
     numbers.adjacentCase = {};
-    for (const [lexical, voted] of [[true, false], [false, true]]) {
+    for (const [lexical, votedTiny] of [[true, false], [false, true]]) {
       const p = lexical ? 'lexical' : 'deep';
       tiny.memory.setFavorite(weak, false); tiny.db.prepare('UPDATE entries SET helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(weak);
       const before = await run(lexical);
       const gap = before[0].score - before[1].score;
       tiny.memory.setFavorite(weak, true);
-      if (voted) tiny.memory.recordFeedback(weak, true);
-      const gain = o.cfg.favoriteWeight + (voted ? o.cfg.favoriteHelpfulWeight + o.cfg.trustWeight * 0.05 : 0) + o.cfg.trustWeight * 0.05;
+      if (votedTiny) tiny.memory.recordFeedback(weak, true);
+      const gain = o.cfg.favoriteWeight + (votedTiny ? o.cfg.favoriteHelpfulWeight + vote : 0) + vote;
       const after = await run(lexical);
       say(`\n5${lexical ? 'a' : 'b'}. two-entry store, ${p}: strong (3/3 words) ${round6(before[0].score)} vs weak (1/3) ${round6(before[1].score)} — gap ${round6(gap)} < gain ${round6(gain)}`);
-      say(`    weak made a favorite${voted ? ' + helpful' : ''}: ${label(after)}`);
+      say(`    weak made a favorite${votedTiny ? ' + helpful' : ''}: ${label(after)}`);
       numbers.adjacentCase[p] = { gap: round6(gap), gain: round6(gain), order: after.map((r) => (r.id === strong ? 'strong' : 'weak')), guard: !!after.find((r) => r.id === weak)?.rank.favoriteGuard };
-      ok(before[0].id === strong && gap < gain && after[0].id === strong && after[1].rank.favoriteGuard === true, `${p}: the guard keeps the one-word favorite${voted ? ' (+ helpful)' : ''} under the all-words entry it would pass`);
+      ok(before[0].id === strong && gap < gain && after[0].id === strong && after[1].rank.favoriteGuard === true, `${p}: the guard keeps the one-word favorite${votedTiny ? ' (+ helpful)' : ''} under the all-words entry it would pass`);
     }
   } finally { tiny.close(); }
+
+  // --- 6. DENSE pass: pseudo-semantic 1024-dim vectors sharing one mean direction (cos > 0 for every pair, like a
+  //        real embedder), topic words leaning toward a topic direction, SYNONYMS (in no capture) too.
+  const DIM = 1024;
+  const unit = (v) => { let n = 0; for (const x of v) n += x * x; n = Math.sqrt(n) || 1; return v.map((x) => x / n); };
+  const keyed = (key) => {
+    let h = 2166136261; for (const ch of key) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619); }
+    let s = h >>> 0;
+    return Array.from({ length: DIM }, () => { s = (s + 0x6d2b79f5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296 - 0.5; });
+  };
+  const MEAN = unit(keyed('::mean::'));
+  const TOPIC_DIR = Object.fromEntries(topicNames.map((t) => [t, unit(keyed(`::topic::${t}`))]));
+  const wordTopic = new Map();
+  for (const [t, ws] of Object.entries(topicWords)) for (const w of ws) wordTopic.set(w, t);
+  for (const [t, ws] of Object.entries(SYNONYMS)) for (const w of ws) wordTopic.set(w, t);
+  const wordMemo = new Map();
+  const wordVec = (w) => {
+    if (!wordMemo.has(w)) { const r = unit(keyed(w)); const t = wordTopic.get(w); wordMemo.set(w, t ? unit(r.map((x, i) => x + 1.5 * TOPIC_DIR[t][i])) : r); }
+    return wordMemo.get(w);
+  };
+  const denseVec = (text) => {
+    const ws = coverageWords(text);
+    const acc = MEAN.map((x) => 2 * x);
+    for (const w of ws) { const v = wordVec(w); for (let i = 0; i < DIM; i++) acc[i] += v[i] / Math.sqrt(ws.length || 1); }
+    return unit(acc);
+  };
+  embedder = { embed: async (text) => ({ vector: denseVec(text), model: 'pseudo-dense-1024', mode: 'lmstudio' }) };
+  const all = o.db.prepare("SELECT id, content FROM entries WHERE status = 'active'").all();
+  for (const r of all) await o.memory.upsertVector(r.id, denseVec(r.content), 'pseudo-dense-1024', 'lmstudio');
+  const para = SYNONYMS.astronomy.join(' ');
+  const denseCand = await search(para, false);
+  say(`\n6. DENSE pass (pseudo-semantic 1024-dim vectors, shared mean direction): ${all.length} entries re-embedded`);
+  say(`   a paraphrase query with no lexical hit ("${para}") returns ${denseCand.length} vector candidates; lexical hits: ${denseCand.filter((r) => r.rank.fts || r.rank.trigram).length}; top-5 topics: ${denseCand.slice(0, 5).map((r) => corpus.find((c) => c.id === r.id)?.topic ?? 'other').join(', ')}`);
+  numbers.dense = { entries: all.length, vectorCandidatesOfAParaphraseQuery: denseCand.length };
+  ok(denseCand.length >= Math.min(200, all.length) && denseCand.every((r) => !r.rank.fts && !r.rank.trigram), 'dense: every entry is a vector candidate of a query no lexical lane answers');
+
+  // 6a. Promise 1 again, now with dense vectors (the deep pass carries the vector lane).
+  let o6 = 0, t6 = 0;
+  for (const { ids, query } of groups) { const r = await rolePass(ids.slice(0, 3), query); o6 += r.ordered; t6 += r.total; }
+  for (const { strongId, trio, query } of betters) { const r = await rolePass(trio, query, strongId); o6 += r.ordered; t6 += r.total; }
+  say(`6a. favorite + helpful > favorite > neither (alone and under a better match), dense vectors: ${o6}/${t6}`);
+  ok(o6 === t6, `dense: the favorite order holds in every assignment and pass (${o6}/${t6})`);
+  numbers.dense.order = { ordered: o6, of: t6 };
+
+  // 6b. The vector top-k gate on a query no lexical lane answers: one favorite (+ helpful) at vector rank r.
+  const base6 = await search(para, false);
+  const climbOf = {};
+  const k = o.cfg.favoriteVectorTopK;
+  for (const r of [3, 5, 8, 10, 11, 15, 20, 30, 40]) {
+    const target = base6.find((x) => x.rank.vector === r);
+    if (!target) continue;
+    // The same entry with the same trust (two helpful votes) but no favorite: where its votes alone put it.
+    o.memory.recordFeedback(target.id, true); o.memory.recordFeedback(target.id, true);
+    const plainPos = (await search(para, false)).findIndex((x) => x.id === target.id) + 1;
+    resetVotes([target.id]);
+    o.memory.setFavorite(target.id, true); o.memory.recordFeedback(target.id, true);
+    const res = await search(para, false);
+    const pos = res.findIndex((x) => x.id === target.id) + 1;
+    const boosted = res[pos - 1].rank.favorite !== undefined;
+    // Without the gate it would carry favoriteWeight + favoriteHelpfulWeight on top of its votes: where would it land?
+    const ungated = res[pos - 1].score + (boosted ? 0 : o.cfg.favoriteWeight + o.cfg.favoriteHelpfulWeight);
+    const ungatedPos = res.filter((x) => x.id !== target.id && x.score > ungated).length + 1;
+    climbOf[r] = { position: pos, boosted, sameVotesNoFavorite: plainPos, withoutGate: ungatedPos };
+    resetVotes([target.id]);
+  }
+  say('6b. paraphrase query, one favorite + helpful at vector rank r → its position (the same votes without the favorite; and without the gate):');
+  say(`    ${Object.entries(climbOf).map(([r, v]) => `r=${r} → #${v.position}${v.boosted ? ' (boosted)' : ''} [votes only: #${v.sameVotesNoFavorite}; no gate: #${v.withoutGate}]`).join(', ')}`);
+  numbers.dense.vectorGate = { k, byRank: climbOf };
+  ok(Object.keys(climbOf).length >= 8 && Object.entries(climbOf).every(([r, v]) => (Number(r) <= k ? v.boosted : !v.boosted && v.position === v.sameVotesNoFavorite)) && Object.entries(climbOf).some(([r, v]) => Number(r) > k && v.withoutGate === 1),
+    `dense: past the vector top ${k} being a favorite adds nothing (it ranks where its votes alone put it) — without the gate it would reach #1`);
+
+  // 6c. Non-Latin queries (their own small store, dense vectors, no concepts — so only the vector lane, the boosts and
+  //     the guard decide): no lexical lane answers them (the FTS lanes tokenize ASCII). Every favorite (+ helpful)
+  //     inside the vector top 10 would pass the entry holding the query's words on its lift (the RRF gap within the
+  //     top 10 is ≤ 0.0022); the Unicode guard holds each one below it. An ASCII-only word list sees no words at all.
+  const multi = new Orchestrator({ dbPath: path.join(tmp, 'multi.db'), vaultPath: path.join(tmp, 'vault'), llmEnabled: false, sourceRoots: [tmp], autoIngest: { enabled: false, onMaintain: false }, maintenance: { enabled: false, intervalMs: 3600e3 } });
+  try {
+    const put = async (content) => { const id = (await multi.storeMemory({ content, tier: 'memory', type: 'note', scope: 'shared' })).id; await multi.memory.upsertVector(id, denseVec(content), 'pseudo-dense-1024', 'lmstudio'); return id; };
+    const sets = [
+      { lang: 'Cyrillic', q: 'маяк реставрация берег', strong: 'Маяк, реставрация, берег: волонтёры закончили реставрацию маяка на берегу залива.',
+        others: ['Заметка о расписании ночного парома у старой пристани.', 'Волонтёры покрасили ограду у школы до первых холодов.', 'Совет утвердил новую велодорожку вдоль набережной.', 'Музей открыл зал морской истории после ремонта.',
+          'Рыбаки обсудили квоты на вылов трески этой весной.', 'В парке высадили сто молодых лип и клёнов.', 'Библиотека продлила часы работы по выходным.', 'Городской хор выступил на празднике урожая.'] },
+      { lang: 'CJK', q: '灯塔修复', strong: '灯塔修复工程在海岸边顺利完成。',
+        others: ['学校的围栏被志愿者重新粉刷。', '市议会批准了沿河的新自行车道。', '博物馆的海洋历史展厅重新开放。', '图书馆延长了周末的开放时间。'] },
+    ];
+    numbers.dense.nonLatin = {};
+    for (const set of sets) {
+      const strongId = await put(set.strong);
+      const otherIds = [];
+      for (const t of set.others) otherIds.push(await put(t));
+      const run = () => hybridSearch(multi.db, multi.memory, embedder, set.q, { limit: 50 });
+      const base = await run();
+      const lexical = base.filter((r) => r.rank.fts || r.rank.trigram).length;
+      const inTopK = base.filter((r) => r.id !== strongId && otherIds.includes(r.id) && r.rank.vector <= k);
+      let held = 0, above = 0, wouldPass = 0;
+      for (const fr of inTopK) {
+        multi.memory.setFavorite(fr.id, true); multi.memory.recordFeedback(fr.id, true);
+        const res = await run();
+        const fPos = res.findIndex((r) => r.id === fr.id), sPos = res.findIndex((r) => r.id === strongId);
+        if (fPos < sPos) above++;
+        if (res[fPos].rank.favoriteGuard) held++;
+        if (base[0].score - fr.score < o.cfg.favoriteWeight + o.cfg.favoriteHelpfulWeight + 2 * vote) wouldPass++;
+        multi.db.prepare('UPDATE entries SET favorite = 0, favorite_helpful = 0, helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(fr.id);
+      }
+      say(`6c. ${set.lang} query "${set.q}": lexical hits ${lexical}; the all-words entry is #${base.findIndex((r) => r.id === strongId) + 1} (vector rank ${base.find((r) => r.id === strongId).rank.vector}); coverage words ${JSON.stringify(coverageWords(set.q))} (grounding's ASCII-only contentWords: ${JSON.stringify(contentWords(set.q))})`);
+      say(`    ${inTopK.length} favorites (+ helpful) inside the vector top ${k}, one at a time: their lift would carry ${wouldPass} past it; held by the guard ${held}; placed above it ${above}`);
+      numbers.dense.nonLatin[set.lang] = { lexicalHits: lexical, strongPosition: base.findIndex((r) => r.id === strongId) + 1, tried: inTopK.length, wouldPassOnLift: wouldPass, held, placedAbove: above };
+      ok(lexical === 0 && base[0].id === strongId && inTopK.length > 0 && wouldPass === inTopK.length && held === inTopK.length && above === 0,
+        `dense, ${set.lang}: no favorite passes the entry holding the query's words (${inTopK.length} tried, all held by the Unicode guard)`);
+    }
+  } finally { multi.close(); }
+
+  // 6d. Promise 2 with dense vectors, deep pass (re-baselined: the vectors changed).
+  for (const q of queries) baseline.set(`deep|${q.query}`, await search(q.query, false));
+  for (const id of favorites) { o.memory.setFavorite(id, true); if (voted.has(id)) o.memory.recordFeedback(id, true); }
+  const p2d = await promise2([false]);
+  say(`6d. promise 2, dense vectors, deep pass: ${p2d.compared} comparisons; unrelated favorites' base margin ${mm(p2d.unrelatedMargin)}; partly matching ${mm(p2d.weakerMargin)}`);
+  say(`    the gain would carry ${p2d.unguardedAbove} past the target without the guard; guard fired ${p2d.guardFired}×; placed above the target by the favorite: ${p2d.above} (above it by their own relevance already: ${p2d.aboveByRelevance})`);
+  numbers.dense.promise2 = { compared: p2d.compared, unrelatedMarginMin: p2d.unrelatedMargin.length ? round6(Math.min(...p2d.unrelatedMargin)) : null, unrelatedMarginMedian: round6(pct(p2d.unrelatedMargin, 0.5)), weakerMarginMin: p2d.weakerMargin.length ? round6(Math.min(...p2d.weakerMargin)) : null, wouldPassWithoutGuard: p2d.unguardedAbove, guardFired: p2d.guardFired, placedAbove: p2d.above, aboveByOwnRelevance: p2d.aboveByRelevance };
+  ok(p2d.compared > 0 && p2d.above === 0, `dense: no favorite placed above a target that holds more of the query's words (${p2d.compared} comparisons)`);
 
   if (JSON_ONLY) console.log(JSON.stringify(numbers));
   say(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);

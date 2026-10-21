@@ -170,16 +170,29 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    document, `{ success, id, favorite, helpful_count, trust_score, changed }` (`favorite` and `changed` are
    booleans, `trust_score` has 3 decimals); an unknown or non-active entry is refused exactly like feedback
    (`{ success: false, reason: "not-found" | "not-active", id, status? }`, exit 0, nothing moves). Two votes
-   in one call (`--favorite` with `--unfavorite` or `--unhelpful`, or `--unfavorite` with `--unhelpful`) is a
-   usage error: exit 1 and `ERROR:` on stderr. The switches never take a value, so they may sit anywhere in
-   the argv. `feedback <entryId> [--unhelpful]` and its output `{ success, id, trust_score, helpful }` are
-   unchanged.
+   in one call (`--favorite` with `--unfavorite` or `--unhelpful`, or `--unfavorite` with `--unhelpful`), any
+   other switch (a misspelt `--favourite` would otherwise count as a plain helpful vote) and a second entry id
+   are usage errors: exit 1 and `ERROR:` on stderr, nothing written. The switches never take a value, so they
+   may sit anywhere in the argv. `feedback <entryId> [--unhelpful]` and its output
+   `{ success, id, trust_score, helpful }` are unchanged.
    - **`ingest … --favorite`** (item 3; also `ingest-content`, and with `--sections` the digest itself):
      the entry the ingest stands for — the new entry, the live holder of a linked duplicate, or the active
      entry of an unchanged source — becomes (or stays) a favorite under the same one-vote rule, and the result
-     carries `favorite: { success, id, favorite, helpful_count, trust_score, changed }`; an unchanged source
-     with no active entry answers `favorite: { success: false, reason: "no-active-entry" }`. An ingest never
-     unfavorites (`ingest --unfavorite` is a usage error; leaving `--favorite` out changes nothing).
+     carries `favorite: { success, id, favorite, helpful_count, trust_score, changed }`, plus
+     `linkedDuplicate: true, holder: <entry id>` when that entry is a linked duplicate's holder; an unchanged
+     source with no active entry answers `favorite: { success: false, reason: "no-active-entry" }`. An ingest
+     never unfavorites (`ingest --unfavorite` is a usage error; leaving `--favorite` out changes nothing).
+   - **Linked duplicates are N : 1.** Identical text from several sources lives in ONE entry (the holder;
+     the others are its `provenance.alsoSources`), so those sources share ONE favorite: `ingest --favorite`
+     of a linked source favorites the holder, and `--unfavorite` through any of them clears it for all. A
+     capture system therefore counts its stars per holder (an `entries` row's `linkedTo` names it), sends
+     `--unfavorite` only when none of the captures sharing that holder is starred any more, and re-checks the
+     holder whenever a linked capture gets an entry of its own (its text changed): it unfavorites a holder no
+     starred capture shares any more, and favorites the capture's new entry if that capture is starred.
+   - **A live flag.** Only an ACTIVE entry is a favorite: an archived or deleted version (a superseded one in
+     `query --historical`, an `entries` head that is no longer active) reports `favorite: false` and gets no
+     boost; `favorite_helpful` / `helpful_count` stay as its vote history, and `recall` shows the stored
+     columns.
    - **Carry-over:** when an ingest supersedes (archives) an entry of the same source that was a favorite,
      the new entry inherits the favorite and its one helpful vote — applied **once**, also when `--favorite`
      is passed (the result's `favorite` block then lists `carriedFrom: [ids]`). Explicit votes stay with the
@@ -187,12 +200,23 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    - **Ranking:** after fusion, a favorite gets `favoriteWeight` (default 0.004, `MIDMEM_FAVORITE_WEIGHT`)
      and a favorite that ALSO has an explicit helpful vote (`helpful_count − favorite_helpful ≥ 1`)
      `favoriteHelpfulWeight` on top (default 0.002, `MIDMEM_FAVORITE_HELPFUL_WEIGHT`), so among equally
-     relevant entries favorite + helpful > favorite > neither. The boosts apply only to entries a lane
-     already returned (a favorite is never added to a result), and a relevance guard never lets being a
-     favorite (the boosts and its own vote) carry an entry past one that holds more of the query's words.
-     Query rows carry `favorite`; `rank.favorite` / `rank.favoriteHelpful` show the boosts and
-     `rank.favoriteGuard` marks a favorite the guard held back. An explicit helpful vote moves a favorite's
-     trust exactly as it moves any entry's.
+     relevant entries favorite + helpful > favorite > neither — but only when the query MATCHES the favorite:
+     a lexical lane (fts or trigram) returned it, or the vector lane ranked it in its top `favoriteVectorTopK`
+     (default 10, `MIDMEM_FAVORITE_VECTOR_TOP_K`; 0 = lexical matches only). A dense embedder (bge-m3) gives
+     every entry a positive cosine, so the vector lane alone returns up to 200 candidates for any query; past
+     its top 10 a favorite ranks exactly where its relevance and its votes put it. A favorite is never added to
+     a result. A relevance guard then holds any favorite whose lift — the boosts plus its votes' trust boost —
+     would carry it past a candidate holding more of the query's words (Unicode letters and digits; a script
+     written without spaces, such as Chinese or Japanese, by character bigrams) just below that candidate, and
+     the favorites it holds there keep their own order (favorite + helpful above favorite). Query rows carry
+     `favorite`; `rank.favorite` / `rank.favoriteHelpful` show the boosts and `rank.favoriteGuard` marks a
+     favorite the guard held. Measured offline (`packages/core/test/favorite-ranking.mjs`, with hash vectors
+     AND with dense 1024-dimension vectors): the order above holds in every role assignment, also under one
+     better match; no favorite is placed above a target holding more of the query's words; past the vector
+     top 10 a favorite gains nothing (without that gate one at vector rank 40 reached #1); Cyrillic and CJK
+     favorites stay below the entry holding the query's words. Inside the guard's window a favorite with
+     explicit votes can sit just below an equally relevant non-favorite carrying the same votes (a
+     non-favorite's votes are not held).
    - **Capability check:** every `entries` row of a favorites-capable MidMem carries `favorite` (item 7).
      Never send the switches to an older MidMem: its CLI ignores unknown switches, so it would count
      `--favorite` AND `--unfavorite` as plain helpful votes.
@@ -255,9 +279,9 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    offline heuristics: lead sentences and frequent tokens) — or `null` for an entry ingested before
    2026-10-07, which recorded nothing; a capture system uses it to tell model concepts from fallback ones.
    Since schema 6 (2026-10-21) each entry also carries `favorite` and `favoriteHelpful` (booleans: the
-   operator's favorite, and whether its one vote is inside `helpfulCount`); `midmem recall <id>` returns
-   the stored columns `favorite` / `favorite_helpful` (0 or 1) and `midmem brief` counts the active
-   favorites.
+   operator's favorite — true on an active entry only — and whether a favorite's one vote is inside
+   `helpfulCount`); `midmem recall <id>` returns the stored columns `favorite` / `favorite_helpful` (0 or 1)
+   and `midmem brief` counts the active favorites.
 8. **Call shape.** Shell out to the `midmem` CLI through a durable queue with a frozen argv allowlist
    and a provider switch (mock in every test: zero `execFile`); or import `Orchestrator` in-process
    for a Node caller on the same host. Both are governed identically.
@@ -300,7 +324,7 @@ it as its own lane, never storing it; register one with
 | `MIDMEM_OCCUPANCY` / `…_CAP_STACK` `…_CAP_DOC` `…_CAP_WEB` `…_OPERATOR_SLOTS` `…_MIN_LINEAGES` | on / 0.6 / 0.6 / 0.25 / 2 / 2 | bounded-occupancy selection on budgeted reads (#39): per-authority caps that bind only against a waiting competitor, protected operator slots, lineage floor |
 | `MIDMEM_INSTRUCTION_FLAG` / `MIDMEM_INSTRUCTION_PENALTY` | on / 0.01 | instruction-likeness flag on results (#40): computed over the full source at ingest (kept as `provenance.instructionLike`) and on library-lane rows' full evidence text; flagged rows demoted + labelled, never dropped; `0` turns all of it off |
 | `MIDMEM_FIDELITY` / `MIDMEM_VERBATIM_MAX_CHARS` | on / 4000 | fidelity class on results (#42); verbatim rows (operator / curated tier) uncut up to the ceiling |
-| `MIDMEM_FAVORITE_WEIGHT` / `MIDMEM_FAVORITE_HELPFUL_WEIGHT` | 0.004 / 0.002 | post-fusion boost of an operator's favorite, and of a favorite that also has an explicit helpful vote (§6 6b, 2026-10-21); candidates only, never past an entry holding more of the query's words; `0` turns one off (the favorite's helpful vote stays) |
+| `MIDMEM_FAVORITE_WEIGHT` / `MIDMEM_FAVORITE_HELPFUL_WEIGHT` / `MIDMEM_FAVORITE_VECTOR_TOP_K` | 0.004 / 0.002 / 10 | post-fusion boost of an operator's favorite, and of a favorite that also has an explicit helpful vote (§6 6b, 2026-10-21); only for a favorite a lexical lane returned or the vector lane ranked in its top K, never past an entry holding more of the query's words; a weight of `0` turns that boost off (the favorite's helpful vote stays), K `0` keeps the boosts to lexical matches |
 | `MIDMEM_WORKING_TTL_MS` | 86400000 (24 h) | lease for `working`-function entries (#44); they never promote and are excluded from default reads |
 | `MIDMEM_FORGET_CASCADE` | on | dependency-aware forget (#41): archive sourced claims, flag sole-support concepts |
 | `MIDMEM_WORK_MEMORY` | on | enable work-memory event recording |

@@ -18,6 +18,7 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_LLM_TIMEOUT_MS` | `llmTimeoutMs: Number(env('LLM_TIMEOUT_MS') \|\| 20000),` |
 | `MIDMEM_FAVORITE_WEIGHT` | `favoriteWeight: Number(env('FAVORITE_WEIGHT') ?? 0.004),` |
 | `MIDMEM_FAVORITE_HELPFUL_WEIGHT` | `favoriteHelpfulWeight: Number(env('FAVORITE_HELPFUL_WEIGHT') ?? 0.002),` |
+| `MIDMEM_FAVORITE_VECTOR_TOP_K` | `favoriteVectorTopK: Number(env('FAVORITE_VECTOR_TOP_K') ?? 10),` |
 | `MIDMEM_WORKFLOW_BOOST` | `enabled: env('WORKFLOW_BOOST') !== '0',` |
 | `MIDMEM_VECTOR_BACKEND` | `vectorBackend: env('VECTOR_BACKEND') \|\| 'sqlite',` |
 | `MIDMEM_QDRANT_URL` | `qdrantUrl: env('QDRANT_URL') \|\| 'http://localhost:6333',` |
@@ -89,4 +90,4 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_PROJECT` | `project: normalizeProject(env('PROJECT')),` |
 | `MIDMEM_PROJECT_LIFT` | `liftOnCurated: env('PROJECT_LIFT') !== '0',` |
 
-_82 env knobs._
+_83 env knobs._
