@@ -3203,8 +3203,10 @@ try {
       ok(om3.db.prepare('PRAGMA table_info(entries)').all().filter((c) => c.name.startsWith('favorite')).length === 2 && om3.recall(m1).favorite === 1, 'reopening a schema-6 store is a no-op (idempotent migration; the favorite stays)');
 
       // 60.8 — the 2026-10-21 review fixes.
-      // (1) One better match above an equal trio: the favorites the guard holds under it keep their order —
-      //     strong > favorite + helpful > favorite > neither, every role assignment, both passes.
+      // (1) One better match above an equal trio. The favorites the guard holds under it keep their order, and an
+      //     entry its OWN explicit vote lifts past the better match (as it lifts any non-favorite) keeps that place:
+      //     the guard's floor is the entry's score as a non-favorite, so starring never lowers an entry. Each
+      //     favorite is compared with its own twin: the same configuration with only that entry unstarred.
       const o60b = new Orchestrator(base60(path.join(dir60, 'better.db')));
       others60.push(o60b);
       const capB = async (docId, content) => (await o60b.ingestContent({ content, source: { libraryId: L60, docId, canonicalUri: `https://news.example.test/60b/${docId}` }, type: 'web-article', authority: 'web', project: 'library' })).entry.id;
@@ -3212,24 +3214,58 @@ try {
       const trioB = [];
       for (const tag of ['KXQ', 'KXR', 'KXS']) trioB.push(await capB(`better-${tag}`, `${tag} the volunteers repainted the lighthouse on the headland before the winter storms arrived.`));
       const resetB = () => { for (const id of trioB) o60b.db.prepare('UPDATE entries SET favorite = 0, favorite_helpful = 0, helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(id); };
-      let orderedB = 0, heldB = 0;
-      for (const [fh, f, n] of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]) {
+      const qB = (lexicalOnly) => hybridSearch(o60b.db, o60b.memory, o60b.embedder, 'lighthouse beacon restoration', { limit: 10, lexicalOnly });
+      let orderedB = 0, keptB = 0, betterB = 0, ownVoteB = 0;
+      const rolesB = (fh, f, unstarred = null) => {
         resetB();
-        o60b.memory.setFavorite(trioB[fh], true); o60b.memory.recordFeedback(trioB[fh], true);
-        o60b.memory.setFavorite(trioB[f], true);
+        o60b.memory.recordFeedback(trioB[fh], true); // fh's explicit helpful vote, starred or not
+        if (unstarred !== fh) o60b.memory.setFavorite(trioB[fh], true);
+        if (unstarred !== f) o60b.memory.setFavorite(trioB[f], true);
+      };
+      for (const [fh, f, n] of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]) {
         for (const lexicalOnly of [true, false]) {
-          const res = await hybridSearch(o60b.db, o60b.memory, o60b.embedder, 'lighthouse beacon restoration', { limit: 10, lexicalOnly });
-          const ids = res.map((r) => r.id);
-          if (JSON.stringify(ids.slice(0, 4)) === JSON.stringify([strongB, trioB[fh], trioB[f], trioB[n]])) orderedB++;
-          if (res[1].rank.favoriteGuard && res[2].rank.favoriteGuard && res[1].score > res[2].score && res[2].score > res[3].score && res[1].score < res[0].score) heldB++;
+          rolesB(fh, f); const res = await qB(lexicalOnly);
+          rolesB(fh, f, fh); const twinFH = (await qB(lexicalOnly)).map((r) => r.id);
+          rolesB(fh, f, f); const twinF = (await qB(lexicalOnly)).map((r) => r.id);
+          const P = (id) => res.findIndex((r) => r.id === id);
+          const twins = [[trioB[fh], twinFH], [trioB[f], twinF]];
+          if (P(trioB[fh]) < P(trioB[f]) && P(trioB[f]) < P(trioB[n]) && res[P(trioB[fh])].score > res[P(trioB[f])].score && res[P(trioB[f])].score > res[P(trioB[n])].score) orderedB++;
+          if (twins.every(([id, tw]) => P(id) <= tw.indexOf(id))) keptB++;
+          // The better match stays above each favorite — unless that entry ranks above it unstarred (its own vote).
+          if (twins.every(([id, tw]) => P(strongB) < P(id) || tw.indexOf(id) < tw.indexOf(strongB))) betterB++;
+          if (P(trioB[fh]) < P(strongB)) ownVoteB++;
         }
       }
-      ok(orderedB === 12 && heldB === 12, `held under one better match, the favorites keep their order: strong > favorite + helpful > favorite > neither (${orderedB}/12 ordered, ${heldB}/12 held with distinct scores)`);
       resetB();
-      // (2a) Coverage words are Unicode-aware: Cyrillic / accented runs, CJK bigrams, NFKC, English stopwords out.
-      ok(JSON.stringify(coverageWords('Маяк, реставрация и берег')) === '["маяк","реставрация","берег"]' && JSON.stringify(coverageWords('The café résumé')) === '["café","résumé"]'
-        && JSON.stringify(coverageWords('灯塔修复')) === '["灯塔","塔修","修复"]' && JSON.stringify(coverageWords('ＦＵＬＬ width')) === '["full","width"]',
-        'coverageWords: \\p{L}\\p{N} runs (Cyrillic, accents), character bigrams for unspaced scripts, NFKC-folded, stopwords dropped');
+      ok(orderedB === 12 && keptB === 12 && betterB === 12, `one better match above an equal trio: favorite + helpful > favorite > neither with distinct scores (${orderedB}/12), starred ≥ unstarred (${keptB}/12), the better match above every favorite it out-ranks unstarred (${betterB}/12; ${ownVoteB} passes earned by the entry's own vote)`);
+      // (1b) Starring never lowers an entry: each trio member with one explicit helpful vote, unstarred vs starred,
+      //      both passes — in the lexical pass that vote alone lifts the trio's first member past the better match.
+      let invB = 0, invTotal = 0, liftedB = 0, liftedKept = 0;
+      for (const m of trioB) {
+        for (const lexicalOnly of [true, false]) {
+          resetB(); o60b.memory.recordFeedback(m, true);
+          const uRes = await qB(lexicalOnly);
+          o60b.memory.setFavorite(m, true);
+          const sRes = await qB(lexicalOnly);
+          const at = (res, id) => res.findIndex((r) => r.id === id);
+          invTotal++;
+          if (at(sRes, m) <= at(uRes, m)) invB++;
+          if (at(uRes, m) < at(uRes, strongB)) { liftedB++; if (at(sRes, m) < at(sRes, strongB)) liftedKept++; }
+        }
+      }
+      resetB();
+      ok(invB === invTotal && liftedB >= 1 && liftedKept === liftedB, `starred ≥ unstarred in every configuration (${invB}/${invTotal}); the ${liftedB} that rank above the better match on their own vote stay there starred (${liftedKept}/${liftedB})`);
+      // (2a) Coverage words are Unicode-aware (round 2: unigrams too, the length rule on Latin only, Latin diacritics
+      //      folded, runs split at script boundaries, Turkish İ, question words out).
+      const cw60 = (s) => JSON.stringify(coverageWords(s));
+      ok(cw60('Маяк, реставрация и берег') === '["маяк","реставрация","берег"]' && cw60('ＦＵＬＬ width') === '["full","width"]' && cw60('Αθήνα') === '["αθήνα"]',
+        'coverageWords: \\p{L}\\p{N} runs of any script, NFKC-folded; a one-letter Cyrillic word (и) is no topic');
+      ok(cw60('灯塔修复') === '["灯","灯塔","塔","塔修","修","修复","复"]' && cw60('塔') === '["塔"]' && new Set(coverageWords('灯塔修复')).has('塔'), 'coverageWords: unspaced scripts count each character and each pair — a one-character query word (塔) matches');
+      ok(cw60('학교') === '["학","학교","교"]' && new Set(coverageWords('학교에서 도서관')).has('학교'), 'coverageWords: a two-syllable Korean word is kept (the > 2 rule is Latin-only) and found inside 학교에서');
+      ok(cw60('The café résumé') === '["cafe","resume"]' && cw60('İstanbul ISTANBUL') === '["istanbul","istanbul"]' && cw60('Straße') === '["straße"]' && cw60('がっこう').includes('"が"'),
+        'coverageWords: Latin diacritics fold as FTS unicode61 folds them (café = cafe; Turkish İ → i); kana voicing marks stay');
+      ok(cw60('iPhone手机') === '["iphone","手","手机","机"]' && cw60('COVID19 2026年') === '["covid19","2026","年"]', 'coverageWords: runs split at script boundaries (iphone + 手机); digits stay with Latin');
+      ok(cw60('what did the minister say about the tariffs') === '["minister","tariffs"]' && cw60('it’s the café—not a bar') === '["cafe","bar"]', 'coverageWords: question and reporting words name no topic (what / say out)');
       // (2b) A dense embedder makes every entry a vector candidate: a favorite the query does not match lexically is
       //      lifted only inside the vector lane's top favoriteVectorTopK (10). Hand-made 8-dim vectors, all cos > 0.
       const unit60 = (v) => { const n = Math.hypot(...v); return v.map((x) => x / n); };
@@ -3262,6 +3298,23 @@ try {
       others60.push(o60k);
       const dk = await denseQ(o60k);
       ok(dk.every((r) => r.rank.favorite === undefined && r.rank.favoriteHelpful === undefined) && dk[0].id === vecIds[0], 'favoriteVectorTopK 0 → vector-only favorites get no boost at all (the vector top hit stays first)');
+      // (2b′) The vector top 10 is counted over what the filters leave (round 2): 20 entries alternate type note /
+      //       insight by vector rank; the 8th insight is vector rank 16 overall — boosted under types: ['insight'].
+      const o60t = new Orchestrator(base60(path.join(dir60, 'typed.db')));
+      others60.push(o60t);
+      const typedIds = [];
+      for (let r = 1; r <= 20; r++) {
+        const id = (await o60t.storeMemory({ content: `Typed filler ${'abcdefghijklmnopqrst'[r - 1].repeat(4)} about the night ferry timetable.`, tier: 'memory', type: r % 2 ? 'note' : 'insight', scope: 'shared' })).id;
+        await o60t.memory.upsertVector(id, unit60([1, 0.05 * r, 0, 0, 0, 0, 0, 0]), 'smoke-dense-8', 'lmstudio');
+        typedIds.push(id);
+      }
+      const eighthInsight = typedIds[15]; // vector rank 16 overall, the 8th of type insight
+      o60t.memory.setFavorite(eighthInsight, true);
+      const tAll = await hybridSearch(o60t.db, o60t.memory, denseEmb(q8), 'zylophant quarvex', { limit: 30 });
+      const tIns = await hybridSearch(o60t.db, o60t.memory, denseEmb(q8), 'zylophant quarvex', { limit: 30, types: ['insight'] });
+      const fAll = tAll.find((r) => r.id === eighthInsight), fIns = tIns.find((r) => r.id === eighthInsight);
+      ok(fAll.rank.vector === 16 && fAll.rank.favorite === undefined && tIns.every((r) => r.type === 'insight') && fIns.rank.favorite === o60t.cfg.favoriteWeight && tIns[0].id === eighthInsight,
+        'the vector top 10 counts the candidates the filters leave: vector rank 16 overall, 8th of its type → boosted under types:[insight], not without the filter');
       // (2c) A non-Latin query: no lexical lane answers it (the FTS lanes tokenize ASCII), and the Unicode guard keeps
       //      an unrelated favorite inside the vector top 10 below the entry holding all three words.
       const o60c = new Orchestrator(base60(path.join(dir60, 'cyrillic.db')));
@@ -3275,6 +3328,20 @@ try {
       const cyF = cy1.find((r) => r.id === cFav);
       ok(cy1[0].id === cStrong && cyF.rank.favorite === o60c.cfg.favoriteWeight && cyF.rank.favoriteGuard === true && cy1.findIndex((r) => r.id === cFav) === 1 && cy1.every((r) => !r.rank.fts && !r.rank.trigram),
         'Cyrillic query (vector-only): the boosted unrelated favorite is held below the entry holding маяк / реставрация / берег (rank.favoriteGuard)');
+      // (2d) A question matches nearly every entry lexically (the, about: 3+-letter stopwords; trigram substrings), so
+      //      the lexical gate wants a CONTENT word of the query in the favorite (round 2); with none in the query,
+      //      any lexical hit still counts.
+      const o60q = new Orchestrator(base60(path.join(dir60, 'question.db')));
+      others60.push(o60q);
+      const qTarget = (await o60q.storeMemory({ content: 'The minister said the tariffs on steel would rise after the summit in the capital.', tier: 'memory', type: 'note', scope: 'shared' })).id;
+      const qOther = (await o60q.storeMemory({ content: 'The museum reopened its gallery about the history of the old harbour wall.', tier: 'memory', type: 'note', scope: 'shared' })).id;
+      for (const id of [qTarget, qOther]) { o60q.memory.setFavorite(id, true); o60q.memory.recordFeedback(id, true); }
+      const qa = await hybridSearch(o60q.db, o60q.memory, o60q.embedder, 'what did the minister say about the tariffs', { limit: 10, lexicalOnly: true });
+      const qT = qa.find((r) => r.id === qTarget), qO = qa.find((r) => r.id === qOther);
+      ok(qO && qO.rank.fts && qO.rank.favorite === undefined && qO.rank.favoriteHelpful === undefined && qT.rank.favorite === o60q.cfg.favoriteWeight && qT.rank.favoriteHelpful === o60q.cfg.favoriteHelpfulWeight && qa[0].id === qTarget,
+        'question form: the unrelated favorite is a lexical hit (the / about) but holds none of minister / tariffs — no boost; the target keeps its own');
+      const qb = await hybridSearch(o60q.db, o60q.memory, o60q.embedder, 'what did they say about it', { limit: 10, lexicalOnly: true });
+      ok(coverageWords('what did they say about it').length === 0 && qb.find((r) => r.id === qOther)?.rank.favorite === o60q.cfg.favoriteWeight, 'a query with no coverage words: any lexical hit counts (the fallback)');
       // (3) A favorite set through a linked duplicate lands on the holder that N sources share: the result says so.
       const tL60 = 'FAVSIXTY lima-two: the coastguard station reopened its visitor gallery on the cliff.';
       const iL1 = await cap60('fav60-l1', tL60);
@@ -3306,6 +3373,11 @@ try {
       ok(s1.code === 1 && /^ERROR: feedback takes only --unhelpful, --favorite or --unfavorite \(got --favourite\)/.test(s1.err) && s2.code === 1 && /\(got --project\)/.test(s2.err)
         && s3.code === 1 && /^ERROR: feedback takes one <entryId>/.test(s3.err) && s4.code === 1 && JSON.stringify(row60(eS60)) === rowS0,
         'CLI feedback: an unknown switch (--favourite, --project) or a second id → exit 1 + ERROR:, nothing written');
+      // --unhelpful is a bare switch too (round 2): a stray token after it is a second id, never swallowed as its value.
+      const s5 = cli60('feedback', eS60, '--unhelpful', 'extra');
+      const s6 = cli60('feedback', '--unhelpful', eS60);
+      ok(s5.code === 1 && /^ERROR: feedback takes one <entryId>/.test(s5.err) && JSON.stringify(row60(eS60)) === rowS0 && s6.code === 0 && s6.out?.helpful === false && s6.out.id === eS60,
+        'CLI feedback <id> --unhelpful extra → exit 1, nothing written; --unhelpful before the id is a plain unhelpful vote');
       // (7) The mutants that survived the first round. (7.1) The in-UPDATE status clause: a NON-favorite archived row
       //     is refused by setFavorite({ activeOnly }) itself, both ways, and the row is unchanged.
       const eT60 = (await cap60('fav60-t', 'FAVSIXTY tango: the tide mill museum restored its waterwheel.')).entry.id;

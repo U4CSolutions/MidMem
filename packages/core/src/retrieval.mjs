@@ -24,45 +24,80 @@ const LIBRARY_REPORT = new WeakMap();
 /** A configured ranking boost: a finite positive number, else 0 (off) — a typo in an env knob never scores NaN. */
 const boostWeight = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
 
-/** Scripts written without spaces between words: a run of their letters is cut into character bigrams. */
-const UNSPACED_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+/** Script classes for coverage words: Latin, digits, scripts written without spaces between words (their letters
+ *  count one by one AND in pairs — Han, kana, Thai, Lao, Khmer, Myanmar, and Hangul, whose particles attach to the
+ *  word), and every other script. */
+const UNSPACED_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}\p{Script=Hangul}]/u;
+const LATIN_SCRIPT = /\p{Script=Latin}/u;
+const DIGIT = /\p{N}/u;
+const scriptClass = (ch) => (DIGIT.test(ch) ? 'N' : LATIN_SCRIPT.test(ch) ? 'L' : UNSPACED_SCRIPT.test(ch) ? 'U' : 'O');
+/** Question and reporting words that name no topic (on top of grounding's English stopwords): in "what did the
+ *  minister say about the tariffs" only minister / tariffs are words an entry can share with the question. */
+const QUESTION_WORDS = new Set(['what', 'when', 'where', 'which', 'who', 'whom', 'whose', 'why', 'how', 'say', 'says', 'said', 'tell', 'tells', 'told', 'they', 'them', 'there', 'here', 'also', 'just', 'very']);
+const latinWords = (seg, out) => {
+  if (/^[a-z0-9]+$/.test(seg)) { for (const w of contentWords(seg)) if (!QUESTION_WORDS.has(w)) out.push(w); }
+  else if ([...seg].length > 2) out.push(seg); // a Latin letter with no ASCII base (ß, ø, æ, ł)
+};
 
 /**
- * The words a favorite's relevance guard compares (2026-10-21 review: the guard was ASCII-only). Unicode letters
- * and digits (\p{L}\p{N}), lowercased and NFKC-folded; a run of 3+ code points counts unless it is an English
- * stopword (grounding.mjs contentWords judges the ASCII runs); a run in a script without word spaces (Han, kana,
- * Thai, …) counts as its character bigrams. Deterministic and local to ranking — grounding keeps its own words.
+ * The words a favorite's gate and relevance guard compare (2026-10-21 reviews). ASCII text takes the fast path:
+ * grounding.mjs contentWords (lowercase alphanumeric runs > 2 characters, English stopwords out) minus question
+ * words. Anything else is NFKC-folded and lowercased; Latin letters lose their diacritics (café = cafe, as FTS
+ * unicode61 folds them; Turkish İ → i) while other scripts keep their marks (kana voicing, Cyrillic й are letters
+ * there); \p{L}\p{N} runs are split at script boundaries (iphone手机 → iphone + 手机; digits stay with Latin). A
+ * Latin run follows the ASCII rules; a run of an unspaced script counts each character AND each adjacent pair (a
+ * one-character word matches, and so does 학교 inside 학교에서); any other script's run counts from 2 code points
+ * (its single letters are mostly prepositions and conjunctions). Deterministic; grounding keeps its own words.
  */
 export function coverageWords(s) {
+  const text = String(s ?? '');
   const out = [];
-  for (const run of String(s ?? '').normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu) || []) {
-    const chars = [...run];
-    if (UNSPACED_SCRIPT.test(run)) { if (chars.length === 1) out.push(run); else for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i] + chars[i + 1]); }
-    else if (/^[a-z0-9]+$/.test(run)) out.push(...contentWords(run));
-    else if (chars.length > 2) out.push(run);
+  if (!/[^\x00-\x7f]/.test(text)) { for (const w of contentWords(text)) if (!QUESTION_WORDS.has(w)) out.push(w); return out; }
+  const folded = text.normalize('NFKC').toLowerCase().normalize('NFKD').replace(/(\p{Script=Latin})\p{M}+/gu, '$1').normalize('NFC');
+  for (const run of folded.match(/[\p{L}\p{N}]+/gu) || []) {
+    if (!/[^\x00-\x7f]/.test(run)) { latinWords(run, out); continue; } // most runs of a web page: no per-character work
+    let seg = '', cls = 'N';
+    const flush = () => {
+      if (!seg) return;
+      if (cls === 'L' || cls === 'N') latinWords(seg, out);
+      else if (cls === 'U') { const ch = [...seg]; for (let i = 0; i < ch.length; i++) { out.push(ch[i]); if (i + 1 < ch.length) out.push(ch[i] + ch[i + 1]); } }
+      else if ([...seg].length >= 2) out.push(seg);
+      seg = '';
+    };
+    for (const ch of run) {
+      const k = scriptClass(ch);
+      const joins = !seg || k === cls || (k === 'N' && cls === 'L') || (cls === 'N' && (k === 'L' || k === 'N'));
+      if (!joins) flush();
+      if (!seg) cls = k; else if (cls === 'N' && k === 'L') cls = 'L';
+      seg += ch;
+    }
+    flush();
   }
   return out;
 }
 
-/**
- * The favorites' relevance guard (2026-10-21; see hybridSearch). `favs` = [{ c, lift }]: each favorite candidate
- * and the part of its score above its relevance alone (its favorite boosts and its trust boost). A favorite whose
- * lift carried it past a candidate holding a larger share of the query's coverage words is held below the lowest
- * such candidate (its cap) — never below its relevance alone. Coverage levels run from the highest down, so a
- * favorite that holds back a weaker one is final before it is compared; favorites held under one cap keep their
- * unguarded order (favorite + helpful above a favorite, the more relevant above the less), packed in a band just
- * under the cap. Coverage is memoized.
- */
-function holdFavoritesBelowBetterMatches(cand, favs, query) {
-  const words = [...new Set(coverageWords(query))];
+/** The share of `words` (a query's distinct coverage words) an entry's content holds, memoized per candidate. */
+function coverageMeter(words) {
   const memo = new Map();
-  const coverage = (c) => {
+  return (c) => {
     if (!memo.has(c)) {
-      const have = new Set(coverageWords(c.entry.content));
-      memo.set(c, words.length ? words.filter((w) => have.has(w)).length / words.length : 0);
+      if (!words.length) memo.set(c, 0);
+      else { const have = new Set(coverageWords(c.entry.content)); memo.set(c, words.filter((w) => have.has(w)).length / words.length); }
     }
     return memo.get(c);
   };
+}
+
+/**
+ * The favorites' relevance guard (2026-10-21; see hybridSearch). `favs` = [{ c, lift }]: each favorite candidate
+ * and the part of its score that being a favorite added (its boosts and the trust of its own vote), so `score −
+ * lift` is its score as a non-favorite. A favorite whose lift carried it past a candidate holding a larger share
+ * of the query's coverage words is held below the lowest such candidate (its cap) — never below its score as a
+ * non-favorite, so starring never lowers an entry. Coverage levels run from the highest down, so a favorite that
+ * holds back a weaker one is final before it is compared; favorites held under one cap keep their unguarded order
+ * (favorite + helpful above a favorite, the more relevant above the less), packed in a band just under the cap.
+ */
+function holdFavoritesBelowBetterMatches(cand, favs, coverage) {
   const levels = [...new Set(favs.map((f) => coverage(f.c)))].sort((a, b) => b - a);
   for (const level of levels) {
     const held = new Map(); // cap → [{ c, base, unguarded }]
@@ -299,23 +334,34 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
 
   // --- Favorite boost (2026-10-21, schema 6): the operator's favorite gets favoriteWeight, and a favorite that
   //     ALSO has an explicit helpful vote (helpful_count − favorite_helpful ≥ 1) favoriteHelpfulWeight on top —
-  //     after the ref-chain prelim, and only for a favorite the query MATCHES: one a lexical lane returned, or one
-  //     the vector lane ranked in its top favoriteVectorTopK (10). A dense embedder gives every entry a positive
-  //     cosine, so the vector lane alone returns up to 200 candidates for any query: past its top 10 a favorite
-  //     earns its place by relevance only (concept-routing seeds, which no lane ranked, get nothing either). A
-  //     favorite is never added to a result set. Its lift — the boosts plus its whole trust boost (every vote on it,
-  //     its own included) — is what it scores above its relevance alone, and the relevance guard below bounds all
-  //     of it: one explicit vote (+0.0005) outweighs a one-rank lexical gap at the top (0.0004), so a favorite +
-  //     helpful must not pass a better match on its votes either. ---
+  //     after the ref-chain prelim, and only for a favorite the query MATCHES:
+  //       - lexically: a lexical lane returned it AND it holds one of the query's coverage words (any lexical hit
+  //         when the query has none) — 3+-letter stopwords (the, about) and trigram substrings give every entry a
+  //         lexical hit on a question;
+  //       - or semantically: the vector lane ranked it in its top favoriteVectorTopK (10), counted over the
+  //         candidates the filters above left (types, functions, metadata, authority). A dense embedder gives every
+  //         entry a positive cosine, so the vector lane alone returns up to 200 candidates for any query; past its
+  //         top 10 a favorite earns its place by relevance only (concept-routing seeds, which no lane ranked, too).
+  //     A favorite is never added to a result set. Its lift (the boosts + the trust nudge of its own vote) is what it
+  //     scores above the same entry as a non-favorite — votes it earned explicitly lift it as they lift any entry —
+  //     and the relevance guard below bounds that lift. ---
   const favW = boostWeight(cfg.favoriteWeight);
   const favHW = boostWeight(cfg.favoriteHelpfulWeight);
   const vecTopK = Number.isInteger(cfg.favoriteVectorTopK) && cfg.favoriteVectorTopK >= 0 ? cfg.favoriteVectorTopK : 10;
+  const queryWords = [...new Set(coverageWords(query))];
+  const coverage = coverageMeter(queryWords);
+  let visibleVecRank = null; // built on the first favorite: vector ranks over the filtered candidates
+  const vecRank = (c) => {
+    if (!visibleVecRank) { visibleVecRank = new Map(); cand.filter((x) => x.ranks.vector).sort((a, b) => a.ranks.vector - b.ranks.vector).forEach((x, i) => visibleVecRank.set(x, i + 1)); }
+    return visibleVecRank.get(c) ?? Infinity;
+  };
   const favs = [];
   for (const c of cand) {
     const e = c.entry;
     if (!isFavorite(e)) continue;
-    let lift = (Number(cfg.trustWeight) || 0) * ((e.trust_score ?? 0.5) - 0.5);
-    if (c.ranks.fts || c.ranks.trigram || (c.ranks.vector && c.ranks.vector <= vecTopK)) {
+    let lift = favVote(c);
+    const lexicalMatch = (c.ranks.fts || c.ranks.trigram) && (!queryWords.length || coverage(c) > 0);
+    if (lexicalMatch || vecRank(c) <= vecTopK) {
       if (favW) { c.score += favW; lift += favW; c.ranks.favorite = favW; }
       if (favHW && (e.helpful_count ?? 0) - (e.favorite_helpful ?? 0) >= 1) { c.score += favHW; lift += favHW; c.ranks.favoriteHelpful = favHW; }
     }
@@ -366,8 +412,8 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
   //     strong one scores a hair below it — so a favorite's lift may reorder comparable matches but never carries
   //     it past a candidate that holds MORE of the query's words (coverageWords: Unicode letters and digits, over
   //     the entry content the lanes index). Such favorites are held just below the lowest of those candidates, in
-  //     their unguarded order (rank.favoriteGuard). ---
-  if (favs.length) holdFavoritesBelowBetterMatches(cand, favs, query);
+  //     their unguarded order, and never below their score as a non-favorite (rank.favoriteGuard). ---
+  if (favs.length) holdFavoritesBelowBetterMatches(cand, favs, coverage);
 
   cand.sort((a, b) => b.score - a.score);
 

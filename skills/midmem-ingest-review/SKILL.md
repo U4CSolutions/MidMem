@@ -60,7 +60,7 @@ topics; ungrounded/low-trust entries; and recommended actions. Distinguish **qua
 shared knowledge).
 
 ## Apply (safe vs flag)
-- **Safe, do with a note:** `midmem feedback <id> --helpful=false` to down-weight a bad entry;
+- **Safe, do with a note:** `midmem feedback <id> --unhelpful` to down-weight a bad entry;
   re-ingest a corrected source (supersede); `forget` (soft) a clearly-confabulated entry.
 - **Flag for the human:** contradictions needing a judgment call, scope re-classification of
   sensitive content, anything that changes canonical facts (MEMORY.md).

@@ -172,9 +172,9 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    (`{ success: false, reason: "not-found" | "not-active", id, status? }`, exit 0, nothing moves). Two votes
    in one call (`--favorite` with `--unfavorite` or `--unhelpful`, or `--unfavorite` with `--unhelpful`), any
    other switch (a misspelt `--favourite` would otherwise count as a plain helpful vote) and a second entry id
-   are usage errors: exit 1 and `ERROR:` on stderr, nothing written. The switches never take a value, so they
-   may sit anywhere in the argv. `feedback <entryId> [--unhelpful]` and its output
-   `{ success, id, trust_score, helpful }` are unchanged.
+   are usage errors: exit 1 and `ERROR:` on stderr, nothing written. The three switches (`--unhelpful` too)
+   never take a value, so they may sit anywhere in the argv and a token after one counts as a second id.
+   `feedback <entryId> [--unhelpful]` and its output `{ success, id, trust_score, helpful }` are unchanged.
    - **`ingest … --favorite`** (item 3; also `ingest-content`, and with `--sections` the digest itself):
      the entry the ingest stands for — the new entry, the live holder of a linked duplicate, or the active
      entry of an unchanged source — becomes (or stays) a favorite under the same one-vote rule, and the result
@@ -201,22 +201,29 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
      and a favorite that ALSO has an explicit helpful vote (`helpful_count − favorite_helpful ≥ 1`)
      `favoriteHelpfulWeight` on top (default 0.002, `MIDMEM_FAVORITE_HELPFUL_WEIGHT`), so among equally
      relevant entries favorite + helpful > favorite > neither — but only when the query MATCHES the favorite:
-     a lexical lane (fts or trigram) returned it, or the vector lane ranked it in its top `favoriteVectorTopK`
-     (default 10, `MIDMEM_FAVORITE_VECTOR_TOP_K`; 0 = lexical matches only). A dense embedder (bge-m3) gives
-     every entry a positive cosine, so the vector lane alone returns up to 200 candidates for any query; past
-     its top 10 a favorite ranks exactly where its relevance and its votes put it. A favorite is never added to
-     a result. A relevance guard then holds any favorite whose lift — the boosts plus its votes' trust boost —
-     would carry it past a candidate holding more of the query's words (Unicode letters and digits; a script
-     written without spaces, such as Chinese or Japanese, by character bigrams) just below that candidate, and
-     the favorites it holds there keep their own order (favorite + helpful above favorite). Query rows carry
-     `favorite`; `rank.favorite` / `rank.favoriteHelpful` show the boosts and `rank.favoriteGuard` marks a
-     favorite the guard held. Measured offline (`packages/core/test/favorite-ranking.mjs`, with hash vectors
-     AND with dense 1024-dimension vectors): the order above holds in every role assignment, also under one
-     better match; no favorite is placed above a target holding more of the query's words; past the vector
-     top 10 a favorite gains nothing (without that gate one at vector rank 40 reached #1); Cyrillic and CJK
-     favorites stay below the entry holding the query's words. Inside the guard's window a favorite with
-     explicit votes can sit just below an equally relevant non-favorite carrying the same votes (a
-     non-favorite's votes are not held).
+     a lexical lane (fts or trigram) returned it AND it holds one of the query's words (on a question — "what
+     did the minister say about the tariffs" — the stopwords and trigram substrings make nearly every entry a
+     lexical hit; a query with no words of its own falls back to any lexical hit), or the vector lane ranked it
+     in its top `favoriteVectorTopK` (default 10, `MIDMEM_FAVORITE_VECTOR_TOP_K`; 0 = lexical matches only),
+     counted over the candidates the query's filters leave (`types`, `functions`, metadata filters,
+     `minAuthority`). A dense embedder (bge-m3) gives every entry a positive cosine, so the vector lane alone
+     returns up to 200 candidates for any query; past its top 10 a favorite ranks exactly where its relevance and
+     its votes put it. A favorite is never added to a result. A relevance guard then holds any favorite whose
+     favorite lift (the boosts plus the trust of its own vote) would carry it past a candidate holding more of
+     the query's words just below that candidate — never below the score it would have as a non-favorite, so
+     starring never lowers an entry, and an explicit helpful vote lifts a favorite exactly as it lifts any entry
+     — and the favorites it holds there keep their own order (favorite + helpful above favorite). The query's
+     words: Unicode letters and digits, English stopwords and question words (what, say, …) out, Latin
+     diacritics folded as FTS folds them (café = cafe, İ → i), runs split where the script changes; a script
+     written without spaces (Chinese, Japanese, Thai, Korean) counts each character and each pair, so a
+     one-character word matches and 학교 is found in 학교에서. Query rows carry `favorite`; `rank.favorite` /
+     `rank.favoriteHelpful` show the boosts and `rank.favoriteGuard` marks a favorite the guard held. Measured
+     offline (`packages/core/test/favorite-ranking.mjs`, with hash vectors AND with dense 1024-dimension
+     vectors): the order above holds in every role assignment, also under one better match; starring never
+     lowers an entry; no favorite passes a target holding more of the query's words except on its own explicit
+     vote; past the vector top 10 a favorite gains nothing (without that gate one at vector rank 40 reached #1);
+     Cyrillic and CJK favorites stay below the entry holding the query's words; on question-form queries
+     starring unrelated entries brings none of them into a top 3.
    - **Capability check:** every `entries` row of a favorites-capable MidMem carries `favorite` (item 7).
      Never send the switches to an older MidMem: its CLI ignores unknown switches, so it would count
      `--favorite` AND `--unfavorite` as plain helpful votes.

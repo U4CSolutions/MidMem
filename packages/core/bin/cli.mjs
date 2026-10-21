@@ -5,9 +5,9 @@ import { Orchestrator, QdrantVectorStore } from '../src/index.mjs';
 const [cmd, ...rest] = process.argv.slice(2);
 const flags = {};
 const pos = [];
-// Favorites (schema 6): `--favorite` / `--unfavorite` are bare switches — they never take a value, so they may
-// sit anywhere in an argv (before a positional too) without swallowing the next token.
-const SWITCHES = new Set(['favorite', 'unfavorite']);
+// Feedback's votes are bare switches — `--unhelpful`, `--favorite`, `--unfavorite` never take a value, so they may
+// sit anywhere in an argv (before a positional too) and a stray token after one is a second id, i.e. a usage error.
+const SWITCHES = new Set(['unhelpful', 'favorite', 'unfavorite']);
 for (let i = 0; i < rest.length; i++) {
   if (rest[i].startsWith('--')) { const k = rest[i].slice(2); const v = SWITCHES.has(k) || rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i]; flags[k] = v; }
   else pos.push(rest[i]);
