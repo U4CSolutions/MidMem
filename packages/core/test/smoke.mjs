@@ -3375,8 +3375,9 @@ try {
         'CLI feedback: an unknown switch (--favourite, --project) or a second id → exit 1 + ERROR:, nothing written');
       // --unhelpful is a bare switch too (round 2): a stray token after it is a second id, never swallowed as its value.
       const s5 = cli60('feedback', eS60, '--unhelpful', 'extra');
+      const rowS5 = JSON.stringify(row60(eS60)); // before s6, which casts its (intended) unhelpful vote
       const s6 = cli60('feedback', '--unhelpful', eS60);
-      ok(s5.code === 1 && /^ERROR: feedback takes one <entryId>/.test(s5.err) && JSON.stringify(row60(eS60)) === rowS0 && s6.code === 0 && s6.out?.helpful === false && s6.out.id === eS60,
+      ok(s5.code === 1 && /^ERROR: feedback takes one <entryId>/.test(s5.err) && rowS5 === rowS0 && s6.code === 0 && s6.out?.helpful === false && s6.out.id === eS60,
         'CLI feedback <id> --unhelpful extra → exit 1, nothing written; --unhelpful before the id is a plain unhelpful vote');
       // (7) The mutants that survived the first round. (7.1) The in-UPDATE status clause: a NON-favorite archived row
       //     is refused by setFavorite({ activeOnly }) itself, both ways, and the row is unchanged.

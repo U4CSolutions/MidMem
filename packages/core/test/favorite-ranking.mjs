@@ -462,31 +462,45 @@ try {
     const unrelated = [];
     for (const t of ['The museum reopened its gallery about the history of the old harbour wall.', 'The library said the reading room will stay open late during the festival.', 'A choir sang about the river at the opening of the new park.',
       'The bakery on the square added rye loaves and a sourdough class for the autumn.', 'Volunteers cleared the trail and talked about the birds that nest by the lake.']) unrelated.push(await put(t));
-    const questions = SUBJ.map((s, i) => ({ q: `what did the ${s} say about the ${TOPIC[i]}`, target: qTargets[i] }));
+    // Two forms: DIRECT (the target holds the subject and the topic) and SYNONYM (no capture holds the query's
+    // content words, so every lexical hit is a stopword hit — the review's "what did the <synonym> say about the
+    // <synonym>"). The synonym form's DEEP pass is reported, not asserted: the offline hash embedder hashes
+    // stopwords like content words, so its vector top 10 for such a question is stopword overlap, not meaning.
+    const SUBJ_SYN = ['statesman', 'alderman', 'trainer', 'medic', 'financier', 'grower', 'aviator', 'keeper', 'magistrate', 'lawmaker', 'pharmacist', 'warden', 'mariner', 'educator', 'technician'];
+    const TOPIC_SYN = ['levies', 'craters', 'trades', 'jabs', 'loans', 'aridity', 'airstrips', 'displays', 'petitions', 'votes', 'thinners', 'blazes', 'berths', 'tests', 'overpasses'];
+    const forms = {
+      direct: SUBJ.map((s, i) => ({ q: `what did the ${s} say about the ${TOPIC[i]}`, target: qTargets[i] })),
+      synonym: SUBJ_SYN.map((s, i) => ({ q: `what did the ${s} say about the ${TOPIC_SYN[i]}`, target: qTargets[i] })),
+    };
     const top3 = async (q, lexicalOnly) => (await hybridSearch(qs.db, qs.memory, qs.embedder, q, { limit: 10, lexicalOnly })).slice(0, 3).map((r) => r.id);
-    const intrusions = async (lexicalOnly) => { let n = 0; for (const { q } of questions) if ((await top3(q, lexicalOnly)).some((id) => unrelated.includes(id))) n++; return n; };
+    const intrusions = async (list, lexicalOnly) => { let n = 0; for (const { q } of list) if ((await top3(q, lexicalOnly)).some((id) => unrelated.includes(id))) n++; return n; };
     const res7 = {};
-    for (const lexicalOnly of [true, false]) {
-      const p = lexicalOnly ? 'lexical' : 'deep';
-      const plain = await intrusions(lexicalOnly);
-      for (const id of unrelated) { qs.memory.setFavorite(id, true); qs.memory.recordFeedback(id, true); }
-      const starred = await intrusions(lexicalOnly);
-      for (const id of unrelated) qs.db.prepare('UPDATE entries SET favorite = 0, favorite_helpful = 0, helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(id);
-      // A starred target keeps its gain: the boost reaches it (it holds the subject and the topic).
-      let gained = 0;
-      for (const { q, target } of questions) {
-        qs.memory.setFavorite(target, true);
-        const row = (await hybridSearch(qs.db, qs.memory, qs.embedder, q, { limit: 10, lexicalOnly })).find((r) => r.id === target);
-        if (row?.rank.favorite === qs.cfg.favoriteWeight) gained++;
-        qs.memory.setFavorite(target, false);
+    for (const [form, list] of Object.entries(forms)) {
+      for (const lexicalOnly of [true, false]) {
+        const p = lexicalOnly ? 'lexical' : 'deep';
+        const plain = await intrusions(list, lexicalOnly);
+        for (const id of unrelated) { qs.memory.setFavorite(id, true); qs.memory.recordFeedback(id, true); }
+        const starred = await intrusions(list, lexicalOnly);
+        for (const id of unrelated) qs.db.prepare('UPDATE entries SET favorite = 0, favorite_helpful = 0, helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(id);
+        // A starred target that holds the query's words keeps its gain (the direct form).
+        let gained = null;
+        if (form === 'direct') {
+          gained = 0;
+          for (const { q, target } of list) {
+            qs.memory.setFavorite(target, true);
+            const row = (await hybridSearch(qs.db, qs.memory, qs.embedder, q, { limit: 10, lexicalOnly })).find((r) => r.id === target);
+            if (row?.rank.favorite === qs.cfg.favoriteWeight) gained++;
+            qs.memory.setFavorite(target, false);
+          }
+        }
+        const anyHit = (await hybridSearch(qs.db, qs.memory, qs.embedder, list[0].q, { limit: 400, lexicalOnly: true })).filter((r) => r.rank.fts || r.rank.trigram).length;
+        res7[`${form}/${p}`] = { unrelatedInTop3Unstarred: plain, unrelatedInTop3Starred: starred, ...(gained !== null ? { targetsBoosted: gained } : {}), of: list.length, lexicalHitsOfOneQuestion: anyHit };
+        say(`${form === 'direct' && lexicalOnly ? '\n7.' : '  '} question-form (${form}, ${p}): 5 unrelated captures in a top 3 — unstarred ${plain}/15, starred (+ helpful) ${starred}/15${gained !== null ? `; a starred target keeps its boost ${gained}/15` : ''}${lexicalOnly ? ` (one question is a lexical hit for ${anyHit} of ${SUBJ.length * 3 + 5} entries)` : ''}`);
       }
-      const anyHit = (await hybridSearch(qs.db, qs.memory, qs.embedder, questions[0].q, { limit: 400, lexicalOnly: true })).filter((r) => r.rank.fts || r.rank.trigram).length;
-      res7[p] = { unrelatedInTop3Unstarred: plain, unrelatedInTop3Starred: starred, targetsBoosted: gained, of: questions.length, lexicalHitsOfOneQuestion: anyHit };
-      say(`${lexicalOnly ? '\n7.' : '  '} question-form queries, ${p}: 5 unrelated captures in a top 3 — unstarred ${plain}/15, starred (+ helpful) ${starred}/15; a starred target keeps its boost ${gained}/15${lexicalOnly ? ` (one question is a lexical hit for ${anyHit} of ${SUBJ.length * 3 + 5} entries)` : ''}`);
     }
     numbers.questionForm = res7;
-    ok(['lexical', 'deep'].every((p) => res7[p].unrelatedInTop3Starred <= res7[p].unrelatedInTop3Unstarred && res7[p].targetsBoosted === questions.length),
-      'question form: starring unrelated captures adds no intrusion into a top 3, and a starred target keeps its boost');
+    ok(['direct/lexical', 'synonym/lexical', 'direct/deep'].every((k2) => res7[k2].unrelatedInTop3Starred <= res7[k2].unrelatedInTop3Unstarred) && res7['direct/lexical'].targetsBoosted === 15 && res7['direct/deep'].targetsBoosted === 15,
+      'question form: starring unrelated captures adds no intrusion into a top 3 on the lexical side (direct and synonym questions), and a starred target holding the words keeps its boost');
   } finally { qs.close(); }
 
   // --- 8. Cost (round 2): 600 favorites among 800 entries, one 60-word query, the lexical pass (median of 7 runs).
