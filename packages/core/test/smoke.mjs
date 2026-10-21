@@ -2976,6 +2976,14 @@ try {
       const iE1 = await cap60('fav60e', tE60);
       const iE2 = await cap60('fav60f', tE60, { favorite: true });
       ok(iE2.reason === 'linked-duplicate' && iE2.entry === iE1.entry.id && iE2.favorite?.id === iE1.entry.id && iE2.favorite.changed === true && row60(iE1.entry.id).favorite === 1, 'linked duplicate with --favorite → the live holder becomes the favorite');
+      // ingest --sections --favorite: the digest is the favorite; its per-citation section entries are not.
+      const dg60 = path.join(dir60, 'digest60.md');
+      const body60 = (w) => `${w} volunteers measured the tide gauge along the estuary every morning. ` + 'They compared each reading with the harbour records kept since the old lighthouse was built on the headland, and logged the difference. '.repeat(2);
+      fs.writeFileSync(dg60, ['FAVSIXTY weekly digest.', '', '### Tide gauges', '', 'https://arxiv.org/abs/2610.06001', '', body60('Alpha'), '', '### Harbour records', '', 'https://arxiv.org/abs/2610.06002', '', body60('Bravo'), ''].join('\n'));
+      const sx60 = await o60.ingestSections({ path: dg60, favorite: true });
+      const sxSec60 = (sx60.sections || []).filter((s) => s.entry);
+      ok(sx60.entry?.id && sx60.favorite?.favorite === true && row60(sx60.entry.id).favorite === 1 && sxSec60.length === 2 && sxSec60.every((s) => row60(s.entry).favorite === 0),
+        'ingest --sections --favorite → the digest entry is the favorite; its two section entries are not');
       let badFav60 = null;
       try { await o60.ingest({ path: path.join(dir60, 'absent.md'), favorite: 'yes' }); } catch (e) { badFav60 = e.message; }
       ok(/favorite must be true or false/.test(badFav60 || ''), 'ingest refuses a non-boolean favorite before reading anything');

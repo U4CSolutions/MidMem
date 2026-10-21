@@ -132,14 +132,17 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    midmem ingest <archive>/web/<id>/article.md --type web-article --authority web \
      --scope shared --project library \
      --source-uri <original url> --canonical-uri <canonical url> --library <libraryId> \
-     --doc-id <docId> --capture-method url_fetch --captured-at <ISO> [--site --author --published-at --language]
+     --doc-id <docId> --capture-method url_fetch --captured-at <ISO> [--site --author --published-at --language] \
+     [--favorite]
    ```
    The values land in `provenance.source` (and on the sources row) and come back on every recall
    row. `--type` may be a capture-pack type (`web-knowledge` pack: `web-article`, `news`,
    `research-paper`, `technical-documentation`, `tutorial`, …), which sets the entry's type, memory
    function and lease; any other type stores a plain `ingest` entry in the memory tier.
    The capture system may set `--type` to any web-knowledge pack entryType it determines
-   deterministically on-box.
+   deterministically on-box. `--favorite` (added 2026-10-21) is sent for a source the operator has
+   starred; it is a bare switch (it never takes a value, so any position in the argv works) with the
+   effects in item 6(b).
 4. **Text without a file:** `midmem ingest-content --source-uri <url> --stdin` (MCP `ingest_content`)
    materializes the text under `MIDMEM_CONTENT_INGEST_DIR` at a path keyed by the source identity and
    runs the same governed ingest — the same source always supersedes itself.
@@ -153,7 +156,48 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    feedback does. Promotion into `wisdom` still happens only in `maintain`, under the earned rule
    (`retrieval_count ≥ 5`, `trust_score ≥ 0.7`, `helpful_count ≥ 2`, write-time grounding ≥ the promotion
    floor), so feedback alone never promotes: agents must also recall the entry. The caller rate-limits votes
-   (one per entry per cooldown) and never sends a vote the operator did not cast. **(c) operator-initiated
+   (one per entry per cooldown) and never sends a vote the operator did not cast.
+
+   **Favorites (added 2026-10-21, schema 6)** are part of (b): `midmem feedback <entryId> --favorite` and
+   `midmem feedback <entryId> --unfavorite`, sent only when the operator stars or unstars one of its entries.
+   A favorite counts as **one helpful vote**: the first `--favorite` on an ACTIVE entry sets `favorite`, adds 1
+   to `helpful_count` and the helpful trust delta (`thresholds.feedback.helpfulTrustDelta`, 0.05) to
+   `trust_score`, clamped to [0, 1], and records that vote (`favorite_helpful`). `--unfavorite` clears the
+   favorite and takes back **exactly that vote** — `helpful_count` − 1 (never below 0), `trust_score` − the
+   delta (clamped; a favorite set at trust ≥ 0.95 therefore comes back up to 0.05 lower) — while explicit
+   helpful votes stay. Both are **idempotent** (a repeat answers `changed: false` and moves nothing) and
+   metadata-only (`updated_at`, the lease and the other counters are untouched). Each prints ONE JSON
+   document, `{ success, id, favorite, helpful_count, trust_score, changed }` (`favorite` and `changed` are
+   booleans, `trust_score` has 3 decimals); an unknown or non-active entry is refused exactly like feedback
+   (`{ success: false, reason: "not-found" | "not-active", id, status? }`, exit 0, nothing moves). Two votes
+   in one call (`--favorite` with `--unfavorite` or `--unhelpful`, or `--unfavorite` with `--unhelpful`) is a
+   usage error: exit 1 and `ERROR:` on stderr. The switches never take a value, so they may sit anywhere in
+   the argv. `feedback <entryId> [--unhelpful]` and its output `{ success, id, trust_score, helpful }` are
+   unchanged.
+   - **`ingest … --favorite`** (item 3; also `ingest-content`, and with `--sections` the digest itself):
+     the entry the ingest stands for — the new entry, the live holder of a linked duplicate, or the active
+     entry of an unchanged source — becomes (or stays) a favorite under the same one-vote rule, and the result
+     carries `favorite: { success, id, favorite, helpful_count, trust_score, changed }`; an unchanged source
+     with no active entry answers `favorite: { success: false, reason: "no-active-entry" }`. An ingest never
+     unfavorites (`ingest --unfavorite` is a usage error; leaving `--favorite` out changes nothing).
+   - **Carry-over:** when an ingest supersedes (archives) an entry of the same source that was a favorite,
+     the new entry inherits the favorite and its one helpful vote — applied **once**, also when `--favorite`
+     is passed (the result's `favorite` block then lists `carriedFrom: [ids]`). Explicit votes stay with the
+     archived version, whose counters and favorite are history and are not rewritten.
+   - **Ranking:** after fusion, a favorite gets `favoriteWeight` (default 0.004, `MIDMEM_FAVORITE_WEIGHT`)
+     and a favorite that ALSO has an explicit helpful vote (`helpful_count − favorite_helpful ≥ 1`)
+     `favoriteHelpfulWeight` on top (default 0.002, `MIDMEM_FAVORITE_HELPFUL_WEIGHT`), so among equally
+     relevant entries favorite + helpful > favorite > neither. The boosts apply only to entries a lane
+     already returned (a favorite is never added to a result), and a relevance guard never lets being a
+     favorite (the boosts and its own vote) carry an entry past one that holds more of the query's words.
+     Query rows carry `favorite`; `rank.favorite` / `rank.favoriteHelpful` show the boosts and
+     `rank.favoriteGuard` marks a favorite the guard held back. An explicit helpful vote moves a favorite's
+     trust exactly as it moves any entry's.
+   - **Capability check:** every `entries` row of a favorites-capable MidMem carries `favorite` (item 7).
+     Never send the switches to an older MidMem: its CLI ignores unknown switches, so it would count
+     `--favorite` AND `--unfavorite` as plain helpful votes.
+
+   **(c) operator-initiated
    forget**: `midmem forget-source --library <id> --doc-id <docId>`, sent only when the operator permanently
    deletes that source in the capture system. It soft-forgets every entry from the source (#41 cascade) and
    unlinks it from other entries' `alsoSources`, and the calling system logs each forget. **(d)
@@ -202,17 +246,24 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    None of these exceptions changes an entry's authority (`web`), tier, scope or project.
 7. **Reads.** Any consumer: `midmem query "<q>" --projects library` (MCP `query` with
    `projects: ["library"]`), or unfiltered when the caller has no project set. Rows carry
-   `authority`, `provenance.source`, `fidelity`, `status` and the instruction-likeness flag (#40).
+   `authority`, `provenance.source`, `fidelity`, `status`, the instruction-likeness flag (#40) and
+   `favorite` (2026-10-21).
    `midmem entries --library <id> --doc-ids a,b [--claims]` (MCP `entry_status`) returns each
    source's lifecycle view: tier, lease, counters, concepts, claims and promotion progress.
    Reading it is not a recall; it never renews a lease or bumps `retrieval_count`. Each entry carries
    `extraction: { mode, model, at }` — `lmstudio` (model-extracted) or `fallback` (the deterministic
    offline heuristics: lead sentences and frequent tokens) — or `null` for an entry ingested before
    2026-10-07, which recorded nothing; a capture system uses it to tell model concepts from fallback ones.
+   Since schema 6 (2026-10-21) each entry also carries `favorite` and `favoriteHelpful` (booleans: the
+   operator's favorite, and whether its one vote is inside `helpfulCount`); `midmem recall <id>` returns
+   the stored columns `favorite` / `favorite_helpful` (0 or 1) and `midmem brief` counts the active
+   favorites.
 8. **Call shape.** Shell out to the `midmem` CLI through a durable queue with a frozen argv allowlist
    and a provider switch (mock in every test: zero `execFile`); or import `Orchestrator` in-process
    for a Node caller on the same host. Both are governed identically.
-   The allowlist names the verbs `ingest`, `feedback`, `forget-source`, `entries` and `reextract`.
+   The allowlist names the verbs `ingest`, `feedback`, `forget-source`, `entries` and `reextract`;
+   favorites (2026-10-21) add only the switches `--favorite` (feedback, ingest) and `--unfavorite`
+   (feedback).
 
 **Coming for this mode:** metadata filters on query (#48) and MidMem's Qdrant spin-up with a vector
 backfill (#50, #51). None changes the contract above. The Qdrant adapter's code half has landed: search
@@ -249,6 +300,7 @@ it as its own lane, never storing it; register one with
 | `MIDMEM_OCCUPANCY` / `…_CAP_STACK` `…_CAP_DOC` `…_CAP_WEB` `…_OPERATOR_SLOTS` `…_MIN_LINEAGES` | on / 0.6 / 0.6 / 0.25 / 2 / 2 | bounded-occupancy selection on budgeted reads (#39): per-authority caps that bind only against a waiting competitor, protected operator slots, lineage floor |
 | `MIDMEM_INSTRUCTION_FLAG` / `MIDMEM_INSTRUCTION_PENALTY` | on / 0.01 | instruction-likeness flag on results (#40): computed over the full source at ingest (kept as `provenance.instructionLike`) and on library-lane rows' full evidence text; flagged rows demoted + labelled, never dropped; `0` turns all of it off |
 | `MIDMEM_FIDELITY` / `MIDMEM_VERBATIM_MAX_CHARS` | on / 4000 | fidelity class on results (#42); verbatim rows (operator / curated tier) uncut up to the ceiling |
+| `MIDMEM_FAVORITE_WEIGHT` / `MIDMEM_FAVORITE_HELPFUL_WEIGHT` | 0.004 / 0.002 | post-fusion boost of an operator's favorite, and of a favorite that also has an explicit helpful vote (§6 6b, 2026-10-21); candidates only, never past an entry holding more of the query's words; `0` turns one off (the favorite's helpful vote stays) |
 | `MIDMEM_WORKING_TTL_MS` | 86400000 (24 h) | lease for `working`-function entries (#44); they never promote and are excluded from default reads |
 | `MIDMEM_FORGET_CASCADE` | on | dependency-aware forget (#41): archive sourced claims, flag sole-support concepts |
 | `MIDMEM_WORK_MEMORY` | on | enable work-memory event recording |

@@ -126,7 +126,8 @@ export class TieredMemory {
   setFavorite(id, on = true, { activeOnly = false } = {}) {
     const live = activeOnly ? " AND status = 'active'" : '';
     const [row] = on
-      ? this.db.prepare(`UPDATE entries SET favorite = 1, favorite_helpful = 1, helpful_count = helpful_count + (1 - favorite_helpful),
+      ? this.db.prepare(`UPDATE entries SET favorite = 1, favorite_helpful = 1,
+          helpful_count = CASE WHEN favorite_helpful = 1 THEN helpful_count ELSE helpful_count + 1 END,
           trust_score = CASE WHEN favorite_helpful = 1 THEN trust_score ELSE MIN(1.0, MAX(0.0, trust_score + ?)) END
           WHERE id = ? AND favorite = 0${live} RETURNING favorite, helpful_count, trust_score`).all(HELPFUL_TRUST_DELTA, id)
       : this.db.prepare(`UPDATE entries SET favorite = 0, favorite_helpful = 0,
@@ -136,7 +137,7 @@ export class TieredMemory {
     const r = row ?? this.db.prepare('SELECT favorite, helpful_count, trust_score, status FROM entries WHERE id = ?').get(id);
     if (!r) return { success: false, reason: 'not-found', id };
     if (!row && activeOnly && r.status !== 'active') return { success: false, reason: 'not-active', id, status: r.status };
-    return { success: true, id, favorite: r.favorite === 1, helpful_count: r.helpful_count, trust_score: Number(r.trust_score.toFixed(3)), changed: !!row };
+    return { success: true, id, favorite: r.favorite === 1, helpful_count: r.helpful_count, trust_score: Number((r.trust_score ?? 0.5).toFixed(3)), changed: !!row };
   }
 
   /** Vector store health: canonical dim (dim-guard) + backend-specific counts.

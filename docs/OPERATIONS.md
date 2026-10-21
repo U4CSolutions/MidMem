@@ -241,6 +241,54 @@ its credentials (if any) out of `midmem.env` while a capture system can read tha
 the contract. Schema migrations are idempotent and run on first open. Long-lived MCP consumers
 must reconnect after an upgrade (they hold pre-upgrade code).
 
+### Schema 6: favorites (2026-10-21)
+
+The first process that opens a schema-5 store with this code adds two columns
+([INTEGRATION-MODES.md §6](INTEGRATION-MODES.md) item 6(b) has what they mean) and records the version:
+
+```sql
+BEGIN IMMEDIATE;
+ALTER TABLE entries ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE entries ADD COLUMN favorite_helpful INTEGER NOT NULL DEFAULT 0;
+COMMIT;
+INSERT INTO meta(key, value) VALUES ('schema_version', '6')
+  ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+```
+
+- **Safe on a live store.** A constant default makes each `ADD COLUMN` a schema-only change: no row is
+  rewritten, so the time does not grow with the store. Measured on a production-shaped store built by the
+  schema-5 release (200 entries: active, archived, wisdom and deleted rows, 950 claims, 1024-dimension
+  vectors, 7.6 MB): 13 ms; on 20,200 entries (104 MB): 4.6 ms; the first CLI call after the upgrade takes
+  about 11 ms longer than the next. Both columns land in one transaction taken with `BEGIN IMMEDIATE`:
+  a process that opens the store while a capture system is writing waits (busy_timeout, 5 s) instead of
+  failing, and two processes opening it at once add the columns once. Every existing row reads
+  `favorite = 0`, `favorite_helpful = 0`, and nothing else changes: on the rehearsal copy every other column
+  of every row, both FTS indexes (`integrity-check`) and the query results were identical before and after.
+- **Rehearse on a copy first**, as for any release: take a `.backup` (or a stopped copy) of `state.db`, run
+  the new release once against the copy (`MIDMEM_DB_PATH=<copy> MIDMEM_HOME=<new release> midmem entries
+  --library <id> --doc-ids <one id>`), then check `PRAGMA integrity_check` (ok), `schema_version` (6) and
+  one `midmem feedback <id> --favorite` / `--unfavorite` round trip on the copy.
+- **Order: MidMem first, then the capture system's favorites.** A capture system tells a favorites-capable
+  MidMem by the `favorite` key on its `entries` rows.
+- **Rollback** of the release needs no database change: the schema-5 release runs on a schema-6 store (it
+  ignores the two columns and writes `schema_version` 5 again when it opens the store; the favorites stay
+  stored but boost nothing until a schema-6 release reopens the store, which writes 6 again). But the older
+  CLI ignores switches it does not know: it counts `feedback <id> --favorite` AND `--unfavorite` as plain
+  helpful votes and drops `ingest --favorite`, so **stop the capture system's favorite sends before rolling
+  MidMem back**.
+- **The revision export** keeps both columns, so the first export after the upgrade differs on every entry
+  line (once). Long-lived MCP servers show no favorite fields until they reconnect.
+
+**At run time:** `midmem brief` counts the active `favorites`; `entries`, `recall` and `query` show the flags
+(and `rank.favorite` / `rank.favoriteHelpful` / `rank.favoriteGuard` on query rows); every answered favorite
+call leaves a `favorite` log row (`changed`, `via`: feedback, ingest or carry-over). The boosts are
+`MIDMEM_FAVORITE_WEIGHT` (0.004) and `MIDMEM_FAVORITE_HELPFUL_WEIGHT` (0.002) in `midmem.env`; `0` turns
+one off (the favorite's helpful vote stays — it is feedback). After changing either, or anything in fusion,
+re-run `node packages/core/test/favorite-ranking.mjs`: it measures the fused scores on a seeded corpus and
+checks that favorite + helpful > favorite > neither at equal relevance and that no favorite passes a
+clearly better match. A favorite does not pin an entry: lease expiry and distrust archival apply as to any
+entry, and a source whose entry has expired stays `unchanged` on re-ingest.
+
 ## When things look wrong
 
 - **Recall misses something you just stored** → check vector health in `brief` (fallback vs

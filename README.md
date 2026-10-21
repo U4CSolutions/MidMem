@@ -102,7 +102,7 @@ an LLM Wiki middleware; **recommended** layers add capability and are safe to de
 | **Projection** | `src/project.mjs` | Recommended | Render `state.db` → Obsidian markdown. | `OBSIDIAN_VAULT_PATH`, `WIKI_PATH` |
 | **Scope** | (in store/retrieval/governance) | Required *for dual*, else optional | Multi-agent private + shared partitioning. | `MIDMEM_AGENT_SCOPE` |
 | **Bridge** | `src/bridge.mjs` (`midmem bridge`) | Recommended | Pull each stack's flat native memory into the store. | `bridgeSources` |
-| **Trust / feedback** | (memory + retrieval) | Recommended | `trust_score` + usage/`feedback` loop; boosts ranking. | `trustWeight`, `feedback` tool |
+| **Trust / feedback** | (memory + retrieval) | Recommended | `trust_score` + usage/`feedback` loop; boosts ranking. Operator favorites (`feedback <id> --favorite`, schema 6) count as one helpful vote that `--unfavorite` takes back, survive a re-capture, and add a small ranking boost (more with a helpful vote). | `trustWeight`, `favoriteWeight` / `favoriteHelpfulWeight`, `feedback` tool |
 | **Hand-off gate** | `src/handoff.mjs` (`handoff_brief`) | Recommended | Push a scoped memory brief into an agent hand-off (firstware). | profiles `local` / `frontier` |
 
 \* The embedding layer is required for semantic recall, but the system **runs without a live model**
