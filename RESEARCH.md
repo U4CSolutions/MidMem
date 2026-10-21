@@ -1,4 +1,4 @@
-<!-- research-tracker: evaluated-through=2026-10-06T00:18:24.870Z -->
+<!-- research-tracker: evaluated-through=2026-10-12T11:19:56.316Z -->
 # RESEARCH — midmem-kb-store
 
 Research and architecture decisions behind **midmem-kb-store**, grounded in published work we
@@ -25,6 +25,100 @@ what the marker at the top has not yet evaluated.
 > (1–15, shipped) and [`docs/ROADMAP-2026-09.md`](docs/ROADMAP-2026-09.md) (16–42).
 
 ---
+
+## 2026-10-12 — Week of 2026-10-05 to 10-11: scope the commit, version the state, admit by policy, measure whether persistence changed anything
+
+One weekly report (`ingest-staging/llmwiki-weekly-2026-10-12/report.md`, ingested 2026-10-12 with
+`--sections`: parent grounding 0.774, 12 of 12 cited sections as their own entries at 0.40–0.79, 13
+claims, 0 quarantined). Twenty papers cited; every arXiv id was fetched from the arXiv API and the
+report's titles and submission dates match, with one error: AMBER [2610.07118](https://arxiv.org/abs/2610.07118)
+is *Training Long-Horizon Web Agents through Append-Only Memory*, not an "Append-Only Memory Bank for
+Evidence Retention". One extracted claim drifted in unit (DAEDALUS's "15.9 success-rate points" stored
+as "15.9 % higher success rates", grounding 0.40) and was superseded from the abstract
+(`claim-mv55x64x-d3d967329a3a`); that supersede flagged 264 stale-path nodes through a substring
+matcher — both defects are the 2026-10-12 build (roadmap #56). LLM-Wiki
+[2605.25480](https://arxiv.org/abs/2605.25480) carries forward unchanged. Verdicts: 1 ADOPT NOW ·
+7 VALIDATION · 5 BACKLOG · 6 NOT ADOPTING.
+
+### ADOPT NOW — a claim commits with its discourse ownership; a possibility never returns as a fact
+- **Paper:** *Whose Memory Is It? Scope-Aware Commit Rules for Long-Term LLM Memory* (CASK: Causally
+  Anchored Scoping Keys) — arXiv [2610.09008](https://arxiv.org/abs/2610.09008) (submitted 2026-10-06).
+- **Finding:** during deliberation an agent considers a plan, simulates a tool result, reports another
+  speaker's belief, then rejects all of them; a memory that keeps only the resulting sentences lets those
+  once-useful possibilities return later as facts. The missing context is *discourse ownership* — the
+  world, branch or speaker that licenses a proposition. Models carry a causally active ownership signal
+  that conventional memory interfaces discard when they turn reasoning into records; a commit rule that
+  preserves it improves admission and reduces contamination in controlled evaluations (the abstract
+  gives no figure; the digest says "improved admission and reduced contamination").
+- **Decision:** MidMem's claims carry authority, grounding and a validity window but no stance: a
+  hypothetical ("we could migrate tomorrow"), a simulated outcome ("the tool would return success"), a
+  quoted belief ("the vendor says the fix shipped") and an observation all land as `type: fact`, and
+  `current()` returns whichever is freshest. Adopted as the first half of **#33** (deterministic
+  write-commitment policy), `midmem-dev` 2026-10-12: a deterministic **stance** on every claim at write
+  time — `observed` (default) · `provisional` (modal/conditional/proposal markers) · `quoted`
+  (explicit third-party attribution) · `rejected` (explicit rejection markers) — recorded in
+  `metadata.stance` with the markers that fired; `current()` and the write-path contradiction relation
+  consider `observed` claims only (a provisional candidate never defers an observed one, and is never a
+  neighbour), `claims --all --stances` reads everything, lint counts stances, and a protected bench
+  slice seeds hypothetical and simulated statements and asserts none becomes current. Not adopted: the
+  paper's learned ownership probe — the stance comes from markers in the text, never from a model's
+  judgment, and research-paper claims ("X reports Y") stay `observed` (a paper's own reported result is
+  the source speaking, not a quotation). Epistemic stance is kept separate from privacy scope (`scope`)
+  and authority (`provenance.authority`), as the digest insists.
+- **Validation:** smoke assertions for each stance and for `current()`/`relate()` ignoring non-observed
+  claims; the bench slice `stance-admission` (protected); the acceptance test from the digest's P0 row —
+  zero simulated/proposed statements become verified facts in a seeded set.
+
+### VALIDATION — confirmed by this week, no change
+- **What to Admit and How to Present** — arXiv [2610.11188](https://arxiv.org/abs/2610.11188).
+  Admission (what enters working context) and presentation (how it is phrased) are separate decisions;
+  two deterministic admission policies cut pooled judge-assessed failures by 6.7 and 8.8 points against
+  verbatim injection (p = 2.7e-7, 4.1e-12) while raising personalization failures. MidMem already splits
+  them: admission = authority eligibility, scope lenses, the instruction-likeness flag (#40) and bounded
+  occupancy (#39); presentation = fidelity class (#42) and the "evidence, not instruction" framing. The
+  paper's missing piece on our side is a receipt for *why* a row was admitted or declined — amended into
+  #36 (backlog table).
+- **Persistent Memory in Multi-Agent LLM Inference: What It Costs, What It Buys, and When You Can Tell** —
+  arXiv [2610.07782](https://arxiv.org/abs/2610.07782). Decomposition cuts the peak KV working set
+  (14.3 MiB vs 35.5 / 35.3 MiB); a persistent reasoning-trace tier adds +0.368 MiB and **no detectable
+  accuracy change (+0.015, 95 % CI [−0.011, +0.046])** across eight dataset pairs at n = 100 per arm —
+  structurally, because single-question benchmarks reset memory and score items independently.
+  Validates the bench's design (#35): every protected slice is cross-task (`correction-applied`,
+  `dead-end-avoided`, `current-claim` depend on an earlier task's experience) and every metric reports a
+  no-memory baseline beside the treatment. The rule it adds is recorded in the bench's doc comment: a
+  slice that resets memory between items cannot show a persistence benefit and must not be read as one.
+- **MINDSET** — arXiv [2610.08586](https://arxiv.org/abs/2610.08586). Immutable episodes, versioned
+  schemas, `reinforce / supersede / split / create` transitions scored to penalise contradiction,
+  historical damage, fragmentation and inconsistency, with hysteresis so one anomalous interaction cannot
+  overwrite stable knowledge; leads LoCoMo answer F1 on 850 questions. Validates claim supersession with
+  history (#43), validity windows (#14), corroboration counters (`supportCount`) and the deferred ledger
+  as the hysteresis — an isolated contradiction parks, it does not rewrite. Not adopted: energy weights.
+- **DREAM** — arXiv [2610.13267](https://arxiv.org/abs/2610.13267). Selective functional forgetting
+  of poisoned memories (> 95 % backdoor-success reduction, fewer tokens than the compared defence).
+  Validates suppression-by-flag over deletion (#40's label, `archive` / `forget` by id with cascade,
+  historical reads) and the digest's three-way distinction (suppress · abstract · erase). Not adopted:
+  perturbation-induced reactivation — a model in the repair path.
+- **MemoType** — arXiv [2610.11573](https://arxiv.org/abs/2610.11573). TriMEM plus a learned
+  memory-type router, up to 16.18 % Recall@1. Validates type-routed retrieval as a design (the function
+  axis, pack-typed entries, the deep-stage-only library lane); the learned router stays NOT ADOPTING.
+- **DAEDALUS** — arXiv [2610.08048](https://arxiv.org/abs/2610.08048). Heuristics derived from solver
+  failures are kept only after repeated success: up to 15.9 success-rate points and 2.2× pass^5 on
+  AppWorld, τ²-bench, AutomationBench. Validates the #27 amendment (verify-then-freeze procedures).
+  Not adopted: self-generated practice — MidMem records, it does not act.
+- **AMBER** — arXiv [2610.07118](https://arxiv.org/abs/2610.07118). Append-only memory beats a
+  learned overwrite memory (+4.09 WebArena-Lite success) because an overwrite must carry every fact
+  through every rewrite. Validates supersede-with-history and hash-keyed dedup (#43, #46).
+
+### BACKLOG and NOT ADOPTING from this week → the tables at the end
+QGMem [2610.11920](https://arxiv.org/abs/2610.11920) (query-local graph; amends **#25**), T-Mem
+[2610.12874](https://arxiv.org/abs/2610.12874) (temporal neighbourhood and decision views; amends
+**#24**), Hippocam [2610.12124](https://arxiv.org/abs/2610.12124) (intent-structured consolidation;
+amends **#53**), ExperienceIndex [2610.10091](https://arxiv.org/abs/2610.10091) (artifact-pair
+experience; **#55**), the admission receipt (amends **#36**). Not adopting: REMORY
+[2610.11287](https://arxiv.org/abs/2610.11287), the 50M-token KV store
+[2610.10845](https://arxiv.org/abs/2610.10845), MemoWM [2610.10778](https://arxiv.org/abs/2610.10778),
+MemPilot [2610.06830](https://arxiv.org/abs/2610.06830), DeltaReplay
+[2610.11707](https://arxiv.org/abs/2610.11707), Memento 3 [2610.11794](https://arxiv.org/abs/2610.11794).
 
 ## 2026-10-05 — Weeks of 2026-09-21, 2026-09-28 and 2026-10-05: write cheaply and keep the evidence; evolve policy only behind gates; route across memories instead of unifying them
 
@@ -717,6 +811,11 @@ Evidence: numbers (benchmark / controlled result) or prose (the source gives no 
 
 | Paper | Finding that matters | Candidate | Roadmap # | Effort | Evidence | Blocker / note |
 |---|---|---|---|---|---|---|
+| QGMem [2610.11920](https://arxiv.org/abs/2610.11920) | event-indexed atomic memories; a dense graph is built only around the units retrieval and reranking selected for THIS query, exposing dependencies and contradictions at answer time; gains on six benchmarks at compact context | #25's expansion assembles a query-local graph (anchors + ≤ 2 hops over typed edges) behind the sufficiency gate, cached by index version and invalidated on a state change; never a global graph in every prompt | **#25** (amended) | M | numbers (prose for us) | none |
+| T-Mem [2610.12874](https://arxiv.org/abs/2610.12874) | multi-party decisions: evidence clusters in short time spans; transitions must be reconstructed, not just time-stamped; consistent gains on two multi-party benchmarks | decision claims retrieve their temporal neighbourhood (`supersedes`, `corrected_by`, validity windows) and the projection renders **Current Decision / Decision History / Evidence Timeline** views | **#24** (amended) | M | prose | none |
+| Hippocam [2610.12124](https://arxiv.org/abs/2610.12124) | nested intents: active context centred on the current intent; completed intents consolidate into outcomes and state, older prefixes abstract recursively, originals stay reachable; mechanism only, no headline figure | #53's episode boundary is an intent boundary: a closed task label consolidates its working entries into outcome / state / open obligations with drill-down links to the originals (#43 keeps them readable) | **#53** (amended) | M | prose | depends on #18 |
+| ExperienceIndex [2610.10091](https://arxiv.org/abs/2610.10091) | single-artifact and artifact-PAIR experience (which documents helped a task, which pairs were useful together) lifts answer quality up to 11 points and cuts online cost up to 50.5 % | `co_used` edges between sources/entries that one task's `source_used` events touched together (deterministic from work events), surfaced as "used together" links in the projection and as a small retrieval boost; Chronos [2610.11578](https://arxiv.org/abs/2610.11578) (PR experience cards) is the code-side driver through the library lane | **#55** | S–M | numbers | none |
+| Admission vs Presentation [2610.11188](https://arxiv.org/abs/2610.11188) (receipt half) | admission must be auditable: why a relevant memory was or was not admitted, and what useful memory was omitted | #36's retrieval trace records per row the admission verdict (authority, scope, instruction-like, occupancy) and the declined rows with reasons, so omission is measurable | **#36** (amended) | S | numbers | none |
 | DyadMem [2610.03020](https://arxiv.org/abs/2610.03020) | memory about *how this agent works with this user* is a category of its own (URAM); Gold-Memory QA strong, Full-Pipeline QA drops sharply across 16 open-weight + 4 proprietary models; low capture recall and unsafe deletion even in frontier LLMs; 3,065 episodes / 50,961 sessions / 61,210 QA | a `relational` value on the function axis (today: working · episodic · semantic · procedural · prospective) with its own lease and inject framing; a delete / suppress bench slice (forget must not leave a derived claim live — #41's cascade, measured) | **#52** | M | numbers | none; the capture side already records per-user events, the axis value and the slice are core work |
 | LAM [2610.02488](https://arxiv.org/abs/2610.02488) | harness resources are the cost: context–memory traffic, access pattern, stored state vs recomputation, verification, checkpoint interval (a resource theory with tight bounds; experiments on chained MATH tasks) | the op log records ingest duration + extraction tokens and per-query retrieval cost; `brief` reports recomputation avoided (dedup skips, linked duplicates) beside the fallback share | **#23** (ledger half, amended) | S | theory + controlled experiments; prose for our metrics | none |
 | LycheeMemory V2 [2608.12990](https://arxiv.org/abs/2608.12990) | consolidating semantic segments instead of every turn keeps 89.22% LoCoMo / 92.20% LongMemEval-S while cutting construction tokens 86.0% / 75.9% vs A-Mem, with no extra query-time tokens | `consolidateWork` batches working entries at an episode boundary (session end, project transition) instead of per event; boundary detection deterministic (event kinds + time gap), no LLM | **#53** | M | numbers | depends on #18's episode boundary |
@@ -784,3 +883,15 @@ Evidence: numbers (benchmark / controlled result) or prose (the source gives no 
 - **A "Memory Harness Registry" as a new subsystem** — the 2026-09-28 digest's recommendation: `MIDMEM_*`
   knobs, the pack version ledger (#47) and the bench verdict (#35) already version policy apart from
   content and gate its promotion; a registry object would duplicate them.
+- **Learned soft memory tokens / KV-state persistence as memory** — REMORY [2610.11287](https://arxiv.org/abs/2610.11287),
+  the 50M-token encrypted KV store [2610.10845](https://arxiv.org/abs/2610.10845): model-coupled execution caches,
+  regenerated on any model, tokenizer or runtime change; MidMem stores portable text with provenance (#23's
+  portability rule). A consumer may cache; the store never depends on it.
+- **World-model compression of evidence** — MemoWM [2610.10778](https://arxiv.org/abs/2610.10778): reconstructing
+  omitted content from a predictive prior is lossy where evidence must be exact; the evidence stays in the
+  source file and the library, the store keeps the index (MemFit's lesson, 2026-10-05).
+- **RL-trained on-demand curation** — MemPilot [2610.06830](https://arxiv.org/abs/2610.06830): a learned policy
+  in the curation path; curation here is deterministic and operator-governed.
+- **Trajectory replay and world-model rulebooks** — DeltaReplay [2610.11707](https://arxiv.org/abs/2610.11707),
+  Memento 3 [2610.11794](https://arxiv.org/abs/2610.11794): the acting agent's concern; MidMem records
+  procedures and outcomes (#27, #22) and does not execute or predict.

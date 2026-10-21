@@ -33,6 +33,7 @@ export function loadConfig(overrides = {}) {
   // Env reads honor the new MIDMEM_ prefix, falling back to legacy OCMW_ (safe rename).
   const env = (k) => process.env['MIDMEM_' + k] ?? process.env['OCMW_' + k];
   const dbPath = env('DB_PATH') || path.join(REPO, 'state.db');
+  const bridgeExclude = parseBridgeExclude(env('BRIDGE_EXCLUDE')); // comma-separated subfolders EVERY bridge source skips; default none
   const cfg = {
     /** Single SQLite source-of-truth. */
     dbPath,
@@ -58,13 +59,19 @@ export function loadConfig(overrides = {}) {
      *  optional project). Pulls each stack's memory into the shared, tiered, searchable store.
      *  Configurable (roadmap 2026-09 #38): MIDMEM_BRIDGE_SOURCES = `dir|scope|type|project;…`
      *  (type/project optional; a sixth field lists subfolders to skip, comma-separated) REPLACES the default list, so a third harness's memory dir or a
-     *  console's report folders register without a core change. */
-    bridgeSources: parseBridgeSources(env('BRIDGE_SOURCES')) || [
-      { dir: path.join(HOME, '.openclaw', 'workspace', 'memory'), scope: 'openclaw', type: 'session' },
-      { dir: path.join(HOME, '.hermes', 'memories'), scope: 'hermes', type: 'note' },
+     *  console's report folders register without a core change. The two memory dirs skip the stacks'
+     *  self-generated reflection logs (GENERATED_LOG_DIRS). */
+    bridgeSources: withBridgeExclude(parseBridgeSources(env('BRIDGE_SOURCES')) || [
+      { dir: path.join(HOME, '.openclaw', 'workspace', 'memory'), scope: 'openclaw', type: 'session', exclude: [...GENERATED_LOG_DIRS] },
+      { dir: path.join(HOME, '.hermes', 'memories'), scope: 'hermes', type: 'note', exclude: [...GENERATED_LOG_DIRS] },
       ...agentVaultSources(path.join(VAULT, 'OpenClaw'), 'openclaw'),
       ...agentVaultSources(path.join(VAULT, 'Hermes'), 'hermes'),
-    ],
+    ], bridgeExclude),
+    /** Operator-wide bridge excludes: MIDMEM_BRIDGE_EXCLUDE = comma-separated root-relative subfolder
+     *  names (default none), APPENDED to every bridge source's own exclude list above — the defaults
+     *  and MIDMEM_BRIDGE_SOURCES entries alike — so `scratch,drafts` can be skipped everywhere without
+     *  restating (and then maintaining a copy of) the default source list. Echoed here for reports. */
+    bridgeExclude,
     /** Bridge walk recurses into subfolders (skipping dot-dirs + node_modules); a per-source
      *  `recursive:false` opts out. MIDMEM_BRIDGE_RECURSIVE=0 restores the flat walk globally. */
     bridgeRecursive: env('BRIDGE_RECURSIVE') !== '0',
@@ -76,6 +83,11 @@ export function loadConfig(overrides = {}) {
     llmEnabled: env('LLM_ENABLED') !== '0',
     /** Per-call timeout for LLM (ms) — the local model can saturate; keep tight. */
     llmTimeoutMs: Number(env('LLM_TIMEOUT_MS') || 20000),
+    /** Embed retries (2026-10-19): a timeout, a refused connection or a 5xx / 429 is retried this many
+     *  times, waiting embedRetryMs × 2^attempt between tries, before the hash-placeholder fallback (one
+     *  busy moment used to cost a placeholder vector). Other 4xx never retry. 0 = one attempt only. */
+    embedRetries: Number(env('EMBED_RETRIES') ?? 2),
+    embedRetryMs: Number(env('EMBED_RETRY_MS') ?? 250),
     /** Hybrid fusion: RRF constant + per-lane weights (fts token, trigram substring, vector). */
     rrfK: 60,
     fusionWeights: { fts: 1.0, trigram: 0.5, vector: 1.0 },
@@ -160,6 +172,16 @@ export function loadConfig(overrides = {}) {
       /** Bounded history: forced/daily maintain prunes log/audit rows older than this and
        *  vectors orphaned by hard-deleted entries. 0 disables pruning. */
       retentionDays: Number(env('RETENTION_DAYS') || 90),
+      /** Nightly reextract batch (2026-10-19): the forced/daily maintain re-runs model extraction on at
+       *  most this many fallback-extracted entries (`reextract({ limit })`) when the model endpoint
+       *  answers a cheap probe — entries ingested while the box was down are repaired without a hand
+       *  run. MIDMEM_MAINTAIN_REEXTRACT=0 disables. Never on the opportunistic pass. */
+      reextractLimit: Number(env('MAINTAIN_REEXTRACT') ?? 20),
+      /** Nightly re-embed batch (2026-10-19): the same pass first swaps at most this many hash-placeholder
+       *  vectors for real ones (`reembedFallback({ limit })`, self-gating on the embedder). Capture
+       *  children that run with MIDMEM_LLM_ENABLED=0 by contract write placeholders for every event
+       *  until something re-embeds them. MIDMEM_MAINTAIN_REEMBED=0 disables. Never on the opportunistic pass. */
+      reembedLimit: Number(env('MAINTAIN_REEMBED') ?? 200),
     },
     /** Work-memory (Perplexity-Brain-style "memory about work"): record agent task attempts,
      *  sources used, dead ends, corrections, artifacts, decisions as first-class entries + graph
@@ -248,6 +270,10 @@ export function loadConfig(overrides = {}) {
       contradictionMinContainment: Number(env('CLAIM_CONTRADICTION_MIN_CONTAINMENT') ?? 0.6),
       /** Consistency pass (roadmap #13) flags deferred claims older than this. */
       deferAgeDays: Number(env('DEFER_AGE_DAYS') || 14),
+      /** Claim stance at commit (roadmap #33, CASK arXiv 2610.09008): every claim is tagged observed |
+       *  provisional | quoted | rejected by fixed word lists (claims.mjs stanceOf); only observed claims
+       *  defer, neighbour, contradict or read as current. 0 = no tagging, reads as before. */
+      stance: env('CLAIM_STANCE') !== '0',
     },
     workMemory: {
       enabled: env('WORK_MEMORY') !== '0',
@@ -326,6 +352,28 @@ export function loadConfig(overrides = {}) {
  * stays private to that stack by default, because notes can be personal.
  */
 export const DELIVERABLE_DIRS = Object.freeze(['research', 'reports']);
+
+/**
+ * Generated-log subfolders of a stack's memory dir (2026-10-12). A stack's self-generated reflection /
+ * consolidation logs (OpenClaw writes `memory/dreaming/{light,rem}/<date>.md`) are not knowledge: they
+ * restate what the store already holds, with scores. Measured 2026-10-12: the bridge had ingested 27 of
+ * them as doc-authority entries with 46 claims ("The theme 'huddle' appeared in five distinct REM sleep
+ * memories"); forgetting them is undone by the next pass unless the walk skips them. The name is generic
+ * on purpose — the core knows no stack; it is simply excluded on both default memory-dir sources.
+ */
+export const GENERATED_LOG_DIRS = Object.freeze(['dreaming']);
+
+/** MIDMEM_BRIDGE_EXCLUDE → a clean list of root-relative subfolder names ([] when unset). */
+export function parseBridgeExclude(spec) {
+  return String(spec || '').split(',').map((e) => e.trim()).filter(Boolean);
+}
+
+/** Append operator-wide excludes to every source's own list (deduped, own entries first). A source
+ *  that ends up with nothing to skip keeps no `exclude` field, so an unset knob changes nothing. */
+export function withBridgeExclude(sources, extra = []) {
+  if (!extra.length) return sources;
+  return sources.map((s) => ({ ...s, exclude: [...new Set([...(s.exclude || []), ...extra])] }));
+}
 
 /** Bridge sources for one agent vault folder: the folder itself (private scope, deliverable
  *  subfolders excluded) plus each deliverable subfolder as its own `shared` source. */

@@ -92,7 +92,9 @@ export class GraphStore {
     };
   }
 
-  /** Nodes whose label matches a query token (graph-context for retrieval). */
+  /** Nodes whose label matches a query token (graph-context for retrieval). Substring match on any
+   *  ≥ 3-char token — fine for a context sample, too loose for flagging: supersede's stale-path rule
+   *  no longer uses it (2026-10-12; see Orchestrator.supersedeClaim). */
   findByText(query) {
     const toks = (query.toLowerCase().match(/[a-z0-9]+/g) || []).filter((w) => w.length >= 3);
     if (!toks.length) return [];

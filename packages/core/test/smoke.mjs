@@ -6,7 +6,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { Orchestrator, GovernanceError, checkGrounding, groundingScore, categorizeIngest, isOpaqueTaskLabel, WORK_EVENT_NAMES } from '../src/index.mjs';
+import { Orchestrator, GovernanceError, checkGrounding, groundingScore, categorizeIngest, isOpaqueTaskLabel, WORK_EVENT_NAMES, stanceOf, isClaimShaped } from '../src/index.mjs';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; console.log(`  ✓ ${msg}`); } else { fail++; console.log(`  ✗ ${msg}`); } };
@@ -662,9 +662,12 @@ try {
   ok(commNodes.every((n) => (n.properties.size ?? 0) >= 2), 'community parents only for multi-member communities');
   const cg12b = await o.refreshConcepts();
   ok(o.graph.byType('community').length === commNodes.length, 'community materialization is idempotent across passes');
-  // path rewrite: a claim about a known concept, superseded → concept + parent flagged
-  const nodeLabel = o.graph.allNodes().find((n) => n.type !== 'community' && /retrieval|vector|hybrid/i.test(n.label))?.label || 'hybrid retrieval';
-  const c12 = o.claims.add({ content: `the ${nodeLabel} implementation batches lookups nightly for efficiency reasons` });
+  // path rewrite: a claim about a known concept, superseded → concept + parent flagged. The claim
+  // carries its document's path as an ingested claim does: the scoped rule (2026-10-12) flags the
+  // nodes that document's ingest created, not every label sharing one word with the claim.
+  const node12 = o.graph.allNodes().find((n) => n.type !== 'community' && n.source && /retrieval|vector|hybrid/i.test(n.label));
+  const nodeLabel = node12?.label || 'hybrid retrieval';
+  const c12 = o.claims.add({ content: `the ${nodeLabel} implementation batches lookups nightly for efficiency reasons`, source: { path: node12?.source } });
   const sup12 = o.supersedeClaim(c12.id, { content: `the ${nodeLabel} implementation now streams lookups continuously for efficiency reasons` });
   ok(sup12.success && Array.isArray(sup12.stalePath) && sup12.stalePath.length > 0, `supersede flagged ${sup12.stalePath?.length} node(s) on the dependency path`);
   const lint12 = o.lint();
@@ -2855,7 +2858,697 @@ try {
     }
   }
 
-  // 60. Favorites (2026-10-21, schema 6; INTEGRATION-MODES §6 6b): `feedback <id> --favorite | --unfavorite` — one
+  // 60. Generated reflection logs are not knowledge (2026-10-12): the two default memory-dir bridge
+  //     sources skip `dreaming/` (GENERATED_LOG_DIRS) — measured, 27 OpenClaw dreaming logs had been
+  //     bridged as doc knowledge with 46 claims — and MIDMEM_BRIDGE_EXCLUDE appends operator-wide
+  //     subfolder excludes to EVERY bridge source, the defaults and MIDMEM_BRIDGE_SOURCES entries alike.
+  {
+    const { loadConfig: lc60, GENERATED_LOG_DIRS: gld60, bridgeMemory: bm60 } = await import('../src/index.mjs');
+    const prevEx60 = process.env.MIDMEM_BRIDGE_EXCLUDE, prevSrc60 = process.env.MIDMEM_BRIDGE_SOURCES;
+    delete process.env.MIDMEM_BRIDGE_EXCLUDE; delete process.env.MIDMEM_BRIDGE_SOURCES;
+    const root60 = path.join(tmp, 'bridge60');
+    for (const d of ['dreaming/light', 'dreaming/rem', 'drafts']) fs.mkdirSync(path.join(root60, d), { recursive: true });
+    fs.writeFileSync(path.join(root60, 'notes.md'), 'Vellisport60 operators rotated the grommick60 keys after the thursday outage.');
+    fs.writeFileSync(path.join(root60, 'dreaming', 'light', 'a.md'), 'The theme quembril60 appeared in three light sleep reflections with a score of 0.82.');
+    fs.writeFileSync(path.join(root60, 'dreaming', 'rem', 'b.md'), 'The theme quembril60 appeared in five distinct REM sleep reflections.');
+    fs.writeFileSync(path.join(root60, 'drafts', 'c.md'), 'Draft: the vellisport60 runbook for the grommick60 rotation, not yet reviewed.');
+    let o60 = null, oe60 = null;
+    try {
+      ok(JSON.stringify(gld60) === '["dreaming"]' && Object.isFrozen(gld60), 'GENERATED_LOG_DIRS is the frozen, stack-agnostic list ["dreaming"]');
+      // (a) the defaults: both memory dirs skip dreaming/; the vault sources are unchanged.
+      const d60 = lc60().bridgeSources;
+      const isMem60 = (x) => x.dir.endsWith(path.join('.openclaw', 'workspace', 'memory')) || x.dir.endsWith(path.join('.hermes', 'memories'));
+      const mem60 = d60.filter(isMem60), vault60 = d60.filter((x) => !isMem60(x));
+      ok(mem60.length === 2 && mem60.every((x) => JSON.stringify(x.exclude) === '["dreaming"]')
+        && mem60.find((x) => x.scope === 'openclaw')?.type === 'session' && mem60.find((x) => x.scope === 'hermes')?.type === 'note',
+      'default bridge: the OpenClaw + Hermes memory dirs exclude dreaming/ (scope and type unchanged)');
+      ok(vault60.length === 6 && vault60.every((x) => !(x.exclude || []).includes('dreaming'))
+        && vault60.filter((x) => x.exclude).length === 2 && vault60.filter((x) => x.exclude).every((x) => x.exclude.join(',') === 'research,reports'),
+      'default bridge: no vault source excludes dreaming/; the agent folders keep exactly research,reports');
+      ok(JSON.stringify(lc60().bridgeExclude) === '[]', 'MIDMEM_BRIDGE_EXCLUDE unset → bridgeExclude [] (nothing appended)');
+      // (b) the walk: a memory-dir-shaped source ingests notes.md and drafts/c.md, never a dreaming log.
+      o60 = new Orchestrator(base53('b60'));
+      const br60 = await bm60(o60, { sources: [{ dir: root60, scope: 'openclaw', type: 'session', exclude: ['dreaming'] }], project: false });
+      const real60 = fs.realpathSync(root60);
+      const paths60 = o60.db.prepare('SELECT path FROM sources ORDER BY path').all().map((r) => path.relative(real60, r.path));
+      ok(br60.ingested === 2 && br60.errors.length === 0 && JSON.stringify(paths60) === '["drafts/c.md","notes.md"]', `bridge with exclude dreaming → notes.md + drafts/c.md ingested, neither dreaming log (${paths60.join(', ')})`);
+      ok(JSON.stringify(br60.perSource[0].exclude) === '["dreaming"]' && br60.perSource[0].files === 2, 'the bridge result reports the source exclude list and the 2 files walked');
+      ok(o60.db.prepare("SELECT COUNT(*) n FROM claims WHERE content LIKE '%quembril60%'").get().n === 0, 'no claim from a dreaming log reaches the store');
+      // (c) MIDMEM_BRIDGE_EXCLUDE appends to every default source, and to a parsed MIDMEM_BRIDGE_SOURCES entry's own list.
+      process.env.MIDMEM_BRIDGE_EXCLUDE = ' drafts , scratch ';
+      const e60 = lc60();
+      ok(JSON.stringify(e60.bridgeExclude) === '["drafts","scratch"]' && e60.bridgeSources.length === 8 && e60.bridgeSources.every((x) => x.exclude.includes('drafts') && x.exclude.includes('scratch')),
+        'MIDMEM_BRIDGE_EXCLUDE=drafts,scratch → every default source excludes both (trimmed)');
+      ok(e60.bridgeSources.filter(isMem60).every((x) => x.exclude.join(',') === 'dreaming,drafts,scratch') && e60.bridgeSources.filter((x) => !isMem60(x)).every((x) => ['research,reports,drafts,scratch', 'drafts,scratch'].includes(x.exclude.join(','))),
+        'operator-wide excludes are appended after each source\'s own (dreaming / research,reports kept)');
+      process.env.MIDMEM_BRIDGE_EXCLUDE = 'drafts';
+      process.env.MIDMEM_BRIDGE_SOURCES = `${root60}|openclaw|session|||dreaming,drafts;${path.join(tmp, 'absent60')}|hermes`;
+      const p60 = lc60().bridgeSources;
+      ok(p60.length === 2 && JSON.stringify(p60[0].exclude) === '["dreaming","drafts"]' && JSON.stringify(p60[1].exclude) === '["drafts"]',
+        'a parsed MIDMEM_BRIDGE_SOURCES entry keeps its own sixth-field excludes plus drafts (deduped); one without gets drafts');
+      process.env.MIDMEM_BRIDGE_SOURCES = `${root60}|openclaw|session|||dreaming`;
+      oe60 = new Orchestrator(base53('b60e'));
+      const bre60 = await bm60(oe60, { project: false });
+      ok(bre60.ingested === 1 && bre60.perSource.length === 1 && JSON.stringify(bre60.perSource[0].exclude) === '["dreaming","drafts"]' && path.basename(oe60.db.prepare('SELECT path FROM sources').all().map((r) => r.path).join()) === 'notes.md',
+        'end to end: a configured bridge (own exclude dreaming + MIDMEM_BRIDGE_EXCLUDE=drafts) walks notes.md only');
+    } finally {
+      if (prevEx60 === undefined) delete process.env.MIDMEM_BRIDGE_EXCLUDE; else process.env.MIDMEM_BRIDGE_EXCLUDE = prevEx60;
+      if (prevSrc60 === undefined) delete process.env.MIDMEM_BRIDGE_SOURCES; else process.env.MIDMEM_BRIDGE_SOURCES = prevSrc60;
+      o60?.close(); oe60?.close();
+    }
+  }
+
+  // 61. The supersede stale-path flag is scoped to the claim's own evidence (2026-10-12). Measured:
+  //     superseding one 40-word claim flagged 264 nodes (graph.findByText: any label containing any
+  //     ≥ 3-char token as a substring — "and", "the", "memory"). Now (i) the nodes the claim's own
+  //     source ingest created, or (ii) a label sharing ≥ 2 whole significant words with the claim that
+  //     cover ≥ the containment floor of the label's own words; community parents only via a member.
+  {
+    const o61 = new Orchestrator(base53('s61'));
+    try {
+      const f61 = path.join(tmp, 's61', 'brastovar61.md');
+      fs.writeFileSync(f61, 'The brastovar61 relay copies memory pages between the quintrel61 racks and logs every transfer for the overnight operators. '
+        + 'Brastovar61 operators archive the transfer logs weekly. The quintrel61 racks sit in the eastern hall.');
+      const canon61 = fs.realpathSync(f61);
+      await o61.ingest({ path: f61, type: 'note' });
+      const unrelated61 = ['Understanding Hands', 'Theme memory bus', 'Kormish Vandle', 'Kormish relay telemetry dashboard export']
+        .map((label) => o61.graph.upsertNode({ type: 'concept', label, source: 'fixture61' }));
+      const [hands61, theme61, vandle61, wide61] = unrelated61;
+      await o61.refreshConcepts();
+      const own61 = o61.graph.allNodes().filter((n) => n.type !== 'community' && n.source === canon61).map((n) => n.id);
+      const long61 = o61.claims.getAll().find((c) => c.source?.path === canon61 && /copies memory pages/.test(c.content));
+      ok(own61.length > 0 && long61, `fixture: the note's ingest created ${own61.length} concept nodes and the long claim`);
+      const loose61 = o61.graph.findByText(long61.content).map((n) => n.id);
+      ok(loose61.includes(hands61) && loose61.includes(theme61), 'the old substring matcher would have flagged "Understanding Hands" and "Theme memory bus" (and / the / memory)');
+      const sup61 = o61.supersedeClaim(long61.id, { content: 'The brastovar61 relay now streams memory pages between the quintrel61 racks and logs every transfer for the overnight operators.' });
+      const flagged61 = new Set(sup61.stalePath || []);
+      const byId61 = (id) => o61.graph.node(id);
+      const members61 = [...flagged61].filter((id) => byId61(id).type !== 'community');
+      const parents61 = [...flagged61].filter((id) => byId61(id).type === 'community');
+      ok(sup61.success && members61.length === own61.length && own61.every((id) => flagged61.has(id)), `long claim superseded → exactly the note's ${own61.length} concept nodes flagged (rule i; ${flagged61.size} flagged in all)`);
+      ok(parents61.every((id) => flagged61.has(byId61(id).properties.staleReview?.via) && o61.graph.neighbors(byId61(id).properties.staleReview.via).some((e) => e.type === 'member_of' && e.to === id)),
+        `community parents (${parents61.length}) are flagged only through a flagged member`);
+      ok(unrelated61.every((id) => !flagged61.has(id) && !byId61(id).properties.staleReview), 'unrelated labels sharing "and" / "the" / "memory" are not flagged');
+      const lg61 = o61.db.prepare("SELECT detail FROM log WHERE operation='stale-path' ORDER BY id DESC LIMIT 1").get();
+      ok(lg61 && JSON.parse(lg61.detail).rule === 'scoped' && JSON.parse(lg61.detail).flagged === flagged61.size && JSON.parse(lg61.detail).claim === long61.id, 'the stale-path log row keeps its shape plus rule: scoped');
+      // Rule (ii): a short claim without a source path names one label by whole words (coverage 1.0 ≥ 0.6);
+      // a label sharing the same 2 words at 0.4 coverage stays unflagged, as do single-word labels.
+      const short61 = o61.claims.add({ content: 'the kormish vandle relay stalls under load' });
+      const supS61 = o61.supersedeClaim(short61.id, { content: 'the kormish vandle relay recovers under load' });
+      const flaggedS61 = new Set(supS61.stalePath || []);
+      ok(supS61.success && flaggedS61.has(vandle61) && [...flaggedS61].every((id) => id === vandle61 || byId61(id).type === 'community'), 'short claim → its whole-word label "Kormish Vandle" flagged (rule ii), nothing else but its parent');
+      ok(!flaggedS61.has(wide61) && !flaggedS61.has(hands61) && !flaggedS61.has(theme61), 'a label sharing 2 words at 0.4 coverage ("Kormish relay telemetry dashboard export") is below the floor');
+      const all61 = [...new Set([...flagged61, ...flaggedS61])];
+      const clr61 = await o61.clearStaleFlags({ ids: all61 });
+      ok(clr61.cleared === all61.length && o61.lint().stalePaths.length === 0, `stale-clear clears all ${all61.length} flags`);
+    } finally { o61.close(); }
+  }
+
+  // 62. A section entry keeps the name in its heading (2026-10-12). Measured: 2 of 18 section summaries
+  //     omitted the system their heading names (DAEDALUS: "The paper shows that an agent…"), so an entity
+  //     probe for the name found nothing. ingestSections hands the heading's leading name to ingest as
+  //     ensureName; a summary without it is stored as `<name>: <summary>` before grounding + embedding.
+  {
+    const { headingLeadingName: hln62, mentionsName: mn62 } = await import('../src/index.mjs');
+    ok(hln62('1.9 DAEDRIX62: autonomous kelvorn notebooks') === 'DAEDRIX62' && hln62('Ansolvium62 — sparse probes') === 'Ansolvium62' && hln62('Kel‑Tavor62 – drift ledgers') === 'Kel‑Tavor62'
+      && hln62('Wimbrel62 caching across morwick shards') === 'Wimbrel62 caching across morwick shards' && hln62('one two three four five six seven') === null && hln62('') === null,
+    'headingLeadingName: numbering stripped, cut at : / — / –, null past 6 words or empty');
+    ok(mn62('kel-tavor62 keeps ledgers', 'Kel‑Tavor62') && mn62('KEL–TAVOR62 x', 'kel-tavor62') && !mn62('The paper shows that an agent', 'DAEDRIX62'), 'mentionsName: case-insensitive, hyphen variants folded');
+    const o62 = new Orchestrator(base53('s62'));
+    try {
+      const dir62 = path.join(tmp, 'digests62');
+      fs.mkdirSync(dir62, { recursive: true });
+      const bodyD62 = 'The paper shows that an agent can keep a kelvorn lab notebook across long experiment runs, writing one entry per trial and reading the last five entries before it plans the next trial. The authors release the notebook format and the trial scripts.';
+      const bodyA62 = 'Sparse probes rank vintrel maps by how often a probe fires on held-out prompts; the ranking keeps the top tenth of probes and drops the rest. The method needs no labels and the probe weights are published with the code for every vintrel map.';
+      const bodyK62 = 'Drift ledgers record every change to a vintrel store with the reason for the change, so a later reader can replay how a stored belief moved. The ledger compresses old rows into checkpoints and keeps the replay cost bounded by the checkpoints.';
+      const digest62 = ['# Vintrel62 weekly digest', '', '### 1.9 DAEDRIX62: autonomous kelvorn notebooks', '', 'https://arxiv.org/abs/2610.06201', '', bodyD62, '',
+        '### Ansolvium62 — sparse probes for vintrel maps', '', 'https://arxiv.org/abs/2610.06202', '', bodyA62, '',
+        '### Kel‑Tavor62 – drift ledgers for vintrel stores', '', 'https://arxiv.org/abs/2610.06203', '', bodyK62, ''].join('\n');
+      const parentSum62 = 'Weekly vintrel62 digest of three papers on kelvorn notebooks, sparse probes and drift ledgers.';
+      const sumD62 = 'The paper shows that an agent keeps a kelvorn lab notebook across experiment runs.';
+      const sumA62 = 'Ansolvium62 ranks sparse probes over vintrel maps without labels.';
+      const sumK62 = 'kel-tavor62 drift ledgers record every change to a vintrel store.';
+      o62.extractor.extract = async (text) => ({
+        summary: text.startsWith('# ') ? parentSum62 : text.includes('2610.06201') ? sumD62 : text.includes('2610.06202') ? sumA62 : sumK62,
+        concepts: [], claims: [], mode: 'fallback', model: null, reason: 'disabled',
+      });
+      const embedded62 = [];
+      const realEmbed62 = o62.embedder.embed.bind(o62.embedder);
+      o62.embedder.embed = async (t) => { embedded62.push(t); return realEmbed62(t); };
+      const f62 = path.join(dir62, 'vintrel62-weekly.md');
+      fs.writeFileSync(f62, digest62);
+      const r62 = await o62.ingestSections({ path: f62 });
+      const [sD62, sA62, sK62] = r62.sections;
+      const eD62 = o62.recall(sD62?.entry), eA62 = o62.recall(sA62?.entry), eK62 = o62.recall(sK62?.entry);
+      ok(r62.sectionsSummary.ingested === 3 && eD62 && eA62 && eK62, 'fixture: three single-citation sections ingested');
+      ok(eD62.content === `DAEDRIX62: ${sumD62}` && eD62.provenance.extraction?.namePrefix === 'DAEDRIX62', `a summary that never names its heading's system is stored as "<Name>: …" → ${eD62.content.slice(0, 40)}…`);
+      ok(embedded62.includes(eD62.content) && !embedded62.includes(sumD62), 'the vector is computed from the stored (prefixed) text');
+      const secText62 = fs.readFileSync(eD62.provenance.originalSource, 'utf8');
+      ok(eD62.provenance.grounding.summaryScore === Number(groundingScore(secText62, eD62.content).toFixed(3)) && eD62.provenance.grounding.summaryScore >= groundingScore(secText62, sumD62),
+        `the grounding score is the stored text's and does not fall (${groundingScore(secText62, sumD62).toFixed(3)} → ${eD62.provenance.grounding.summaryScore})`);
+      const q62 = await o62.query('DAEDRIX62', { limit: 5 });
+      ok(q62.results.some((r) => r.id === eD62.id), 'an entity query for the name finds the section entry');
+      ok(eA62.content === sumA62 && eK62.content === sumK62 && !eA62.provenance.extraction?.namePrefix && !eK62.provenance.extraction?.namePrefix,
+        'a summary already naming the system (hyphen variant included) is stored unchanged');
+      const eP62 = o62.recall(r62.entry.id);
+      ok(eP62.content === parentSum62 && !eP62.provenance.extraction?.namePrefix, 'the parent digest is stored unchanged');
+      const fp62 = path.join(dir62, 'plain62.md');
+      fs.writeFileSync(fp62, `### 1.9 DAEDRIX62: autonomous kelvorn notebooks\n\nhttps://arxiv.org/abs/2610.06201\n\nA plain copy. ${bodyD62}\n`);
+      const rp62 = await o62.ingest({ path: fp62, type: 'note' });
+      ok(o62.recall(rp62.entry.id).content === sumD62, 'a plain ingest of the same text is not prefixed (no ensureName)');
+    } finally { o62.close(); }
+  }
+
+  // 63. The grounding check catches a unit drift (2026-10-12). Measured: the extractor turned "15.9
+  //     success-rate points" into "15.9 % higher success rates" and the overlap check passed it at 0.40.
+  //     unitDrift compares the unit after each claim number with the unit after the same number in the
+  //     source (percent / points / multiplier); checkGrounding's unitCheck quarantines a drifted claim.
+  {
+    const { unitDrift: ud63 } = await import('../src/index.mjs');
+    const S63 = 'gains up to 15.9 points and 2.2× pass^5';
+    const d63a = ud63(S63, 'up to 15.9% higher success');
+    ok(d63a.length === 1 && d63a[0].number === 15.9 && d63a[0].claimUnit === '%' && d63a[0].sourceUnit === 'points', `"15.9%" against "15.9 points" is a drift → ${JSON.stringify(d63a)}`);
+    ok(ud63(S63, 'up to 15.9 points').length === 0 && ud63(S63, 'a 2.2× increase').length === 0, 'the same number in the same unit is no drift (points, ×)');
+    const d63d = ud63(S63, '2.2 percent increase');
+    ok(d63d.length === 1 && d63d[0].claimUnit === 'percent' && d63d[0].sourceUnit === '×', '"2.2 percent" against "2.2×" is a drift');
+    const d63e = ud63('gains up to 15.9 success-rate points over no memory', 'up to 15.9% higher success rates');
+    ok(d63e.length === 1 && d63e[0].claimUnit === '%' && d63e[0].sourceUnit === 'points', 'the measured case: a hyphenated modifier between the number and "points" still reads as points → "15.9%" is a drift');
+    ok(ud63('the memo lists 2 key points for the team', 'a 2% rise').length === 0, 'a plain word between the number and "points" is a count, not a unit → no drift');
+    ok(ud63(S63, 'up to 42% higher').length === 0 && ud63(S63, 'gains 15.9 overall').length === 0 && ud63('a 2x2 grid', '2 points').length === 0,
+      'a number absent from the source, a unitless claim number, or a dimension (2x2) is not this check\'s job');
+    ok(ud63('a 15.9-point gain', '15.9 percentage points').length === 0 && ud63('rises 15.9 percentage points', 'rises 15.9 pp').length === 0 && ud63('3.1x faster', 'up to 3.1 pct').length === 1,
+      'unit spellings fold into classes (point / percentage points / pp; x glued is a multiplier)');
+    const src63 = 'Success for the quellvane63 planner rises up to 15.9 points, a higher margin, and 2.2× pass^5 increase over the brindle63 baseline.';
+    const items63 = ['Success rises up to 15.9% higher for quellvane63', 'Success rises up to 15.9 points for quellvane63', 'quellvane63 shows a 2.2× increase', 'quellvane63 shows a 2.2 percent increase'].map((content) => ({ content }));
+    const cg63 = checkGrounding(src63, items63, (c) => c.content, 0.5, { unitCheck: src63 });
+    ok(cg63.grounded.length === 2 && cg63.ungrounded.length === 2 && cg63.unitDrift === 2 && cg63.ungrounded.every((c) => c.reason === 'unit-drift' && c.unitDrift.length === 1 && c.groundingScore >= 0.5)
+      && cg63.grounded.every((c) => !c.reason), 'checkGrounding with unitCheck quarantines the two drifted claims (reason unit-drift + details) although their words overlap');
+    const cgOff63 = checkGrounding(src63, items63, (c) => c.content, 0.5);
+    ok(cgOff63.grounded.length === 4 && cgOff63.unitDrift === 0, 'without unitCheck the overlap check alone keeps all four (the measured gap; concept checks unchanged)');
+
+    // ingest: the grounding report and the log row count it; the drifted claims are never stored.
+    const o63 = new Orchestrator(base53('g63'));
+    try {
+      const f63 = path.join(tmp, 'g63', 'quellvane63.md');
+      fs.writeFileSync(f63, src63);
+      const stub63 = (mode) => async () => ({ summary: 'The quellvane63 planner rises over the brindle63 baseline.', concepts: [], claims: items63.map((c) => ({ ...c, confidence: 0.8 })), mode, model: mode === 'lmstudio' ? 'stub/extract-63' : null });
+      o63.extractor.extract = stub63('fallback');
+      const r63 = await o63.ingest({ path: f63, type: 'note' });
+      const live63 = (id) => o63.db.prepare("SELECT content FROM claims WHERE status IN ('active','verified') AND json_extract(source,'$.sourceId') = (SELECT source_id FROM entries WHERE id=?) ORDER BY content").all(id).map((r) => r.content);
+      ok(r63.grounding.unitDrift === 2 && r63.grounding.claimsQuarantined === 2 && r63.grounding.claimsKept === 2 && r63.claims === 2, `ingest result: grounding.unitDrift 2, claimsKept 2 (${JSON.stringify(r63.grounding)})`);
+      ok(JSON.stringify(live63(r63.entry.id)) === JSON.stringify(['Success rises up to 15.9 points for quellvane63', 'quellvane63 shows a 2.2× increase']), 'only the unit-faithful claims are stored');
+      const lg63 = JSON.parse(o63.db.prepare("SELECT detail FROM log WHERE operation='ingest' ORDER BY id DESC LIMIT 1").get().detail);
+      ok(lg63.unitDrift === 2 && lg63.quarantined === 2 && o63.recall(r63.entry.id).provenance.grounding.unitDrift === 2, 'the ingest log row and provenance.grounding carry unitDrift: 2');
+      // reextract (the model path) holds the same guard.
+      o63.extractor.extract = stub63('lmstudio');
+      const realEmbed63 = o63.embedder.embed.bind(o63.embedder);
+      o63.embedder.embed = async () => ({ vector: new Array(1024).fill(0).map((_, i) => (i === 63 ? 1 : 0)), model: 'stub-embed-63', mode: 'lmstudio' });
+      try {
+        const rx63 = await o63.reextract({});
+        const lgx63 = JSON.parse(o63.db.prepare("SELECT detail FROM log WHERE operation='reextract' ORDER BY id DESC LIMIT 1").get()?.detail || '{}');
+        ok(rx63.reextracted === 1 && o63.recall(r63.entry.id).provenance.grounding.unitDrift === 2 && lgx63.unitDrift === 2
+          && JSON.stringify(live63(r63.entry.id)) === JSON.stringify(['Success rises up to 15.9 points for quellvane63', 'quellvane63 shows a 2.2× increase']),
+        'reextract applies the same unit-drift quarantine (provenance.grounding + reextract log row)');
+      } finally { o63.embedder.embed = realEmbed63; }
+      // grounding disabled → the unit check is off with it.
+      o63.cfg.grounding = { ...o63.cfg.grounding, enabled: false };
+      o63.extractor.extract = stub63('fallback');
+      const f63b = path.join(tmp, 'g63', 'quellvane63-b.md');
+      fs.writeFileSync(f63b, `${src63} A second copy.`);
+      const r63b = await o63.ingest({ path: f63b, type: 'note' });
+      ok(r63b.grounding.unitDrift === 0 && r63b.grounding.claimsKept === 4, 'MIDMEM_GROUNDING=0 turns the unit check off with the overlap check');
+    } finally { o63.close(); }
+  }
+
+  // 64. An audit read that does not renew (2026-10-12). Measured: a review's own queries renewed the
+  //     leases of three content-free session-log rows. query({ audit: true }) returns the same results
+  //     with no retrieval_count bump, no last_accessed_at, no lease renewal and no opportunistic maintain.
+  {
+    const o64 = new Orchestrator(base53('q64'));
+    const db64 = path.join(tmp, 'q64', 'state.db');
+    try {
+      const a64 = await o64.storeMemory({ content: 'Zelphorin64 session log: the plumbrack64 relay idled all night.', tier: 'memory', type: 'note' });
+      const b64 = await o64.storeMemory({ content: 'Zelphorin64 session log: plumbrack64 counters reset at dawn.', tier: 'memory', type: 'note' });
+      const lease64 = '2030-01-01T00:00:00.000Z';
+      o64.db.prepare('UPDATE entries SET expires_at=? WHERE id IN (?,?)').run(lease64, a64.id, b64.id);
+      o64.db.prepare("DELETE FROM meta WHERE key='last_maintenance_at'").run();
+      const rows64 = () => o64.db.prepare('SELECT id, retrieval_count, last_accessed_at, expires_at FROM entries WHERE id IN (?,?) ORDER BY id').all(a64.id, b64.id);
+      const before64 = JSON.stringify(rows64());
+      const qa64 = await o64.query('zelphorin64 plumbrack64 session log', { audit: true, limit: 5 });
+      const qb64 = await o64.query('zelphorin64 plumbrack64 session log', { audit: true, limit: 5 });
+      ok(qa64.audit === true && qb64.audit === true && [a64.id, b64.id].every((id) => qa64.results.some((r) => r.id === id) && qb64.results.some((r) => r.id === id)), 'audit queries return the rows and carry audit: true');
+      ok(JSON.stringify(rows64()) === before64, 'two audit queries: retrieval_count, last_accessed_at and expires_at unchanged');
+      ok(!o64.db.prepare("SELECT 1 FROM meta WHERE key='last_maintenance_at'").get(), 'an audit query runs no opportunistic maintain');
+      const qn64 = await o64.query('zelphorin64 plumbrack64 session log', { limit: 5 });
+      const after64 = rows64();
+      ok(qn64.audit === undefined && JSON.stringify(qn64.results.map((r) => r.id)) === JSON.stringify(qa64.results.map((r) => r.id)) && after64.every((r) => r.retrieval_count === 1 && r.last_accessed_at && r.expires_at !== lease64)
+        && o64.db.prepare("SELECT 1 FROM meta WHERE key='last_maintenance_at'").get(), 'a normal query afterwards (same results) bumps the count, the access time and the lease, and may maintain');
+      const snap64 = JSON.stringify(rows64());
+      const cl64 = cli53(db64, 'query', 'zelphorin64', 'plumbrack64', '--audit');
+      ok(cl64.code === 0 && cl64.out?.audit === true && cl64.out.results.some((r) => r.id === a64.id) && JSON.stringify(rows64()) === snap64, 'CLI query --audit → audit: true, nothing renewed');
+      const mc64 = await mcp53(db64, [{ name: 'query', arguments: { query: 'zelphorin64 plumbrack64', audit: true } }]);
+      const tl64 = mc64.find((m) => m.id === 1).result.tools.find((t) => t.name === 'query');
+      const call64 = JSON.parse(mc64.find((m) => m.id === 2).result.content[0].text);
+      ok(tl64?.inputSchema?.properties?.audit?.type === 'boolean' && call64.audit === true && call64.results.some((r) => r.id === b64.id) && JSON.stringify(rows64()) === snap64, 'MCP query lists audit (boolean); an audit call renews nothing');
+    } finally { o64.close(); }
+  }
+
+  // 65. Claim stance at commit (roadmap #33, CASK arXiv 2610.09008). Every claim gets a deterministic
+  //     stance from fixed word lists (rejected > quoted > provisional > observed); a non-observed claim
+  //     never defers, leaves no evidence edge on a neighbour, is never a neighbour or a contradiction
+  //     side, and is not current unless asked for. MIDMEM_CLAIM_STANCE=0 → everything as before.
+  {
+    const so65 = (t) => stanceOf(t);
+    const ids65 = (rows) => rows.map((c) => c.id).sort().join();
+    ok(so65('The paper reports a 4.09 point gain').stance === 'observed' && so65('The paper reports a 4.09 point gain').markers.length === 0
+      && ['The study finds a drop', 'The benchmark shows a gain', 'The team measures latency'].every((t) => so65(t).stance === 'observed'),
+      'stanceOf: a document reporting / finding / showing / measuring its own result stays observed (no markers)');
+    ok(so65('according to the vendor the fix shipped').stance === 'quoted' && JSON.stringify(so65('according to the vendor the fix shipped').markers) === '["according to"]'
+      && ['The operator said that the rack rebooted', 'reportedly the cache was warm', 'She told the crew it worked'].every((t) => so65(t).stance === 'quoted'),
+      'stanceOf: explicit third-party attribution → quoted (according to / said that / reportedly / told)');
+    ok(so65('we decided against the rewrite').stance === 'rejected' && JSON.stringify(so65('we decided against the rewrite').markers) === '["decided against"]'
+      && ['the migration was ruled out', 'the plan was withdrawn', 'the proposal was not adopted'].every((t) => so65(t).stance === 'rejected')
+      && so65('the patch was reverted on 2026-09-23').stance === 'observed' && so65('No attacker text may reach the agent; logged May 30, 2026').stance === 'observed',
+      'stanceOf: explicit rejection → rejected (decided against / ruled out / withdrawn / not adopted); "reverted" and "may" stay observed');
+    const dr65 = so65('the dry run would return success');
+    ok(dr65.stance === 'provisional' && dr65.markers.includes('would') && dr65.markers.includes('dry run')
+      && so65('the dry-run passed').stance === 'provisional' && so65('Let’s ship it').stance === 'provisional'
+      && ['we could migrate tomorrow', 'what if the cache is cold', 'a simulated failover recovered'].every((t) => so65(t).stance === 'provisional'),
+      'stanceOf: modal / conditional / simulation → provisional; hyphen and curly-apostrophe variants fold ("dry-run", "Let’s")');
+    ok(['the mayor approved the mockup', 'the council couldn\'t agree', 'reported results'].every((t) => so65(t).stance === 'observed'),
+      'stanceOf: whole words only (mayor / mockup / couldn\'t / reported do not fire may / mock / could / reportedly)');
+    const mx65 = so65('according to the vendor we could ship it, but we decided against it');
+    ok(mx65.stance === 'rejected' && JSON.stringify(mx65.markers) === '["decided against"]' && so65('according to the vendor we might ship it').stance === 'quoted',
+      'stanceOf: mixed markers → the strongest wins (rejected > quoted > provisional) and only its markers are recorded');
+
+    const dbA65 = path.join(tmp, 's65a', 'state.db');
+    const oA65 = new Orchestrator(base53('s65a'));
+    try {
+      ok(oA65.cfg.claims.stance === true, 'stance tagging is on by default (MIDMEM_CLAIM_STANCE)');
+      const obsA65 = oA65.claims.add({ content: 'the brindlewort65 valve seals quiltrax65 tanks at noon' });
+      ok(obsA65.metadata.stance === 'observed' && !('stanceMarkers' in obsA65.metadata), 'add() writes metadata.stance observed with no stanceMarkers');
+      const provB65 = oA65.claims.add({ content: 'we could never seal the brindlewort65 valve quiltrax65 tanks at noon' });
+      ok(provB65.metadata.stance === 'provisional' && JSON.stringify(provB65.metadata.stanceMarkers) === '["could"]', 'add() writes metadata.stance provisional + stanceMarkers ["could"]');
+      ok(provB65.status === 'active' && provB65.metadata.writeRelation?.relation === 'contradictory' && provB65.metadata.writeRelation.neighborId === obsA65.id && !provB65.metadata.deferredAt,
+        'a provisional candidate negating an observed neighbour lands active (no deferral); its write relation is still recorded');
+      ok(!('contradictedBy' in oA65.claims.get(obsA65.id).metadata), 'the observed neighbour\'s contradictedBy is untouched');
+      const log65 = oA65.db.prepare("SELECT detail FROM log WHERE operation='claim-write-conflict'").all().map((r) => JSON.parse(r.detail));
+      ok(log65.length === 1 && log65[0].id === provB65.id && log65[0].deferred === false && log65[0].stance === 'provisional', 'the write-conflict log row says deferred:false and names the stance');
+      ok(!oA65.lint().writeConflicts.some((w) => w.id === provB65.id), 'lint writeConflicts does not queue the provisional claim');
+      const obsG65 = oA65.claims.add({ content: 'the yarrowind65 pump primes velk65 coolant loops daily' });
+      const qH65 = oA65.claims.add({ content: 'according to ops the yarrowind65 pump primes velk65 coolant loops daily' });
+      ok(qH65.metadata.stance === 'quoted' && qH65.metadata.writeRelation?.relation === 'corroborating' && !oA65.claims.get(obsG65.id).metadata.supportCount,
+        'a quoted near-duplicate is tagged corroborating but does not extend the observed neighbour\'s window (no supportCount)');
+      const provC65 = oA65.claims.add({ content: 'the dorvanix65 relay might reroute plenkor65 traffic overnight' });
+      const obsD65 = oA65.claims.add({ content: 'the dorvanix65 relay does not reroute plenkor65 traffic overnight' });
+      ok(obsD65.metadata.stance === 'observed' && obsD65.status === 'active' && !obsD65.metadata.writeRelation,
+        'an observed claim negating a provisional one finds no neighbour (relate ignores non-observed) and lands active');
+      ok(oA65.claims.relate('the dorvanix65 relay might reroute plenkor65 traffic overnight').neighborId === obsD65.id, 'relate() still sees the observed claim as a neighbour');
+      const cur65 = oA65.currentClaims('dorvanix65 relay');
+      ok(cur65.length === 1 && cur65[0].id === obsD65.id, 'current() returns the observed claim only');
+      ok(ids65(oA65.currentClaims('dorvanix65 relay', { stances: ['observed', 'provisional'] })) === [provC65.id, obsD65.id].sort().join()
+        && ids65(oA65.currentClaims('dorvanix65 relay', { allStances: true })) === [provC65.id, obsD65.id].sort().join()
+        && ids65(oA65.currentClaims('dorvanix65 relay', { stances: ['provisional'] })) === provC65.id,
+        'current() includes non-observed claims when stances lists them or allStances is true');
+      const all65 = oA65.searchClaims('dorvanix65 relay');
+      ok(all65.length === 2 && all65.find((c) => c.id === provC65.id)?.metadata.stance === 'provisional', 'search() (the --all read) is unchanged: every stance, each row with its metadata.stance');
+      let bad65 = null; try { oA65.currentClaims('dorvanix65', { stances: ['hypothetical'] }); } catch (e) { bad65 = e; }
+      ok(bad65 && /unknown stance 'hypothetical'/.test(bad65.message), 'an unknown stance name is an error, never a silent empty read');
+      const ex65 = oA65.claims.add({ content: 'we might relabel the gorrimund65 sockets', defer: true });
+      ok(ex65.status === 'deferred' && ex65.metadata.deferReason === 'explicit' && ex65.metadata.stance === 'provisional', 'an explicit defer:true keeps the deferred path for a non-observed claim');
+      const fc65 = oA65.claimContradictions({ minShared: 3 });
+      ok(!fc65.some((p) => [p.a, p.b].some((id) => id === provB65.id || id === provC65.id)), 'findContradictions() ignores non-observed claims (two pairs at containment ≥ 0.857 are not reported)');
+      const qE65 = oA65.claims.add({ content: 'according to the auditor the snorvel65 ledger balanced' });
+      oA65.claims.add({ content: 'we ruled out the snorvel65 ledger migration' });
+      oA65.claims.updateStatus(qE65.id, 'archived');
+      const st65 = oA65.claims.stats().byStance;
+      ok(st65.observed === 3 && st65.provisional === 3 && st65.quoted === 2 && st65.rejected === 1, `stats().byStance counts every claim (${JSON.stringify(st65)})`);
+      const ls65 = oA65.lint().stances;
+      ok(ls65 && ls65.observed === 3 && ls65.provisional === 2 && ls65.quoted === 1 && ls65.rejected === 1, `lint().stances counts live claims only (${JSON.stringify(ls65)})`);
+      ok(JSON.stringify((await oA65.brief()).claims.byStance) === JSON.stringify(st65), 'brief shows the stance counts with the claim stats');
+      const ing65 = path.join(tmp, 's65a', 'crane65.md');
+      fs.writeFileSync(ing65, 'The wexmoor65 crane could lift the tarvel65 beam before sunset.\nThe wexmoor65 crane lifted the oskel65 crate this morning.\n');
+      const ir65 = await oA65.ingest({ path: ing65, type: 'note', title: 'Crane Notes' });
+      const ic65 = oA65.searchClaims('wexmoor65 crane');
+      const icP65 = ic65.find((c) => /could lift/.test(c.content)); const icO65 = ic65.find((c) => /lifted the oskel65/.test(c.content));
+      ok(ir65.success && icP65?.metadata.stance === 'provisional' && JSON.stringify(icP65.metadata.stanceMarkers) === '["could"]' && icO65?.metadata.stance === 'observed',
+        'the ingest path writes stances on extracted claims ("could" → provisional, the plain sentence → observed)');
+      const cl65 = cli53(dbA65, 'claims', 'dorvanix65', 'relay', '--all', '--stances', 'provisional');
+      ok(cl65.code === 0 && Array.isArray(cl65.out) && cl65.out.length === 1 && cl65.out[0].id === provC65.id && cl65.out[0].metadata.stance === 'provisional', 'CLI claims --all --stances provisional → only the provisional claim');
+      const cc65 = cli53(dbA65, 'claims', 'dorvanix65', 'relay'); const ca65 = cli53(dbA65, 'claims', 'dorvanix65', 'relay', '--all-stances');
+      ok(cc65.code === 0 && ids65(cc65.out) === obsD65.id && ca65.code === 0 && ids65(ca65.out) === [provC65.id, obsD65.id].sort().join(), 'CLI claims (current) → observed only; --all-stances → both');
+      const cb65 = cli53(dbA65, 'claims', 'dorvanix65', '--stances', 'bogus');
+      ok(cb65.code === 1 && /unknown stance 'bogus'/.test(cb65.err), 'CLI claims --stances with an unknown name → exit 1 with the error');
+      const mc65 = await mcp53(dbA65, [{ name: 'claims', arguments: { query: 'dorvanix65 relay', allStances: true } }, { name: 'claims', arguments: { query: 'dorvanix65 relay' } }, { name: 'claims', arguments: { query: 'dorvanix65 relay', mode: 'all', stances: ['observed'] } }]);
+      const tl65 = mc65.find((m) => m.id === 1).result.tools.find((t) => t.name === 'claims');
+      const r65 = (id) => JSON.parse(mc65.find((m) => m.id === id).result.content[0].text);
+      ok(tl65?.inputSchema?.properties?.allStances?.type === 'boolean' && tl65.inputSchema.properties.stances?.type === 'array', 'MCP claims lists stances (array) and allStances (boolean)');
+      ok(ids65(r65(2)) === [provC65.id, obsD65.id].sort().join() && ids65(r65(3)) === obsD65.id && ids65(r65(4)) === obsD65.id,
+        'MCP claims: allStances:true → both; the default → observed only; mode all + stances narrows');
+    } finally { oA65.close(); }
+
+    // Tagging off: no stance written, and the pre-#33 behaviour holds (the observation defers on the hypothetical).
+    const oB65 = new Orchestrator(base53('s65b', { claims: { stance: false } }));
+    try {
+      const pB65 = oB65.claims.add({ content: 'the dorvanix65 relay might reroute plenkor65 traffic overnight' });
+      const dB65 = oB65.claims.add({ content: 'the dorvanix65 relay does not reroute plenkor65 traffic overnight' });
+      ok(!('stance' in pB65.metadata) && !('stanceMarkers' in pB65.metadata) && !('stance' in dB65.metadata), 'claims.stance === false → no stance written');
+      ok(dB65.status === 'deferred' && dB65.metadata.writeRelation?.neighborId === pB65.id, 'claims.stance === false → the observation defers on the hypothetical, as before');
+      const qB65 = oB65.claims.add({ content: 'according to the vendor the dorvanix65 relay firmware shipped' });
+      ok(ids65(oB65.currentClaims('dorvanix65 relay')) === [pB65.id, qB65.id].sort().join(), 'claims.stance === false → current() returns every live claim, as before');
+      ok(oB65.claims.stats().byStance.observed === 3 && oB65.lint().stances.provisional === 0, 'claims.stance === false → unstanced rows count as observed');
+    } finally { oB65.close(); }
+  }
+
+  // Shared by §66–69: a store of its own (db AND vault under tmp/<dir>), so projections never touch the main vault.
+  const base66 = (dir, extra = {}) => base53(dir, { vaultPath: path.join(tmp, dir, 'vault'), ...extra });
+  // A loopback URL nothing listens on (a refused connection), for the unreachable-endpoint cases.
+  const deadUrl66 = async () => { const http = await import('node:http'); return new Promise((resolve) => { const s = http.createServer(); s.listen(0, '127.0.0.1', () => { const port = s.address().port; s.close(() => resolve(`http://127.0.0.1:${port}/v1`)); }); }); };
+
+  // 66. Claim shape at write time (2026-10-19). Measured: with the model timing out, the fallback
+  //     extractor turned the first five "sentences" of markdown files into claims — headings, table rows,
+  //     bullets — and 125 such fragments were live, colliding with real claims as false contradictions.
+  //     `isClaimShaped` refuses them deterministically: the fallback never emits them (droppedFragments),
+  //     the model path drops them too, and checkGrounding quarantines any that reach it with reason
+  //     'not-a-claim' (grounding.notClaim on the ingest result and its log row).
+  {
+    const shapes66 = [
+      ['# Zephyrine brolly ledger', false, 'an ATX heading'],
+      ['| brolly | count | owner |', false, 'a table row'],
+      ['- **Brolly owner:** the zephyrine desk', false, 'a bullet with a bold lead'],
+      ['*Backlog check* — the zephyrine queue is empty today', false, 'an italic-wrapped lead-in'],
+      ['Session Key: agent-main-zephyrine', false, 'a Session Key label'],
+      ['**Session** opened by the zephyrine desk', false, 'a bold session label'],
+      ['brolly ledger', false, 'a two-word fragment'],
+      ['> the zephyrine desk said brollies are free', false, 'a block quote'],
+      ['2. **Lend** the zephyrine brolly at noon', false, 'a numbered item with a bold lead'],
+      ['```js const brolly = zephyrine()', false, 'a code fence'],
+      ['2026-10-19 17:55Z 41 s 0.93 ok', false, 'a mostly non-letter log line'],
+      ['12 34 56', false, 'no letters'],
+      ['The zephyrine desk lends a **spare** brolly to every visiting engineer.', true, 'a plain sentence with **bold** mid-way'],
+      ['3 zephyrine desks lend brollies to visiting quintrel engineers.', true, 'a sentence starting with a number'],
+      ['the session key for the zephyrine desk rotates hourly', true, 'prose about a session key (lower-case)'],
+    ];
+    const wrong66 = shapes66.filter(([t, want]) => isClaimShaped(t) !== want);
+    ok(!wrong66.length, `isClaimShaped on ${shapes66.length} shapes: ${wrong66.length ? 'WRONG on ' + wrong66.map((w) => w[2]).join('; ') : 'heading, table row, bold-lead bullet, italic lead-in, session labels, quote, numbered bold, fence, non-letter and two-word fragments refused; plain sentences (mid-way bold, a leading number, prose about a session key) kept'}`);
+    const src66 = 'Zephyrine desk overview. The zephyrine desk lends brollies to visiting quintrel engineers.';
+    const g66 = checkGrounding(src66, [{ content: '## Zephyrine desk overview' }, { content: 'The zephyrine desk lends brollies to visiting quintrel engineers.' }], (c) => c.content, 0.5, { claimShape: true });
+    ok(g66.notClaim === 1 && g66.grounded.length === 1 && g66.ungrounded.length === 1 && g66.ungrounded[0].reason === 'not-a-claim' && g66.ungrounded[0].groundingScore === 1,
+      'checkGrounding({ claimShape }) quarantines a fully grounded heading (score 1) with reason not-a-claim, before the overlap check; notClaim counts it');
+    const gc66 = checkGrounding(src66, [{ name: 'zephyrine' }, { name: 'quintrel' }], (c) => c.name, 0.5);
+    ok(gc66.grounded.length === 2 && gc66.notClaim === 0, 'without claimShape (the concept check) one-word names are untouched');
+
+    const oF66 = new Orchestrator(base66('s66a'));
+    try {
+      const md66 = '# Zephyrine brolly ledger overview\n\n| brolly | count |\n|---|---|\n| zephyrine-red | 12 |\n\n- **Brolly owner:** the zephyrine desk keeps the ledger.\n\nThe zephyrine brolly desk lends umbrellas to visiting quintrel engineers.\n';
+      const fx66 = await oF66.extractor.extract(md66, 'note');
+      ok(fx66.mode === 'fallback' && fx66.claims.length === 1 && /lends umbrellas/.test(fx66.claims[0].content) && fx66.droppedFragments === 4,
+        `fallback extractor: the heading, two table rows and the bold-lead bullet are dropped (droppedFragments ${fx66.droppedFragments}), the one real sentence is the claim`);
+      const glued66 = await oF66.extractor.extract('## Quintrel rota\nThe quintrel rota assigns zephyrine shifts every monday.\n```\nconst quintrel = rotaShiftsForZephyrine(monday);\n```\n', 'note');
+      ok(glued66.claims.length === 1 && glued66.claims[0].content === 'The quintrel rota assigns zephyrine shifts every monday.' && glued66.droppedFragments === 1,
+        'a sentence right under a heading (no blank line) survives on its own — the heading is its own block, dropped and counted; fenced code is never a claim (nor counted)');
+      const p66 = path.join(tmp, 's66a', 'ledger66.md');
+      fs.writeFileSync(p66, md66);
+      const i66 = await oF66.ingest({ path: p66, type: 'note' });
+      const stored66 = oF66.db.prepare("SELECT content FROM claims WHERE json_extract(source,'$.sourceId') = (SELECT source_id FROM entries WHERE id=?)").all(i66.entry.id).map((r) => r.content);
+      const lg66 = JSON.parse(oF66.db.prepare("SELECT detail FROM log WHERE operation='ingest' ORDER BY id DESC LIMIT 1").get().detail);
+      ok(i66.mode === 'fallback' && i66.claims === 1 && stored66.length === 1 && /lends umbrellas/.test(stored66[0]) && i66.grounding.notClaim >= 1 && lg66.notClaim === i66.grounding.notClaim,
+        `fallback ingest of a markdown file (heading, table rows, bullet first): zero fragment claims stored, the real sentence kept, grounding.notClaim ${i66.grounding.notClaim} (also on the log row)`);
+      // The model path: an extractor answer (mode lmstudio) carrying a heading-shaped claim.
+      const p66b = path.join(tmp, 's66a', 'desk66.md');
+      fs.writeFileSync(p66b, src66);
+      const realEx66 = oF66.extractor.extract;
+      oF66.extractor.extract = async () => ({ summary: 'The zephyrine desk lends brollies to visiting quintrel engineers.', concepts: [], mode: 'lmstudio', model: 'stub/66',
+        claims: [{ content: '## Zephyrine desk overview', confidence: 0.8 }, { content: 'The zephyrine desk lends brollies to visiting quintrel engineers.', confidence: 0.8 }] });
+      let m66;
+      try { m66 = await oF66.ingest({ path: p66b, type: 'note' }); } finally { oF66.extractor.extract = realEx66; }
+      const storedM66 = oF66.db.prepare("SELECT content FROM claims WHERE json_extract(source,'$.sourceId') = (SELECT source_id FROM entries WHERE id=?)").all(m66.entry.id).map((r) => r.content);
+      ok(m66.mode === 'lmstudio' && m66.claims === 1 && m66.grounding.claimsQuarantined === 1 && m66.grounding.notClaim === 1 && storedM66.length === 1 && !storedM66.some((c) => c.startsWith('#')),
+        'model path: a heading-shaped claim in the model answer is quarantined (not-a-claim; grounding.notClaim 1), the sentence is stored');
+    } finally { oF66.close(); }
+    // The model path inside the extractor: the fake endpoint answers its text's first two sentences as claims.
+    const { startFakeOpenAI: startFake66 } = await import('./helpers/fake-openai.mjs');
+    const { Extractor: Extractor66 } = await import('../src/index.mjs');
+    const fake66 = await startFake66({ dim: 16 });
+    try {
+      const ex66 = new Extractor66({ llmEnabled: true, llmEndpoint: fake66.url, extractModel: 'stub/66', llmTimeoutMs: 5000 });
+      const r66 = await ex66.extract('# Zephyrine ledger heading line. The zephyrine desk lends brollies to quintrel engineers. Later text follows here.', 'note');
+      ok(r66.mode === 'lmstudio' && r66.droppedFragments === 1 && !r66.claims.some((c) => c.content.startsWith('#')) && r66.claims.some((c) => /lends brollies/.test(c.content)),
+        'model path: the extractor drops a heading-shaped claim the model answered (droppedFragments 1) and keeps the sentence');
+    } finally { await fake66.close(); }
+  }
+
+  // 67. Governed claims sweep (2026-10-19). Measured: 40 fragment-shaped claims stayed live after
+  //     `reextract` cleared 85, 12 of them from entries that no longer exist (a re-ingest supersedes the
+  //     entry, never its claims). `claims-sweep` archives fragments (reason not-a-claim) and orphans
+  //     (reason source-gone, archivedBy.entry when known); archived claims leave contradictedBy lists;
+  //     lint shows the queue as fragmentClaims / orphanClaims. Seeded with the shape check bypassed
+  //     (claims.add directly) — what the store holds from before it existed.
+  {
+    const dir67 = path.join(tmp, 's67');
+    fs.mkdirSync(dir67, { recursive: true });
+    const db67 = path.join(dir67, 'state.db');
+    const fA67 = path.join(dir67, 'sluice67.md'), fB67 = path.join(dir67, 'weir67.md');
+    fs.writeFileSync(fA67, 'The glimmerfen sluice opens every tuesday for the barge crews.\n');
+    fs.writeFileSync(fB67, 'The brennick weir never floods the lower meadow each spring.\n');
+    let o67 = new Orchestrator(base66('s67'));
+    let realA67, headA67, nb67, orphB67, legacy67, legacyLive67, eA67, eB67, frag67b;
+    try {
+      nb67 = o67.claims.add({ content: 'the brennick weir floods the lower meadow each spring' }).id; // no source: derives from no entry
+      eA67 = (await o67.ingest({ path: fA67, type: 'note' })).entry.id;
+      eB67 = (await o67.ingest({ path: fB67, type: 'note' })).entry.id;
+      const srcOf67 = (e) => o67.db.prepare('SELECT s.id, s.path FROM entries e JOIN sources s ON s.id = e.source_id WHERE e.id=?').get(e);
+      const sA67 = srcOf67(eA67), sB67 = srcOf67(eB67);
+      const claimOf67 = (sid) => o67.db.prepare("SELECT id FROM claims WHERE json_extract(source,'$.sourceId') = ?").get(sid)?.id;
+      realA67 = claimOf67(sA67.id);
+      orphB67 = claimOf67(sB67.id);
+      headA67 = o67.claims.add({ content: '## Glimmerfen sluice schedule', source: { path: sA67.path, sourceId: sA67.id } }).id;
+      legacy67 = o67.claims.add({ content: 'The quellmoor lock keeper logs every passing barge at noon.', source: { path: path.join(dir67, 'gone67.md') } }).id;
+      legacyLive67 = o67.claims.add({ content: 'The glimmerfen barge crews unload timber beside the sluice.', source: { path: sA67.path } }).id;
+      // An entry that leaves without its claims — what a re-ingest supersede (or an archive with the cascade off) does.
+      o67.cfg.forget.cascade = false;
+      try { await o67.archiveEntries({ ids: [eB67], reason: 'fixture67' }); } finally { o67.cfg.forget.cascade = true; }
+      const nbBefore67 = o67.claims.get(nb67);
+      ok(realA67 && orphB67 && o67.claims.get(orphB67).status === 'deferred' && (nbBefore67.metadata.contradictedBy || []).includes(orphB67) && o67.recall(eB67).status === 'archived' && o67.claims.get(orphB67).status === 'deferred',
+        "fixture: a real claim, a heading-shaped claim, a (deferred) claim whose entry was archived without it — in a live neighbour's contradictedBy — and legacy claims with a gone and a live path");
+      const l067 = o67.lint();
+      ok(l067.fragmentClaims === 1 && l067.orphanClaims === 2, `lint shows the queue before any sweep: fragmentClaims ${l067.fragmentClaims}, orphanClaims ${l067.orphanClaims}`);
+      const snap67 = () => JSON.stringify(o67.db.prepare('SELECT id, status, metadata, updated_at FROM claims ORDER BY id').all());
+      const before67 = snap67();
+      const dry67 = await o67.claimsSweep({ dryRun: true });
+      ok(dry67.success && dry67.dryRun === true && dry67.scanned === 6 && dry67.fragments === 1 && dry67.orphans === 2 && dry67.archived === 3 && dry67.neighbours === 1 && dry67.sample.length === 3
+        && snap67() === before67 && !o67.db.prepare("SELECT 1 FROM log WHERE operation='claims-sweep'").get(),
+        `claims-sweep dryRun reports 3 (fragments ${dry67.fragments}, orphans ${dry67.orphans}, neighbours ${dry67.neighbours} of ${dry67.scanned} scanned) and changes nothing — no claim row, no log row`);
+      o67.db.prepare("UPDATE meta SET value='0' WHERE key='vault_dirty'").run();
+      const run67 = await o67.claimsSweep();
+      const c67 = (id) => o67.claims.get(id);
+      ok(run67.archived === 3 && run67.fragments === 1 && run67.orphans === 2 && run67.neighbours === 1 && run67.dryRun === false, 'the real run archives the same 3');
+      const hb67 = c67(headA67).metadata.archivedBy;
+      ok(c67(headA67).status === 'archived' && hb67?.reason === 'not-a-claim' && !('entry' in hb67) && !Number.isNaN(Date.parse(hb67.at)), 'the heading-shaped claim → archived with archivedBy { at, reason: not-a-claim }');
+      ok(c67(orphB67).status === 'archived' && c67(orphB67).metadata.archivedBy?.reason === 'source-gone' && c67(orphB67).metadata.archivedBy.entry === eB67,
+        'the (deferred) claim whose entry was archived → archived, reason source-gone, archivedBy.entry = that entry');
+      ok(c67(legacy67).status === 'archived' && c67(legacy67).metadata.archivedBy?.reason === 'source-gone' && !('entry' in c67(legacy67).metadata.archivedBy),
+        'the legacy claim (no sourceId) whose path no active entry stands for → archived, reason source-gone');
+      ok([realA67, legacyLive67, nb67].every((id) => c67(id).status === 'active'), 'the real claim, a legacy claim whose path is live, and a claim with no source stay active');
+      ok(!('contradictedBy' in c67(nb67).metadata) && c67(nb67).updated_at === nbBefore67.updated_at, "the archived claim leaves the neighbour's contradictedBy (the emptied list is dropped; the neighbour's updated_at stays)");
+      const lg67 = o67.db.prepare("SELECT detail FROM log WHERE operation='claims-sweep'").all().map((r) => JSON.parse(r.detail));
+      ok(lg67.length === 1 && lg67[0].archived === 3 && lg67[0].fragments === 1 && lg67[0].orphans === 2 && o67.db.prepare("SELECT value FROM meta WHERE key='vault_dirty'").get()?.value === '1',
+        'the run is logged as claims-sweep and marks the vault dirty');
+      const l167 = o67.lint();
+      ok(l167.fragmentClaims === 0 && l167.orphanClaims === 0, 'lint reads fragmentClaims 0 / orphanClaims 0 afterwards');
+      const again67 = await o67.claimsSweep();
+      ok(again67.archived === 0 && again67.scanned === 3, 'a second run is a no-op');
+      // The measured case: a changed file re-ingested supersedes its entry, and the old claim is left live.
+      fs.writeFileSync(fA67, 'The glimmerfen sluice now opens every thursday for the barge crews.\n');
+      await o67.ingest({ path: fA67, type: 'note' });
+      ok(o67.recall(eA67).status === 'archived' && c67(realA67).status === 'active' && o67.lint().orphanClaims === 1, 'a re-ingest supersedes the entry but leaves its claim live → lint orphanClaims 1');
+      frag67b = o67.claims.add({ content: '| sluice | day |' }).id;
+    } finally { o67.close(); }
+    const cd67 = cli53(db67, 'claims-sweep', '--dryRun', '--no-orphans');
+    const cf67 = cli53(db67, 'claims-sweep', '--dryRun', '--no-fragments');
+    ok(cd67.code === 0 && cd67.out?.dryRun === true && cd67.out.fragments === 1 && cd67.out.orphans === 0 && cf67.code === 0 && cf67.out?.fragments === 0 && cf67.out.orphans === 1,
+      'CLI claims-sweep --dryRun with --no-orphans → only the fragment; with --no-fragments → only the orphan');
+    const mc67 = await mcp53(db67, [{ name: 'claims_sweep', arguments: { fragments: false } }]);
+    const tl67 = mc67.find((m) => m.id === 1).result.tools.find((t) => t.name === 'claims_sweep');
+    const call67 = JSON.parse(mc67.find((m) => m.id === 2).result.content[0].text);
+    ok(['fragments', 'orphans', 'dryRun'].every((k) => tl67?.inputSchema?.properties?.[k]?.type === 'boolean') && call67.success === true && call67.orphans === 1 && call67.fragments === 0 && call67.archived === 1,
+      'MCP claims_sweep is listed (fragments / orphans / dryRun booleans); fragments:false archives the orphan only');
+    const cr67 = cli53(db67, 'claims-sweep');
+    ok(cr67.code === 0 && cr67.out?.fragments === 1 && cr67.out.orphans === 0 && cr67.out.archived === 1, 'CLI claims-sweep (real run) archives the fragment');
+    o67 = new Orchestrator(base66('s67'));
+    try {
+      const l267 = o67.lint();
+      ok(o67.claims.get(realA67).metadata.archivedBy?.entry === eA67 && o67.claims.get(frag67b).metadata.archivedBy?.reason === 'not-a-claim' && l267.fragmentClaims === 0 && l267.orphanClaims === 0,
+        'the superseded entry\'s claim was archived with archivedBy.entry = the old entry; the queue is empty');
+    } finally { o67.close(); }
+  }
+
+  // 68. The embedder retries with backoff before falling back (2026-10-19). Measured: one agent process
+  //     wrote 37 placeholder vectors in a day after single embed timeouts, while CLI ingests in the same
+  //     hours embedded normally. A timeout, a refused connection or a 5xx / 429 is retried (embedRetries,
+  //     backoff embedRetryMs × 2^attempt); another 4xx falls back at once. The fake endpoint scripts it.
+  {
+    const { startFakeOpenAI: startFake68 } = await import('./helpers/fake-openai.mjs');
+    const { Embedder: Embedder68, loadConfig: loadConfig68 } = await import('../src/index.mjs');
+    const fake68 = await startFake68({ dim: 16 });
+    const dead68 = await deadUrl66();
+    let o68 = null;
+    try {
+      const d68 = loadConfig68();
+      ok(d68.embedRetries === 2 && d68.embedRetryMs === 250, 'defaults: embedRetries 2 (MIDMEM_EMBED_RETRIES), embedRetryMs 250 (MIDMEM_EMBED_RETRY_MS)');
+      const em68 = (over = {}) => new Embedder68({ ...d68, llmEnabled: true, llmEndpoint: fake68.url, embedModel: 'stub-embed', llmTimeoutMs: 2000, embedRetries: 2, embedRetryMs: 25, ...over });
+      const run68 = async (mode, over) => {
+        fake68.state.embed = mode; fake68.state.embedFailures = 0; fake68.state.embedLog = [];
+        const r = await em68(over).embed('kelvorn68 quayside telemetry');
+        return { r, log: fake68.state.embedLog.slice() };
+      };
+      const a68 = await run68('fail-then-ok:1');
+      ok(a68.r.mode === 'lmstudio' && a68.r.attempts === 2 && a68.r.vector.length === 16 && a68.r.model === 'stub-embed' && !('reason' in a68.r) && JSON.stringify(a68.log.map((x) => x.status)) === '[503,200]',
+        'fail-then-ok:1 → a real vector on attempt 2 (attempts 2, mode lmstudio)');
+      const b68 = await run68('fail-then-ok:3');
+      ok(b68.r.mode === 'fallback' && b68.r.attempts === 3 && b68.r.reason === 'http-503' && b68.r.model === 'fallback-hash-256' && b68.log.length === 3,
+        'fail-then-ok:3 with retries 2 → fallback after 3 attempts, reason http-503');
+      // Timers may fire up to ~1 ms early (millisecond rounding), hence the 1 ms tolerance.
+      const gap1_68 = b68.log[1].at - b68.log[0].at, gap2_68 = b68.log[2].at - b68.log[1].at;
+      ok(gap1_68 >= 24 && gap2_68 >= 49, `backoff honoured: attempt 2 starts ${gap1_68.toFixed(1)} ms after the 1st failure (≥ 25 = embedRetryMs), attempt 3 ${gap2_68.toFixed(1)} ms after the 2nd (≥ 50 = 25 × 2)`);
+      const c68 = await run68('http-400');
+      ok(c68.r.mode === 'fallback' && c68.r.attempts === 1 && c68.r.reason === 'http-400' && c68.log.length === 1, 'http-400 → no retry (the request is wrong, not the box): fallback at once');
+      const t68 = await run68('http-429');
+      ok(t68.r.attempts === 3 && t68.r.reason === 'http-429' && t68.log.length === 3, 'http-429 → retried (rate-limited), then fallback');
+      const h68 = await run68('hang', { llmTimeoutMs: 80, embedRetryMs: 5 });
+      ok(h68.r.mode === 'fallback' && h68.r.attempts === 3 && h68.r.reason === 'timeout' && h68.log.length === 3, 'hang with a short timeout → retried, then fallback with reason timeout');
+      fake68.state.embed = 'ok';
+      const u68 = await em68({ llmEndpoint: dead68, embedRetryMs: 5 }).embed('kelvorn68 quayside');
+      ok(u68.mode === 'fallback' && u68.attempts === 3 && u68.reason === 'unreachable', 'a refused connection → retried, then fallback with reason unreachable');
+      const off68 = await em68({ llmEnabled: false }).embed('kelvorn68 quayside');
+      ok(off68.mode === 'fallback' && off68.attempts === 0 && off68.reason === 'disabled', 'model switched off → no call (attempts 0, reason disabled), the offline path as before');
+      const prev68 = [process.env.MIDMEM_EMBED_RETRIES, process.env.MIDMEM_EMBED_RETRY_MS];
+      process.env.MIDMEM_EMBED_RETRIES = '0'; process.env.MIDMEM_EMBED_RETRY_MS = '7';
+      let e68;
+      try { e68 = loadConfig68(); } finally {
+        if (prev68[0] === undefined) delete process.env.MIDMEM_EMBED_RETRIES; else process.env.MIDMEM_EMBED_RETRIES = prev68[0];
+        if (prev68[1] === undefined) delete process.env.MIDMEM_EMBED_RETRY_MS; else process.env.MIDMEM_EMBED_RETRY_MS = prev68[1];
+      }
+      const z68 = await run68('fail-then-ok:1', { embedRetries: e68.embedRetries, embedRetryMs: e68.embedRetryMs });
+      ok(e68.embedRetries === 0 && e68.embedRetryMs === 7 && z68.r.mode === 'fallback' && z68.r.attempts === 1 && z68.log.length === 1, 'MIDMEM_EMBED_RETRIES=0 → one attempt only (MIDMEM_EMBED_RETRY_MS is read too)');
+      // The ingest / remember log rows record embedAttempts when > 1.
+      o68 = new Orchestrator(base66('s68', { llmEnabled: true, llmEndpoint: fake68.url, embedModel: 'stub-embed', extractModel: 'stub/extract-68', llmTimeoutMs: 2000, embedRetryMs: 5 }));
+      const lastLog68 = (op) => JSON.parse(o68.db.prepare('SELECT detail FROM log WHERE operation=? ORDER BY id DESC LIMIT 1').get(op).detail);
+      fake68.state.embed = 'fail-then-ok:1'; fake68.state.embedFailures = 0;
+      const m68 = await o68.storeMemory({ content: 'The kelvorn68 quayside crane lifts brass containers at dusk.', type: 'note' });
+      ok(lastLog68('remember').embedAttempts === 2 && o68.db.prepare('SELECT model FROM vectors WHERE entry_id=?').get(m68.id)?.model === 'stub-embed',
+        'remember after one busy answer: a real vector, and the remember log row records embedAttempts 2');
+      fake68.state.embedFailures = 0;
+      const p68 = path.join(tmp, 's68', 'quay68.md');
+      fs.writeFileSync(p68, 'The kelvorn68 quayside crane lifts brass containers every dusk. Dock pilots log each lift in the harbour book.');
+      const i68 = await o68.ingest({ path: p68, type: 'note' });
+      ok(i68.success && i68.mode === 'lmstudio' && lastLog68('ingest').embedAttempts === 2, 'ingest after one busy answer: the ingest log row records embedAttempts 2');
+      fake68.state.embed = 'ok';
+      await o68.storeMemory({ content: 'The kelvorn68 harbour bell rings at noon each day.', type: 'note' });
+      ok(!('embedAttempts' in lastLog68('remember')), 'a first-try embed adds no embedAttempts field (only > 1 is recorded)');
+    } finally { o68?.close(); await fake68.close(); }
+  }
+
+  // 69. The forced maintain runs bounded re-embed and reextract batches (2026-10-19). Entries extracted by
+  //     the fallback while the model was down, and the placeholder vectors capture children write with the
+  //     model off by contract, were repaired only by hand runs. Forced pass only: reembedFallback (limit
+  //     maintenance.reembedLimit, self-gating on the embedder) first, then reextract (limit
+  //     maintenance.reextractLimit) when the endpoint answers a cheap GET /models probe; skips and errors
+  //     are recorded, never a failed pass.
+  {
+    const { startFakeOpenAI: startFake69 } = await import('./helpers/fake-openai.mjs');
+    const { loadConfig: loadConfig69 } = await import('../src/index.mjs');
+    const fake69 = await startFake69({ dim: 16 });
+    const dead69 = await deadUrl66();
+    const dir69 = path.join(tmp, 's69');
+    fs.mkdirSync(dir69, { recursive: true });
+    const o69 = new Orchestrator(base66('s69', { export: { enabled: false }, embedRetryMs: 1, maintenance: { ...loadConfig69().maintenance, intervalMs: 0 } }));
+    try {
+      const dm69 = loadConfig69().maintenance;
+      ok(dm69.reextractLimit === 20 && dm69.reembedLimit === 200, 'defaults: maintenance.reextractLimit 20 (MIDMEM_MAINTAIN_REEXTRACT), reembedLimit 200 (MIDMEM_MAINTAIN_REEMBED)');
+      const T69 = {
+        harbour: '# Kestrine harbour log\n\nThe kestrine harbour opened its eastern berth at dawn. Pilots guided three trawlers past the breakwater.\n',
+        orchard: '# Velloran orchard notes\n\nThe velloran orchard harvested amber pears this week. Pickers stacked crates beside the cider barn.\n',
+      };
+      const E69 = {};
+      for (const [k, t] of Object.entries(T69)) { const p = path.join(dir69, `${k}69.md`); fs.writeFileSync(p, t); E69[k] = (await o69.ingest({ path: p, type: 'note' })).entry.id; }
+      const mode69 = (id) => o69.recall(id).provenance.extraction?.mode;
+      const fbVec69 = () => o69.db.prepare("SELECT COUNT(*) c FROM vectors WHERE model LIKE 'fallback%'").get().c;
+      const count69 = (op) => o69.db.prepare('SELECT COUNT(*) c FROM log WHERE operation=?').get(op).c;
+      ok(Object.values(E69).every((id) => mode69(id) === 'fallback') && fbVec69() === 2, 'fixture: two entries ingested with the model off (fallback extraction, placeholder vectors)');
+      const off69 = await o69.maintain({ force: true });
+      ok(off69.reembedded?.skipped === true && off69.reembedded.reason === 'disabled' && off69.reextracted?.skipped === true && off69.reextracted.reason === 'disabled' && count69('reembed') === 0,
+        'the model switched off in this process → both batches skip with reason disabled (no call, no failed reembed row)');
+      Object.assign(o69.cfg, { llmEnabled: true, llmEndpoint: fake69.url, embedModel: 'stub-embed', extractModel: 'stub/extract-69', llmTimeoutMs: 2000 });
+      const chat0_69 = fake69.state.chatCalls;
+      const lazy69 = await o69.maintain();
+      ok(!lazy69.skipped && lazy69.forced === false && lazy69.reembedded === null && lazy69.reextracted === null && fake69.state.chatCalls === chat0_69 && fbVec69() === 2 && mode69(E69.harbour) === 'fallback',
+        'the opportunistic (non-forced) pass runs neither batch');
+      o69.cfg.maintenance.reextractLimit = 0; o69.cfg.maintenance.reembedLimit = 0;
+      let zero69;
+      try { zero69 = await o69.maintain({ force: true }); } finally { o69.cfg.maintenance.reextractLimit = 20; o69.cfg.maintenance.reembedLimit = 200; }
+      ok(zero69.reembedded === null && zero69.reextracted === null && fake69.state.chatCalls === chat0_69 && fbVec69() === 2 && count69('reextract-run') === 0,
+        'reextractLimit 0 / reembedLimit 0 → neither batch runs');
+      o69.cfg.llmEndpoint = dead69;
+      let down69;
+      try { down69 = await o69.maintain({ force: true }); } finally { o69.cfg.llmEndpoint = fake69.url; }
+      ok(down69.forced === true && down69.reembedded?.reembedded === 0 && down69.reembedded.reason === 'embedder-offline' && down69.reextracted?.skipped === true && down69.reextracted.reason === 'unreachable'
+        && fbVec69() === 2 && mode69(E69.harbour) === 'fallback' && count69('reextract-run') === 0,
+        `endpoint unreachable → the pass completes; reembedded reason ${down69.reembedded?.reason}, reextracted skipped with reason ${down69.reextracted?.reason}; nothing touched`);
+      const maint0_69 = count69('maintain');
+      const live69 = await o69.maintain({ force: true });
+      ok(live69.reembedded?.reembedded === 2 && live69.reembedded.remaining === 0 && live69.reextracted?.reextracted === 2 && live69.reextracted.remaining === 0 && live69.reextracted.stopped === null,
+        'endpoint ok → reembedded.reembedded 2 (both placeholders), then reextracted.reextracted 2');
+      ok(Object.values(E69).every((id) => mode69(id) === 'lmstudio') && fbVec69() === 0 && fake69.state.chatCalls === chat0_69 + 2, 'both entries now model-extracted with real vectors: 2 model calls, 0 placeholders left');
+      const rows69 = o69.db.prepare("SELECT detail FROM log WHERE operation='reextract' ORDER BY id").all().map((r) => JSON.parse(r.detail));
+      ok(rows69.length === 2 && rows69.every((r) => r.notClaim === 1), 'the model answered each heading-glued first sentence as a claim: dropped as not claim-shaped, notClaim 1 on each reextract log row');
+      const ml69 = JSON.parse(o69.db.prepare("SELECT detail FROM log WHERE operation='maintain' ORDER BY id DESC LIMIT 1").get().detail);
+      ok(count69('maintain') === maint0_69 + 1 && ml69.reembedded?.reembedded === 2 && ml69.reextracted?.reextracted === 2,
+        'one maintain row for the pass (reextract never re-enters maintenance), carrying both summaries');
+      o69.reembedFallback = async () => { throw new Error('reembed boom69'); };
+      o69.reextract = async () => { throw new Error('reextract boom69'); };
+      let err69;
+      try { err69 = await o69.maintain({ force: true }); } finally { delete o69.reembedFallback; delete o69.reextract; }
+      ok(err69.forced === true && err69.reembedded?.error === 'reembed boom69' && err69.reextracted?.error === 'reextract boom69', 'an error in either batch is recorded, never a failed pass');
+    } finally { o69.close(); await fake69.close(); }
+  }
+
+  // 70. Retrieval and the concept refresh embed with ONE attempt (2026-10-19 gate). §68's retries are for
+  //     writes; a query must not wait three timeouts on a hung box (a fallback query vector still serves
+  //     the lexical lanes), and the concept refresh stops at its first fallback instead of storing hash
+  //     vectors into concept nodes.
+  {
+    const { startFakeOpenAI: startFake70 } = await import('./helpers/fake-openai.mjs');
+    const { Embedder: Embedder70, loadConfig: loadConfig70 } = await import('../src/index.mjs');
+    const fake70 = await startFake70({ dim: 16 });
+    const dir70 = path.join(tmp, 's70');
+    fs.mkdirSync(dir70, { recursive: true });
+    const o70 = new Orchestrator(base66('s70', { export: { enabled: false }, maintenance: { ...loadConfig70().maintenance, intervalMs: 0 } }));
+    try {
+      const em70 = new Embedder70({ ...loadConfig70(), llmEnabled: true, llmEndpoint: fake70.url, embedModel: 'stub-embed', llmTimeoutMs: 2000, embedRetries: 2, embedRetryMs: 1 });
+      fake70.state.embed = 'fail-then-ok:1'; fake70.state.embedFailures = 0; fake70.state.embedLog = [];
+      const one70 = await em70.embed('varnholt70 lantern ledger', { retries: 0 });
+      ok(one70.mode === 'fallback' && one70.attempts === 1 && fake70.state.embedLog.length === 1, `embed(text, { retries: 0 }) makes exactly one attempt and falls back — the per-call override beats the knob (${one70.attempts}, ${fake70.state.embedLog.length})`);
+      fake70.state.embed = 'ok'; fake70.state.embedFailures = 0;
+      // Ingest with the model OFF (the suite's offline extractor gives the note its concepts), then turn the
+      // model ON for the reads under test — §59's pattern: the Embedder reads cfg.llmEnabled live.
+      await o70.ingest({ path: (() => { const f = path.join(dir70, 'ledger70.md'); fs.writeFileSync(f, '# Varnholt lantern ledger\n\nThe varnholt70 lantern keeper logs every lamp relit before dusk on the quay.\n'); return f; })(), type: 'note' });
+      for (const c of [o70.cfg, o70.embedder.cfg]) { c.llmEnabled = true; c.llmEndpoint = fake70.url; c.embedModel = 'stub-embed'; c.llmTimeoutMs = 2000; c.embedRetries = 2; c.embedRetryMs = 1; }
+      fake70.state.embed = 'http-500'; fake70.state.embedLog = [];
+      // deep:true forces the vector lane (the gate would otherwise stop at a sufficient lexical pass)
+      const q70 = await o70.query('varnholt70 lantern keeper quay', { limit: 3, deep: true });
+      ok(fake70.state.embedLog.length === 1 && q70.results.some((r) => /varnholt70/.test(r.content)), `a deep query against a 500-ing embedder makes ONE embed attempt and the lexical lanes still answer (attempts ${fake70.state.embedLog.length}, hits ${q70.results.length})`);
+      fake70.state.embedLog = [];
+      const rc70 = await o70.refreshConcepts({ maxEmbedPerPass: 60 });
+      const stored70 = o70.graph.allNodes().filter((n) => n.type !== 'community' && Array.isArray(n.properties?.embedding));
+      ok(rc70.stopped === 'embedder-offline' && rc70.embedded === 0 && fake70.state.embedLog.length === 1 && stored70.length === 0, `the concept refresh stops at its first fallback (one attempt) and stores no hash vector (stopped ${rc70.stopped}, embedded ${rc70.embedded}, calls ${fake70.state.embedLog.length}, stored ${stored70.length})`);
+      fake70.state.embed = 'ok'; fake70.state.embedFailures = 0;
+      const rc70b = await o70.refreshConcepts({ maxEmbedPerPass: 60 });
+      ok(!rc70b.stopped && rc70b.embedded >= 1, `with the embedder back the refresh embeds the concept nodes (${rc70b.embedded})`);
+    } finally { o70.close(); await fake70.close(); }
+  }
+
+  // 71. Favorites (2026-10-21, schema 6; INTEGRATION-MODES §6 6b): `feedback <id> --favorite | --unfavorite` — one
   //     helpful vote that the unfavorite takes back (idempotent, metadata-only, active entries only); `ingest
   //     --favorite` and the carry-over when a re-capture supersedes a favorite (applied once); the read surfaces
   //     and the export; the ranking boosts (favorite + helpful > favorite > neither at equal relevance, candidates
@@ -2866,192 +3559,192 @@ try {
     const { hybridSearch, coverageWords } = await import('../src/retrieval.mjs');
     const { HELPFUL_TRUST_DELTA } = await import('../src/memory.mjs');
     const { FEEDBACK_TRUST_DELTAS } = await import('../src/entrystatus.mjs');
-    const dir60 = path.join(tmp, 'fav60');
-    fs.mkdirSync(dir60, { recursive: true });
-    const db60 = path.join(dir60, 'state.db');
-    const exp60 = path.join(dir60, 'export.jsonl');
-    const base60 = (dbPath, extra = {}) => ({ dbPath, vaultPath: path.join(dir60, 'vault'), llmEnabled: false, sourceRoots: [tmp], autoIngest: { enabled: false, onMaintain: false }, export: { enabled: true, path: exp60 }, ...extra });
-    const o60 = new Orchestrator(base60(db60));
-    const others60 = [];
+    const dir71 = path.join(tmp, 'fav71');
+    fs.mkdirSync(dir71, { recursive: true });
+    const db71 = path.join(dir71, 'state.db');
+    const exp71 = path.join(dir71, 'export.jsonl');
+    const base71 = (dbPath, extra = {}) => ({ dbPath, vaultPath: path.join(dir71, 'vault'), llmEnabled: false, sourceRoots: [tmp], autoIngest: { enabled: false, onMaintain: false }, export: { enabled: true, path: exp71 }, ...extra });
+    const o71 = new Orchestrator(base71(db71));
+    const others71 = [];
     try {
-      const L60 = 'kb-article-library';
-      const src60 = (docId) => ({ libraryId: L60, docId, canonicalUri: `https://news.example.test/60/${docId}` });
-      const cap60 = (docId, content, extra = {}) => o60.ingestContent({ content, source: src60(docId), type: 'web-article', authority: 'web', project: 'library', ...extra });
-      const row60 = (id) => o60.db.prepare('SELECT * FROM entries WHERE id = ?').get(id);
-      const pick60 = (r) => ({ favorite: r.favorite, favorite_helpful: r.favorite_helpful, helpful_count: r.helpful_count, trust: Number(r.trust_score.toFixed(3)) });
-      const err60 = (fn) => { try { fn(); return null; } catch (e) { return e.message; } };
+      const L71 = 'kb-article-library';
+      const src71 = (docId) => ({ libraryId: L71, docId, canonicalUri: `https://news.example.test/71/${docId}` });
+      const cap71 = (docId, content, extra = {}) => o71.ingestContent({ content, source: src71(docId), type: 'web-article', authority: 'web', project: 'library', ...extra });
+      const row71 = (id) => o71.db.prepare('SELECT * FROM entries WHERE id = ?').get(id);
+      const pick71 = (r) => ({ favorite: r.favorite, favorite_helpful: r.favorite_helpful, helpful_count: r.helpful_count, trust: Number(r.trust_score.toFixed(3)) });
+      const err71 = (fn) => { try { fn(); return null; } catch (e) { return e.message; } };
       const FAV_KEYS = 'changed,favorite,helpful_count,id,success,trust_score';
-      const keys60 = (v) => Object.keys(v || {}).sort().join(',');
+      const keys71 = (v) => Object.keys(v || {}).sort().join(',');
 
-      // 60.1 — schema 6: two INTEGER NOT NULL DEFAULT 0 columns; a new entry starts as no favorite.
-      const cols60 = o60.db.prepare('PRAGMA table_info(entries)').all();
-      const fcol = (n) => cols60.find((c) => c.name === n);
+      // 71.1 — schema 6: two INTEGER NOT NULL DEFAULT 0 columns; a new entry starts as no favorite.
+      const cols71 = o71.db.prepare('PRAGMA table_info(entries)').all();
+      const fcol = (n) => cols71.find((c) => c.name === n);
       ok(fcol('favorite')?.type === 'INTEGER' && fcol('favorite').notnull === 1 && fcol('favorite').dflt_value === '0' && fcol('favorite_helpful')?.type === 'INTEGER' && fcol('favorite_helpful').notnull === 1 && fcol('favorite_helpful').dflt_value === '0',
         'schema 6: entries.favorite and entries.favorite_helpful are INTEGER NOT NULL DEFAULT 0');
-      ok(o60.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value === '6', 'meta schema_version = 6');
-      const tA60 = 'FAVSIXTY alpha: the harbour authority published the quarterly tide gauge report for the estuary. Engineers logged the readings twice a day.';
-      const iA60 = await cap60('fav60a', tA60);
-      const eA60 = iA60.entry.id;
-      ok(JSON.stringify(pick60(row60(eA60))) === '{"favorite":0,"favorite_helpful":0,"helpful_count":0,"trust":0.5}' && iA60.favorite === undefined, 'a new capture starts with favorite 0, favorite_helpful 0 (no favorite block in the ingest result)');
+      ok(o71.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value === '6', 'meta schema_version = 6');
+      const tA71 = 'FAVSIXTY alpha: the harbour authority published the quarterly tide gauge report for the estuary. Engineers logged the readings twice a day.';
+      const iA71 = await cap71('fav71a', tA71);
+      const eA71 = iA71.entry.id;
+      ok(JSON.stringify(pick71(row71(eA71))) === '{"favorite":0,"favorite_helpful":0,"helpful_count":0,"trust":0.5}' && iA71.favorite === undefined, 'a new capture starts with favorite 0, favorite_helpful 0 (no favorite block in the ingest result)');
 
-      // 60.2 — favorite / unfavorite: one vote, idempotent, only the favorite's own vote taken back, metadata-only.
-      const before60 = JSON.stringify(row60(eA60));
-      const f1 = o60.feedbackIfActive(eA60, true, { favorite: true });
-      ok(keys60(f1) === FAV_KEYS && f1.success === true && f1.id === eA60 && f1.favorite === true && f1.helpful_count === 1 && f1.trust_score === 0.55 && f1.changed === true,
+      // 71.2 — favorite / unfavorite: one vote, idempotent, only the favorite's own vote taken back, metadata-only.
+      const before71 = JSON.stringify(row71(eA71));
+      const f1 = o71.feedbackIfActive(eA71, true, { favorite: true });
+      ok(keys71(f1) === FAV_KEYS && f1.success === true && f1.id === eA71 && f1.favorite === true && f1.helpful_count === 1 && f1.trust_score === 0.55 && f1.changed === true,
         'favorite → {success, id, favorite: true, helpful_count 1, trust_score 0.55, changed: true}');
-      ok(Number((f1.trust_score - 0.5).toFixed(3)) === FEEDBACK_TRUST_DELTAS.helpful && HELPFUL_TRUST_DELTA === FEEDBACK_TRUST_DELTAS.helpful && JSON.stringify(pick60(row60(eA60))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}',
+      ok(Number((f1.trust_score - 0.5).toFixed(3)) === FEEDBACK_TRUST_DELTAS.helpful && HELPFUL_TRUST_DELTA === FEEDBACK_TRUST_DELTAS.helpful && JSON.stringify(pick71(row71(eA71))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}',
         'the favorite is exactly one helpful vote (the reported helpful delta); favorite_helpful = 1 records it');
-      const f2 = o60.feedbackIfActive(eA60, true, { favorite: true });
-      ok(keys60(f2) === FAV_KEYS && f2.success && f2.favorite === true && f2.helpful_count === 1 && f2.trust_score === 0.55 && f2.changed === false, 'favorite again → changed: false, nothing moves (idempotent)');
-      const u1 = o60.feedbackIfActive(eA60, true, { favorite: false });
-      ok(keys60(u1) === FAV_KEYS && u1.favorite === false && u1.helpful_count === 0 && u1.trust_score === 0.5 && u1.changed === true && JSON.stringify(row60(eA60)) === before60,
+      const f2 = o71.feedbackIfActive(eA71, true, { favorite: true });
+      ok(keys71(f2) === FAV_KEYS && f2.success && f2.favorite === true && f2.helpful_count === 1 && f2.trust_score === 0.55 && f2.changed === false, 'favorite again → changed: false, nothing moves (idempotent)');
+      const u1 = o71.feedbackIfActive(eA71, true, { favorite: false });
+      ok(keys71(u1) === FAV_KEYS && u1.favorite === false && u1.helpful_count === 0 && u1.trust_score === 0.5 && u1.changed === true && JSON.stringify(row71(eA71)) === before71,
         'unfavorite → the vote is taken back and the row is byte-identical to before the favorite (updated_at, lease and counters untouched)');
-      const u2 = o60.feedbackIfActive(eA60, true, { favorite: false });
-      ok(u2.success && u2.changed === false && u2.favorite === false && u2.helpful_count === 0 && JSON.stringify(row60(eA60)) === before60, 'unfavorite of a non-favorite → changed: false; no vote is taken back');
-      o60.feedbackIfActive(eA60, true, { favorite: true });
-      o60.feedbackIfActive(eA60, true); // an explicit helpful vote on top of the favorite
-      ok(JSON.stringify(pick60(row60(eA60))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":2,"trust":0.6}', 'favorite + an explicit helpful vote → helpful_count 2, trust 0.6');
-      const pr60 = o60.entryStatus({ ids: [eA60] }).entries[0].promotion;
-      ok(pr60.progress.helpful.have === 2 && !pr60.blockers.includes('needs-helpful'), 'the favorite\'s vote counts toward promotion (helpful have 2 = minHelpful; promotion still runs only in maintain)');
-      const u3 = o60.feedbackIfActive(eA60, true, { favorite: false });
-      ok(u3.changed && u3.helpful_count === 1 && u3.trust_score === 0.55 && JSON.stringify(pick60(row60(eA60))) === '{"favorite":0,"favorite_helpful":0,"helpful_count":1,"trust":0.55}', 'unfavorite takes back only the favorite\'s vote: the explicit helpful vote stays');
+      const u2 = o71.feedbackIfActive(eA71, true, { favorite: false });
+      ok(u2.success && u2.changed === false && u2.favorite === false && u2.helpful_count === 0 && JSON.stringify(row71(eA71)) === before71, 'unfavorite of a non-favorite → changed: false; no vote is taken back');
+      o71.feedbackIfActive(eA71, true, { favorite: true });
+      o71.feedbackIfActive(eA71, true); // an explicit helpful vote on top of the favorite
+      ok(JSON.stringify(pick71(row71(eA71))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":2,"trust":0.6}', 'favorite + an explicit helpful vote → helpful_count 2, trust 0.6');
+      const pr71 = o71.entryStatus({ ids: [eA71] }).entries[0].promotion;
+      ok(pr71.progress.helpful.have === 2 && !pr71.blockers.includes('needs-helpful'), 'the favorite\'s vote counts toward promotion (helpful have 2 = minHelpful; promotion still runs only in maintain)');
+      const u3 = o71.feedbackIfActive(eA71, true, { favorite: false });
+      ok(u3.changed && u3.helpful_count === 1 && u3.trust_score === 0.55 && JSON.stringify(pick71(row71(eA71))) === '{"favorite":0,"favorite_helpful":0,"helpful_count":1,"trust":0.55}', 'unfavorite takes back only the favorite\'s vote: the explicit helpful vote stays');
       // Clamping, both ends, and helpful_count never below 0.
-      o60.db.prepare('UPDATE entries SET trust_score = 0.98 WHERE id = ?').run(eA60);
-      const c1 = o60.feedbackIfActive(eA60, true, { favorite: true });
-      const c2 = o60.feedbackIfActive(eA60, true, { favorite: false });
+      o71.db.prepare('UPDATE entries SET trust_score = 0.98 WHERE id = ?').run(eA71);
+      const c1 = o71.feedbackIfActive(eA71, true, { favorite: true });
+      const c2 = o71.feedbackIfActive(eA71, true, { favorite: false });
       ok(c1.trust_score === 1 && c2.trust_score === 0.95, `trust clamps at 1 (0.98 → ${c1.trust_score}); the unfavorite takes the helpful delta off the clamped value (→ ${c2.trust_score})`);
-      o60.db.prepare('UPDATE entries SET trust_score = 0.03, helpful_count = 0, favorite = 1, favorite_helpful = 1 WHERE id = ?').run(eA60);
-      const c3 = o60.feedbackIfActive(eA60, true, { favorite: false });
-      ok(c3.changed && c3.trust_score === 0 && c3.helpful_count === 0 && row60(eA60).helpful_count === 0, 'the take-back clamps trust at 0 and never takes helpful_count below 0');
-      o60.db.prepare('UPDATE entries SET trust_score = 0.5, helpful_count = 0, favorite = 0, favorite_helpful = 0 WHERE id = ?').run(eA60);
+      o71.db.prepare('UPDATE entries SET trust_score = 0.03, helpful_count = 0, favorite = 1, favorite_helpful = 1 WHERE id = ?').run(eA71);
+      const c3 = o71.feedbackIfActive(eA71, true, { favorite: false });
+      ok(c3.changed && c3.trust_score === 0 && c3.helpful_count === 0 && row71(eA71).helpful_count === 0, 'the take-back clamps trust at 0 and never takes helpful_count below 0');
+      o71.db.prepare('UPDATE entries SET trust_score = 0.5, helpful_count = 0, favorite = 0, favorite_helpful = 0 WHERE id = ?').run(eA71);
       // Usage errors and refusals.
-      ok(/one vote/.test(err60(() => o60.feedbackIfActive(eA60, false, { favorite: true })) || '') && /true or false/.test(err60(() => o60.feedbackIfActive(eA60, true, { favorite: 'yes' })) || '') && /bad entry id/.test(err60(() => o60.feedbackIfActive('bad id', true, { favorite: true })) || ''),
+      ok(/one vote/.test(err71(() => o71.feedbackIfActive(eA71, false, { favorite: true })) || '') && /true or false/.test(err71(() => o71.feedbackIfActive(eA71, true, { favorite: 'yes' })) || '') && /bad entry id/.test(err71(() => o71.feedbackIfActive('bad id', true, { favorite: true })) || ''),
         'favorite with an unhelpful vote, a non-boolean favorite or a malformed id is an error');
-      const nf60 = o60.feedbackIfActive('memory-nope-000000000000', true, { favorite: true });
-      ok(nf60.success === false && nf60.reason === 'not-found', 'favorite on an unknown entry → {success:false, reason:not-found}');
-      const tB60 = 'FAVSIXTY bravo: the ferry operator restored the night crossing after the harbour wall repair.';
-      const iB60 = await cap60('fav60b', tB60);
-      o60.feedbackIfActive(iB60.entry.id, true, { favorite: true });
-      await o60.archiveEntries({ ids: [iB60.entry.id], reason: 'smoke 60' });
-      const archived60 = JSON.stringify(row60(iB60.entry.id));
-      const na1 = o60.feedbackIfActive(iB60.entry.id, true, { favorite: false });
-      const na2 = o60.feedbackIfActive(iB60.entry.id, true, { favorite: true });
-      ok(na1.success === false && na1.reason === 'not-active' && na1.status === 'archived' && na2.reason === 'not-active' && JSON.stringify(row60(iB60.entry.id)) === archived60,
+      const nf71 = o71.feedbackIfActive('memory-nope-000000000000', true, { favorite: true });
+      ok(nf71.success === false && nf71.reason === 'not-found', 'favorite on an unknown entry → {success:false, reason:not-found}');
+      const tB71 = 'FAVSIXTY bravo: the ferry operator restored the night crossing after the harbour wall repair.';
+      const iB71 = await cap71('fav71b', tB71);
+      o71.feedbackIfActive(iB71.entry.id, true, { favorite: true });
+      await o71.archiveEntries({ ids: [iB71.entry.id], reason: 'smoke 71' });
+      const archived71 = JSON.stringify(row71(iB71.entry.id));
+      const na1 = o71.feedbackIfActive(iB71.entry.id, true, { favorite: false });
+      const na2 = o71.feedbackIfActive(iB71.entry.id, true, { favorite: true });
+      ok(na1.success === false && na1.reason === 'not-active' && na1.status === 'archived' && na2.reason === 'not-active' && JSON.stringify(row71(iB71.entry.id)) === archived71,
         'an archived entry refuses --favorite and --unfavorite like feedback ({success:false, reason:not-active, status:archived}); nothing moves');
-      ok(o60.memory.setFavorite(iB60.entry.id, true, { activeOnly: true }).reason === 'not-active', 'setFavorite({ activeOnly }) refuses a non-active row in the UPDATE itself (an archive landing between the CLI\'s check and its write)');
-      const logs60 = o60.db.prepare("SELECT detail FROM log WHERE operation='favorite'").all().map((r) => JSON.parse(r.detail));
-      ok(logs60.length >= 8 && logs60.some((d) => d.id === eA60 && d.favorite === true && d.changed === true && d.via === 'feedback') && logs60.some((d) => d.changed === false), `every answered favorite call is logged with changed + via (${logs60.length} rows)`);
+      ok(o71.memory.setFavorite(iB71.entry.id, true, { activeOnly: true }).reason === 'not-active', 'setFavorite({ activeOnly }) refuses a non-active row in the UPDATE itself (an archive landing between the CLI\'s check and its write)');
+      const logs71 = o71.db.prepare("SELECT detail FROM log WHERE operation='favorite'").all().map((r) => JSON.parse(r.detail));
+      ok(logs71.length >= 8 && logs71.some((d) => d.id === eA71 && d.favorite === true && d.changed === true && d.via === 'feedback') && logs71.some((d) => d.changed === false), `every answered favorite call is logged with changed + via (${logs71.length} rows)`);
 
-      // 60.3 — ingest --favorite and the carry-over across a re-capture (applied once; explicit votes do not carry).
+      // 71.3 — ingest --favorite and the carry-over across a re-capture (applied once; explicit votes do not carry).
       const tC1 = 'FAVSIXTY charlie: the lighthouse keeper logged a fog bank rolling in from the north channel.';
-      const iC1 = await cap60('fav60c', tC1, { favorite: true });
-      ok(iC1.favorite?.success && iC1.favorite.favorite === true && iC1.favorite.changed === true && JSON.stringify(pick60(row60(iC1.entry.id))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}',
+      const iC1 = await cap71('fav71c', tC1, { favorite: true });
+      ok(iC1.favorite?.success && iC1.favorite.favorite === true && iC1.favorite.changed === true && JSON.stringify(pick71(row71(iC1.entry.id))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}',
         'ingest --favorite → the new entry starts as a favorite with its one vote (helpful 1, trust 0.55)');
-      o60.feedbackIfActive(iC1.entry.id, true); o60.feedbackIfActive(iC1.entry.id, true); // two explicit votes on the first version
-      const iC2 = await cap60('fav60c', 'FAVSIXTY charlie, revised: the fog bank cleared before the ferry left the north channel.');
+      o71.feedbackIfActive(iC1.entry.id, true); o71.feedbackIfActive(iC1.entry.id, true); // two explicit votes on the first version
+      const iC2 = await cap71('fav71c', 'FAVSIXTY charlie, revised: the fog bank cleared before the ferry left the north channel.');
       ok(JSON.stringify(iC2.superseded) === JSON.stringify([iC1.entry.id]) && iC2.favorite?.favorite === true && JSON.stringify(iC2.favorite.carriedFrom) === JSON.stringify([iC1.entry.id])
-        && JSON.stringify(pick60(row60(iC2.entry.id))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}',
+        && JSON.stringify(pick71(row71(iC2.entry.id))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}',
         're-capture without --favorite → the new entry inherits the favorite and its ONE vote (the old entry\'s explicit votes stay with it)');
-      ok(row60(iC1.entry.id).status === 'archived' && JSON.stringify(pick60(row60(iC1.entry.id))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":3,"trust":0.65}', 'the superseded version keeps its own counters and favorite (history is not rewritten)');
-      const iC3 = await cap60('fav60c', 'FAVSIXTY charlie, final: the north channel reopened at dawn after the fog bank cleared.', { favorite: true });
-      ok(iC3.favorite?.changed === true && JSON.stringify(iC3.favorite.carriedFrom) === JSON.stringify([iC2.entry.id]) && JSON.stringify(pick60(row60(iC3.entry.id))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}',
+      ok(row71(iC1.entry.id).status === 'archived' && JSON.stringify(pick71(row71(iC1.entry.id))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":3,"trust":0.65}', 'the superseded version keeps its own counters and favorite (history is not rewritten)');
+      const iC3 = await cap71('fav71c', 'FAVSIXTY charlie, final: the north channel reopened at dawn after the fog bank cleared.', { favorite: true });
+      ok(iC3.favorite?.changed === true && JSON.stringify(iC3.favorite.carriedFrom) === JSON.stringify([iC2.entry.id]) && JSON.stringify(pick71(row71(iC3.entry.id))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}',
         're-capture of a favorite WITH --favorite → still exactly one vote (carry-over and flag applied once)');
-      ok(o60.db.prepare("SELECT COUNT(*) c FROM log WHERE operation='favorite' AND detail LIKE ?").get(`%"id":"${iC3.entry.id}"%`).c === 1, 'one favorite write logged for that entry (via carry-over)');
-      o60.feedbackIfActive(iC3.entry.id, true, { favorite: false });
-      const iC4 = await cap60('fav60c', 'FAVSIXTY charlie, appendix: the keeper added the tide tables for the north channel.');
-      ok(iC4.favorite === undefined && JSON.stringify(pick60(row60(iC4.entry.id))) === '{"favorite":0,"favorite_helpful":0,"helpful_count":0,"trust":0.5}', 'once unfavorited, a re-capture carries nothing');
-      const iD60 = await cap60('fav60d', 'FAVSIXTY delta: the council approved the new cycle lane along the quay.');
-      const iD2 = await cap60('fav60d', 'FAVSIXTY delta, revised: the council delayed the cycle lane along the quay to spring.');
-      ok(iD2.favorite === undefined && row60(iD2.entry.id).favorite === 0, 're-capture of a non-favorite → no favorite');
+      ok(o71.db.prepare("SELECT COUNT(*) c FROM log WHERE operation='favorite' AND detail LIKE ?").get(`%"id":"${iC3.entry.id}"%`).c === 1, 'one favorite write logged for that entry (via carry-over)');
+      o71.feedbackIfActive(iC3.entry.id, true, { favorite: false });
+      const iC4 = await cap71('fav71c', 'FAVSIXTY charlie, appendix: the keeper added the tide tables for the north channel.');
+      ok(iC4.favorite === undefined && JSON.stringify(pick71(row71(iC4.entry.id))) === '{"favorite":0,"favorite_helpful":0,"helpful_count":0,"trust":0.5}', 'once unfavorited, a re-capture carries nothing');
+      const iD71 = await cap71('fav71d', 'FAVSIXTY delta: the council approved the new cycle lane along the quay.');
+      const iD2 = await cap71('fav71d', 'FAVSIXTY delta, revised: the council delayed the cycle lane along the quay to spring.');
+      ok(iD2.favorite === undefined && row71(iD2.entry.id).favorite === 0, 're-capture of a non-favorite → no favorite');
       // Unchanged source: --favorite favorites the live entry (once); with no active entry it reports why.
-      const iD3 = await cap60('fav60d', 'FAVSIXTY delta, revised: the council delayed the cycle lane along the quay to spring.', { favorite: true });
-      const iD4 = await cap60('fav60d', 'FAVSIXTY delta, revised: the council delayed the cycle lane along the quay to spring.', { favorite: true });
-      ok(iD3.skipped && iD3.reason === 'unchanged' && iD3.favorite?.id === iD2.entry.id && iD3.favorite.changed === true && iD4.favorite?.changed === false && row60(iD2.entry.id).helpful_count === 1,
+      const iD3 = await cap71('fav71d', 'FAVSIXTY delta, revised: the council delayed the cycle lane along the quay to spring.', { favorite: true });
+      const iD4 = await cap71('fav71d', 'FAVSIXTY delta, revised: the council delayed the cycle lane along the quay to spring.', { favorite: true });
+      ok(iD3.skipped && iD3.reason === 'unchanged' && iD3.favorite?.id === iD2.entry.id && iD3.favorite.changed === true && iD4.favorite?.changed === false && row71(iD2.entry.id).helpful_count === 1,
         'unchanged re-ingest with --favorite → the live entry becomes a favorite; a repeat changes nothing');
-      await o60.archiveEntries({ ids: [iD2.entry.id], reason: 'smoke 60' });
-      const iD5 = await cap60('fav60d', 'FAVSIXTY delta, revised: the council delayed the cycle lane along the quay to spring.', { favorite: true });
+      await o71.archiveEntries({ ids: [iD2.entry.id], reason: 'smoke 71' });
+      const iD5 = await cap71('fav71d', 'FAVSIXTY delta, revised: the council delayed the cycle lane along the quay to spring.', { favorite: true });
       ok(iD5.skipped && iD5.reason === 'unchanged' && iD5.favorite?.success === false && iD5.favorite.reason === 'no-active-entry', 'unchanged with no active entry standing → favorite {success:false, reason:no-active-entry}');
       // Linked duplicate: the holder now stands for the second source too and becomes the favorite.
-      const tE60 = 'FAVSIXTY echo: the museum reopened its maritime gallery with the restored figurehead.';
-      const iE1 = await cap60('fav60e', tE60);
-      const iE2 = await cap60('fav60f', tE60, { favorite: true });
-      ok(iE2.reason === 'linked-duplicate' && iE2.entry === iE1.entry.id && iE2.favorite?.id === iE1.entry.id && iE2.favorite.changed === true && row60(iE1.entry.id).favorite === 1, 'linked duplicate with --favorite → the live holder becomes the favorite');
+      const tE71 = 'FAVSIXTY echo: the museum reopened its maritime gallery with the restored figurehead.';
+      const iE1 = await cap71('fav71e', tE71);
+      const iE2 = await cap71('fav71f', tE71, { favorite: true });
+      ok(iE2.reason === 'linked-duplicate' && iE2.entry === iE1.entry.id && iE2.favorite?.id === iE1.entry.id && iE2.favorite.changed === true && row71(iE1.entry.id).favorite === 1, 'linked duplicate with --favorite → the live holder becomes the favorite');
       // ingest --sections --favorite: the digest is the favorite; its per-citation section entries are not.
-      const dg60 = path.join(dir60, 'digest60.md');
-      const body60 = (w) => `${w} volunteers measured the tide gauge along the estuary every morning. ` + 'They compared each reading with the harbour records kept since the old lighthouse was built on the headland, and logged the difference. '.repeat(2);
-      fs.writeFileSync(dg60, ['FAVSIXTY weekly digest.', '', '### Tide gauges', '', 'https://arxiv.org/abs/2610.06001', '', body60('Alpha'), '', '### Harbour records', '', 'https://arxiv.org/abs/2610.06002', '', body60('Bravo'), ''].join('\n'));
-      const sx60 = await o60.ingestSections({ path: dg60, favorite: true });
-      const sxSec60 = (sx60.sections || []).filter((s) => s.entry);
-      ok(sx60.entry?.id && sx60.favorite?.favorite === true && row60(sx60.entry.id).favorite === 1 && sxSec60.length === 2 && sxSec60.every((s) => row60(s.entry).favorite === 0),
+      const dg71 = path.join(dir71, 'digest71.md');
+      const body71 = (w) => `${w} volunteers measured the tide gauge along the estuary every morning. ` + 'They compared each reading with the harbour records kept since the old lighthouse was built on the headland, and logged the difference. '.repeat(2);
+      fs.writeFileSync(dg71, ['FAVSIXTY weekly digest.', '', '### Tide gauges', '', 'https://arxiv.org/abs/2610.06001', '', body71('Alpha'), '', '### Harbour records', '', 'https://arxiv.org/abs/2610.06002', '', body71('Bravo'), ''].join('\n'));
+      const sx71 = await o71.ingestSections({ path: dg71, favorite: true });
+      const sxSec71 = (sx71.sections || []).filter((s) => s.entry);
+      ok(sx71.entry?.id && sx71.favorite?.favorite === true && row71(sx71.entry.id).favorite === 1 && sxSec71.length === 2 && sxSec71.every((s) => row71(s.entry).favorite === 0),
         'ingest --sections --favorite → the digest entry is the favorite; its two section entries are not');
-      let badFav60 = null;
-      try { await o60.ingest({ path: path.join(dir60, 'absent.md'), favorite: 'yes' }); } catch (e) { badFav60 = e.message; }
-      ok(/favorite must be true or false/.test(badFav60 || ''), 'ingest refuses a non-boolean favorite before reading anything');
+      let badFav71 = null;
+      try { await o71.ingest({ path: path.join(dir71, 'absent.md'), favorite: 'yes' }); } catch (e) { badFav71 = e.message; }
+      ok(/favorite must be true or false/.test(badFav71 || ''), 'ingest refuses a non-boolean favorite before reading anything');
 
-      // 60.4 — read surfaces: entries / entry_status, recall, query rows, brief, the export.
-      const v60 = o60.entryStatus({ libraryId: L60, docIds: ['fav60c', 'fav60a'] }).entries;
-      const vc60 = v60.find((e) => e.docId === 'fav60c'); const va60 = v60.find((e) => e.docId === 'fav60a');
-      ok(vc60.id === iC4.entry.id && vc60.favorite === false && vc60.favoriteHelpful === false && va60.favorite === false, 'entries: favorite / favoriteHelpful booleans on every view');
-      o60.feedbackIfActive(eA60, true, { favorite: true });
-      const va60b = o60.entryStatus({ ids: [eA60] }).entries[0];
-      ok(va60b.favorite === true && va60b.favoriteHelpful === true && va60b.helpfulCount === 1, 'entries after a favorite: favorite true, favoriteHelpful true, helpfulCount includes the vote');
-      ok(o60.recall(eA60).favorite === 1 && o60.recall(eA60).favorite_helpful === 1, 'recall returns the stored favorite / favorite_helpful columns');
-      const q60 = await o60.query('FAVSIXTY harbour tide gauge estuary', { projects: ['library'], limit: 10 });
-      const qa60 = q60.results.find((r) => r.id === eA60);
-      ok(qa60?.favorite === true && qa60.rank.favorite === o60.cfg.favoriteWeight && qa60.rank.favoriteHelpful === undefined && q60.results.every((r) => r.favorite === (row60(r.id).favorite === 1) && (r.rank.favorite !== undefined) === r.favorite),
+      // 71.4 — read surfaces: entries / entry_status, recall, query rows, brief, the export.
+      const v71 = o71.entryStatus({ libraryId: L71, docIds: ['fav71c', 'fav71a'] }).entries;
+      const vc71 = v71.find((e) => e.docId === 'fav71c'); const va71 = v71.find((e) => e.docId === 'fav71a');
+      ok(vc71.id === iC4.entry.id && vc71.favorite === false && vc71.favoriteHelpful === false && va71.favorite === false, 'entries: favorite / favoriteHelpful booleans on every view');
+      o71.feedbackIfActive(eA71, true, { favorite: true });
+      const va71b = o71.entryStatus({ ids: [eA71] }).entries[0];
+      ok(va71b.favorite === true && va71b.favoriteHelpful === true && va71b.helpfulCount === 1, 'entries after a favorite: favorite true, favoriteHelpful true, helpfulCount includes the vote');
+      ok(o71.recall(eA71).favorite === 1 && o71.recall(eA71).favorite_helpful === 1, 'recall returns the stored favorite / favorite_helpful columns');
+      const q71 = await o71.query('FAVSIXTY harbour tide gauge estuary', { projects: ['library'], limit: 10 });
+      const qa71 = q71.results.find((r) => r.id === eA71);
+      ok(qa71?.favorite === true && qa71.rank.favorite === o71.cfg.favoriteWeight && qa71.rank.favoriteHelpful === undefined && q71.results.every((r) => r.favorite === (row71(r.id).favorite === 1) && (r.rank.favorite !== undefined) === r.favorite),
         'query rows carry favorite; rank.favorite = favoriteWeight on favorites only; no favoriteHelpful without an explicit vote');
-      ok((await o60.brief()).favorites === o60.db.prepare("SELECT COUNT(*) c FROM entries WHERE status='active' AND favorite=1").get().c, `brief reports the active favorites (${(await o60.brief()).favorites})`);
-      o60.exportKnowledge();
-      const ex60 = fs.readFileSync(exp60, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r._table === 'entries');
-      ok(ex60.length > 0 && ex60.every((r) => 'favorite' in r && 'favorite_helpful' in r) && ex60.find((r) => r.id === eA60)?.favorite === 1 && !('helpful_count' in ex60[0]),
+      ok((await o71.brief()).favorites === o71.db.prepare("SELECT COUNT(*) c FROM entries WHERE status='active' AND favorite=1").get().c, `brief reports the active favorites (${(await o71.brief()).favorites})`);
+      o71.exportKnowledge();
+      const ex71 = fs.readFileSync(exp71, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r._table === 'entries');
+      ok(ex71.length > 0 && ex71.every((r) => 'favorite' in r && 'favorite_helpful' in r) && ex71.find((r) => r.id === eA71)?.favorite === 1 && !('helpful_count' in ex71[0]),
         'the export keeps favorite and favorite_helpful on every entry line (counters stay out as volatile)');
 
-      // 60.5 — the CLI: the KC argv shapes (flag after the id, or anywhere), the fixed JSON, usage errors, refusals.
-      const bin60 = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin');
-      const env60 = { ...process.env, MIDMEM_DB_PATH: db60, OBSIDIAN_VAULT_PATH: path.join(dir60, 'vault'), MIDMEM_SOURCE_ROOTS: tmp, MIDMEM_LLM_ENABLED: '0', MIDMEM_AUTO_INGEST: '0', MIDMEM_MAINTENANCE: '0', MIDMEM_EXPORT_ENABLED: '0' };
-      const cli60 = (...args) => {
-        const r = spawnSync(process.execPath, [path.join(bin60, 'cli.mjs'), ...args], { env: env60, encoding: 'utf8', timeout: 30000 });
+      // 71.5 — the CLI: the KC argv shapes (flag after the id, or anywhere), the fixed JSON, usage errors, refusals.
+      const bin71 = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin');
+      const env71 = { ...process.env, MIDMEM_DB_PATH: db71, OBSIDIAN_VAULT_PATH: path.join(dir71, 'vault'), MIDMEM_SOURCE_ROOTS: tmp, MIDMEM_LLM_ENABLED: '0', MIDMEM_AUTO_INGEST: '0', MIDMEM_MAINTENANCE: '0', MIDMEM_EXPORT_ENABLED: '0' };
+      const cli71 = (...args) => {
+        const r = spawnSync(process.execPath, [path.join(bin71, 'cli.mjs'), ...args], { env: env71, encoding: 'utf8', timeout: 30000 });
         let parsed = null; try { parsed = JSON.parse(r.stdout); } catch { /* not JSON */ }
         return { code: r.status, out: parsed, err: r.stderr };
       };
-      const tG60 = 'FAVSIXTY golf: the observatory volunteers counted forty meteors over the dunes before dawn.';
-      const eG60 = (await cap60('fav60g', tG60)).entry.id;
-      const k1 = cli60('feedback', eG60, '--favorite');
-      ok(k1.code === 0 && keys60(k1.out) === FAV_KEYS && k1.out.favorite === true && k1.out.helpful_count === 1 && k1.out.trust_score === 0.55 && k1.out.changed === true, 'CLI feedback <id> --favorite → exit 0, exactly {success, id, favorite, helpful_count, trust_score, changed}');
-      const k2 = cli60('feedback', '--favorite', eG60);
-      ok(k2.code === 0 && k2.out?.id === eG60 && k2.out.changed === false && k2.out.helpful_count === 1, 'CLI --favorite is a bare switch: before the id too, and idempotent (changed false)');
-      const k3 = cli60('feedback', eG60, '--unfavorite');
-      ok(k3.code === 0 && keys60(k3.out) === FAV_KEYS && k3.out.favorite === false && k3.out.helpful_count === 0 && k3.out.trust_score === 0.5 && k3.out.changed === true, 'CLI feedback <id> --unfavorite → the vote taken back');
-      const k4 = cli60('feedback', eG60, '--favorite', '--unhelpful');
-      const k5 = cli60('feedback', eG60, '--unfavorite', '--favorite');
-      const k6 = cli60('feedback', eG60, '--unhelpful', '--unfavorite');
-      ok([k4, k5, k6].every((k) => k.code === 1 && /^ERROR: feedback takes one of --unhelpful, --favorite, --unfavorite/.test(k.err)) && row60(eG60).helpful_count === 0 && row60(eG60).favorite === 0,
+      const tG71 = 'FAVSIXTY golf: the observatory volunteers counted forty meteors over the dunes before dawn.';
+      const eG71 = (await cap71('fav71g', tG71)).entry.id;
+      const k1 = cli71('feedback', eG71, '--favorite');
+      ok(k1.code === 0 && keys71(k1.out) === FAV_KEYS && k1.out.favorite === true && k1.out.helpful_count === 1 && k1.out.trust_score === 0.55 && k1.out.changed === true, 'CLI feedback <id> --favorite → exit 0, exactly {success, id, favorite, helpful_count, trust_score, changed}');
+      const k2 = cli71('feedback', '--favorite', eG71);
+      ok(k2.code === 0 && k2.out?.id === eG71 && k2.out.changed === false && k2.out.helpful_count === 1, 'CLI --favorite is a bare switch: before the id too, and idempotent (changed false)');
+      const k3 = cli71('feedback', eG71, '--unfavorite');
+      ok(k3.code === 0 && keys71(k3.out) === FAV_KEYS && k3.out.favorite === false && k3.out.helpful_count === 0 && k3.out.trust_score === 0.5 && k3.out.changed === true, 'CLI feedback <id> --unfavorite → the vote taken back');
+      const k4 = cli71('feedback', eG71, '--favorite', '--unhelpful');
+      const k5 = cli71('feedback', eG71, '--unfavorite', '--favorite');
+      const k6 = cli71('feedback', eG71, '--unhelpful', '--unfavorite');
+      ok([k4, k5, k6].every((k) => k.code === 1 && /^ERROR: feedback takes one of --unhelpful, --favorite, --unfavorite/.test(k.err)) && row71(eG71).helpful_count === 0 && row71(eG71).favorite === 0,
         'CLI: two votes in one call (--favorite/--unfavorite/--unhelpful) → exit 1 + ERROR:, nothing written');
-      const k7 = cli60('feedback', iB60.entry.id, '--favorite');
-      const k8 = cli60('feedback', 'memory-nope-000000000000', '--unfavorite');
+      const k7 = cli71('feedback', iB71.entry.id, '--favorite');
+      const k8 = cli71('feedback', 'memory-nope-000000000000', '--unfavorite');
       ok(k7.code === 0 && k7.out?.success === false && k7.out.reason === 'not-active' && k7.out.status === 'archived' && k8.code === 0 && k8.out?.reason === 'not-found', 'CLI favorite on an archived / unknown entry → exit 0, {success:false, reason}');
-      const k9 = cli60('feedback', eG60);
-      const k10 = cli60('feedback', eG60, '--unhelpful');
-      ok(k9.code === 0 && keys60(k9.out) === 'helpful,id,success,trust_score' && k9.out.trust_score === 0.55 && k10.code === 0 && keys60(k10.out) === 'helpful,id,success,trust_score' && k10.out.helpful === false,
+      const k9 = cli71('feedback', eG71);
+      const k10 = cli71('feedback', eG71, '--unhelpful');
+      ok(k9.code === 0 && keys71(k9.out) === 'helpful,id,success,trust_score' && k9.out.trust_score === 0.55 && k10.code === 0 && keys71(k10.out) === 'helpful,id,success,trust_score' && k10.out.helpful === false,
         'the existing KC argv is unchanged: feedback <id> [--unhelpful] → {success, id, trust_score, helpful}');
-      const arch60 = path.join(tmp, 'fav60-archive', 'web', 'a1b2c3d4e5f6');
-      fs.mkdirSync(arch60, { recursive: true });
-      fs.writeFileSync(path.join(arch60, 'article.md'), 'FAVSIXTY hotel: the tram depot opened its doors for the heritage weekend and ran the restored cars.');
-      const kcArgv = (extra) => ['ingest', path.join(arch60, 'article.md'), '--type', 'web-article', '--authority', 'web', '--scope', 'shared', '--project', 'library', '--title', 'Heritage trams', '--source-uri', 'https://news.example.test/60/trams', '--canonical-uri', 'https://news.example.test/60/trams', '--library', L60, '--doc-id', 'a1b2c3d4e5f6', '--capture-method', 'url_fetch', '--captured-at', '2026-10-21T00:00:00Z', ...extra];
-      const k11 = cli60(...kcArgv(['--favorite']));
-      const eH60 = k11.out?.entry?.id;
-      ok(k11.code === 0 && eH60 && k11.out.favorite?.favorite === true && JSON.stringify(pick60(row60(eH60))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}', 'CLI: the KC ingest argv + --favorite → the new entry is a favorite with its one vote');
-      fs.writeFileSync(path.join(arch60, 'article.md'), 'FAVSIXTY hotel, updated: the tram depot extended the heritage weekend by a day and ran the restored cars again.');
-      const k12 = cli60('ingest', '--favorite', ...kcArgv([]).slice(1));
-      ok(k12.code === 0 && JSON.stringify(k12.out?.superseded) === JSON.stringify([eH60]) && JSON.stringify(k12.out.favorite?.carriedFrom) === JSON.stringify([eH60]) && row60(k12.out.entry.id).helpful_count === 1,
+      const arch71 = path.join(tmp, 'fav71-archive', 'web', 'a1b2c3d4e5f6');
+      fs.mkdirSync(arch71, { recursive: true });
+      fs.writeFileSync(path.join(arch71, 'article.md'), 'FAVSIXTY hotel: the tram depot opened its doors for the heritage weekend and ran the restored cars.');
+      const kcArgv = (extra) => ['ingest', path.join(arch71, 'article.md'), '--type', 'web-article', '--authority', 'web', '--scope', 'shared', '--project', 'library', '--title', 'Heritage trams', '--source-uri', 'https://news.example.test/71/trams', '--canonical-uri', 'https://news.example.test/71/trams', '--library', L71, '--doc-id', 'a1b2c3d4e5f6', '--capture-method', 'url_fetch', '--captured-at', '2026-10-21T00:00:00Z', ...extra];
+      const k11 = cli71(...kcArgv(['--favorite']));
+      const eH71 = k11.out?.entry?.id;
+      ok(k11.code === 0 && eH71 && k11.out.favorite?.favorite === true && JSON.stringify(pick71(row71(eH71))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}', 'CLI: the KC ingest argv + --favorite → the new entry is a favorite with its one vote');
+      fs.writeFileSync(path.join(arch71, 'article.md'), 'FAVSIXTY hotel, updated: the tram depot extended the heritage weekend by a day and ran the restored cars again.');
+      const k12 = cli71('ingest', '--favorite', ...kcArgv([]).slice(1));
+      ok(k12.code === 0 && JSON.stringify(k12.out?.superseded) === JSON.stringify([eH71]) && JSON.stringify(k12.out.favorite?.carriedFrom) === JSON.stringify([eH71]) && row71(k12.out.entry.id).helpful_count === 1,
         'CLI: --favorite before the path is a switch too; the re-capture carries the favorite once');
-      const k13 = cli60(...kcArgv(['--unfavorite']));
+      const k13 = cli71(...kcArgv(['--unfavorite']));
       ok(k13.code === 1 && /^ERROR: ingest takes --favorite only/.test(k13.err), 'CLI ingest --unfavorite → exit 1 + ERROR: (clearing is feedback --unfavorite)');
-      const k14 = cli60('entries', '--library', L60, '--doc-ids', 'a1b2c3d4e5f6');
+      const k14 = cli71('entries', '--library', L71, '--doc-ids', 'a1b2c3d4e5f6');
       ok(k14.code === 0 && k14.out?.entries?.[0]?.favorite === true && k14.out.entries[0].favoriteHelpful === true && k14.out.entries[0].helpfulCount === 1, 'CLI entries → favorite / favoriteHelpful on the view');
       // MCP read tools: entry_status, recall and query show the favorite.
-      const mcp60 = await new Promise((resolve, reject) => {
-        const p = spawn(process.execPath, [path.join(bin60, 'mcp-server.mjs')], { env: env60, stdio: ['pipe', 'pipe', 'ignore'] });
+      const mcp71 = await new Promise((resolve, reject) => {
+        const p = spawn(process.execPath, [path.join(bin71, 'mcp-server.mjs')], { env: env71, stdio: ['pipe', 'pipe', 'ignore'] });
         const lines = []; let buf = '';
         const timer = setTimeout(() => { p.kill(); reject(new Error('mcp-server timed out')); }, 30000);
         p.stdout.on('data', (d) => {
@@ -3060,83 +3753,83 @@ try {
           if (lines.length === 3) { clearTimeout(timer); p.kill(); resolve(lines); }
         });
         p.on('error', reject);
-        p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'entry_status', arguments: { entryIds: [eA60] } } }) + '\n');
-        p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'recall', arguments: { entryId: eA60 } } }) + '\n');
+        p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'entry_status', arguments: { entryIds: [eA71] } } }) + '\n');
+        p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'recall', arguments: { entryId: eA71 } } }) + '\n');
         p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'query', arguments: { query: 'FAVSIXTY harbour tide gauge estuary', projects: ['library'] } } }) + '\n');
       });
-      const mcpOut = (id) => JSON.parse(mcp60.find((m) => m.id === id).result.content[0].text);
-      ok(mcpOut(1).entries[0].favorite === true && mcpOut(1).entries[0].favoriteHelpful === true && mcpOut(2).favorite === 1 && mcpOut(3).results.find((r) => r.id === eA60)?.favorite === true,
+      const mcpOut = (id) => JSON.parse(mcp71.find((m) => m.id === id).result.content[0].text);
+      ok(mcpOut(1).entries[0].favorite === true && mcpOut(1).entries[0].favoriteHelpful === true && mcpOut(2).favorite === 1 && mcpOut(3).results.find((r) => r.id === eA71)?.favorite === true,
         'MCP entry_status / recall / query show the favorite');
 
-      // 60.6 — ranking on fixed fixtures (hybridSearch directly: a pure read, so every run sees the same store).
-      const o60r = new Orchestrator(base60(path.join(dir60, 'rank.db')));
-      others60.push(o60r);
-      const rank60 = (q, lexicalOnly, oo = o60r) => hybridSearch(oo.db, oo.memory, oo.embedder, q, { limit: 50, lexicalOnly });
-      const lead60 = 'the harbour authority published the quarterly tide gauge report for the estuary. Engineers logged the gauge readings at the estuary twice a day.';
-      const trio60 = [];
-      for (const tag of ['KXQ', 'KXR', 'KXS']) trio60.push((await o60r.storeMemory({ content: `${tag} ${lead60}`, tier: 'memory', type: 'note', scope: 'shared' })).id);
-      const distract60 = (await o60r.storeMemory({ content: 'An unrelated note about sourdough starter, flour and salt.', tier: 'memory', type: 'note', scope: 'shared' })).id;
-      const reset60 = () => { for (const id of [...trio60, distract60]) o60r.db.prepare('UPDATE entries SET favorite = 0, favorite_helpful = 0, helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(id); };
-      const Q60 = 'quarterly tide gauge estuary';
-      let ordered60 = 0, total60 = 0;
+      // 71.6 — ranking on fixed fixtures (hybridSearch directly: a pure read, so every run sees the same store).
+      const o71r = new Orchestrator(base71(path.join(dir71, 'rank.db')));
+      others71.push(o71r);
+      const rank71 = (q, lexicalOnly, oo = o71r) => hybridSearch(oo.db, oo.memory, oo.embedder, q, { limit: 50, lexicalOnly });
+      const lead71 = 'the harbour authority published the quarterly tide gauge report for the estuary. Engineers logged the gauge readings at the estuary twice a day.';
+      const trio71 = [];
+      for (const tag of ['KXQ', 'KXR', 'KXS']) trio71.push((await o71r.storeMemory({ content: `${tag} ${lead71}`, tier: 'memory', type: 'note', scope: 'shared' })).id);
+      const distract71 = (await o71r.storeMemory({ content: 'An unrelated note about sourdough starter, flour and salt.', tier: 'memory', type: 'note', scope: 'shared' })).id;
+      const reset71 = () => { for (const id of [...trio71, distract71]) o71r.db.prepare('UPDATE entries SET favorite = 0, favorite_helpful = 0, helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(id); };
+      const Q71 = 'quarterly tide gauge estuary';
+      let ordered71 = 0, total71 = 0;
       for (const [fh, f, n] of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]) {
-        reset60();
-        o60r.memory.setFavorite(trio60[fh], true); o60r.memory.recordFeedback(trio60[fh], true);
-        o60r.memory.setFavorite(trio60[f], true);
+        reset71();
+        o71r.memory.setFavorite(trio71[fh], true); o71r.memory.recordFeedback(trio71[fh], true);
+        o71r.memory.setFavorite(trio71[f], true);
         for (const lexical of [true, false]) {
-          const res = await rank60(Q60, lexical);
+          const res = await rank71(Q71, lexical);
           const at = (id) => res.findIndex((r) => r.id === id);
-          total60++;
-          if (at(trio60[fh]) === 0 && at(trio60[f]) === 1 && at(trio60[n]) === 2) ordered60++;
+          total71++;
+          if (at(trio71[fh]) === 0 && at(trio71[f]) === 1 && at(trio71[n]) === 2) ordered71++;
         }
       }
-      ok(ordered60 === 12, `equal relevance: favorite + helpful > favorite > neither for all 6 role assignments, lexical and deep (${ordered60}/12)`);
-      reset60();
-      const plain60 = (await rank60(Q60, true)).map((r) => r.id);
-      o60r.memory.setFavorite(distract60, true); o60r.memory.recordFeedback(distract60, true);
-      const lexFav60 = await rank60(Q60, true);
-      ok(JSON.stringify(lexFav60.map((r) => r.id).sort()) === JSON.stringify([...plain60].sort()) && !lexFav60.some((r) => r.id === distract60), 'no boost for a non-candidate: a favorite matching none of the words never joins the lexical results');
-      ok(!(await rank60(Q60, false)).some((r) => r.id === distract60), 'deep pass: no lane returns the unrelated favorite (zero vector similarity), so it is never added');
+      ok(ordered71 === 12, `equal relevance: favorite + helpful > favorite > neither for all 6 role assignments, lexical and deep (${ordered71}/12)`);
+      reset71();
+      const plain71 = (await rank71(Q71, true)).map((r) => r.id);
+      o71r.memory.setFavorite(distract71, true); o71r.memory.recordFeedback(distract71, true);
+      const lexFav71 = await rank71(Q71, true);
+      ok(JSON.stringify(lexFav71.map((r) => r.id).sort()) === JSON.stringify([...plain71].sort()) && !lexFav71.some((r) => r.id === distract71), 'no boost for a non-candidate: a favorite matching none of the words never joins the lexical results');
+      ok(!(await rank71(Q71, false)).some((r) => r.id === distract71), 'deep pass: no lane returns the unrelated favorite (zero vector similarity), so it is never added');
       // The strongest vector-only candidate there can be: its vector IS the query's embedding (vector rank 1, no query word).
-      await o60r.memory.upsertVector(distract60, (await o60r.embedder.embed(Q60)).vector, 'fallback-hash-256', 'fallback');
-      const deepFav60 = await rank60(Q60, false);
-      const dPos60 = deepFav60.findIndex((r) => r.id === distract60);
-      ok(dPos60 === trio60.length && deepFav60[dPos60]?.rank.vector === 1 && trio60.every((id) => deepFav60.findIndex((r) => r.id === id) < dPos60) && deepFav60[dPos60].favorite === true,
+      await o71r.memory.upsertVector(distract71, (await o71r.embedder.embed(Q71)).vector, 'fallback-hash-256', 'fallback');
+      const deepFav71 = await rank71(Q71, false);
+      const dPos71 = deepFav71.findIndex((r) => r.id === distract71);
+      ok(dPos71 === trio71.length && deepFav71[dPos71]?.rank.vector === 1 && trio71.every((id) => deepFav71.findIndex((r) => r.id === id) < dPos71) && deepFav71[dPos71].favorite === true,
         'deep pass: the unrelated favorite as the top vector match (no query word) still stays below every entry holding the query\'s words');
-      ok(deepFav60[dPos60]?.rank.favorite === o60r.cfg.favoriteWeight && deepFav60[dPos60].rank.favoriteHelpful === o60r.cfg.favoriteHelpfulWeight, 'rank carries favorite / favoriteHelpful (the boosts it received)');
+      ok(deepFav71[dPos71]?.rank.favorite === o71r.cfg.favoriteWeight && deepFav71[dPos71].rank.favoriteHelpful === o71r.cfg.favoriteHelpfulWeight, 'rank carries favorite / favoriteHelpful (the boosts it received)');
       // The guard: a favorite holding one of three words, one rank under the entry holding all three.
-      const o60g = new Orchestrator(base60(path.join(dir60, 'guard.db')));
-      others60.push(o60g);
-      const strong60 = (await o60g.storeMemory({ content: 'Quorvex zibbon plavet: the quorvex ledger syncs zibbon shards across the plavet mesh.', tier: 'memory', type: 'note', scope: 'shared' })).id;
-      const weak60 = (await o60g.storeMemory({ content: 'Plavet hosts keep the nightly backup window short.', tier: 'memory', type: 'note', scope: 'shared' })).id;
-      const g0 = await rank60('quorvex zibbon plavet', true, o60g);
-      o60g.memory.setFavorite(weak60, true);
-      const g1 = await rank60('quorvex zibbon plavet', true, o60g);
-      ok(g0[0].id === strong60 && g0[0].score - g0[1].score < o60g.cfg.favoriteWeight && g1[0].id === strong60 && g1[1].id === weak60 && g1[1].rank.favoriteGuard === true && g1[1].score < g1[0].score,
-        `guard: the one-word favorite stays under the all-words entry (gap ${(g0[0].score - g0[1].score).toFixed(6)} < favoriteWeight ${o60g.cfg.favoriteWeight}; rank.favoriteGuard)`);
+      const o71g = new Orchestrator(base71(path.join(dir71, 'guard.db')));
+      others71.push(o71g);
+      const strong71 = (await o71g.storeMemory({ content: 'Quorvex zibbon plavet: the quorvex ledger syncs zibbon shards across the plavet mesh.', tier: 'memory', type: 'note', scope: 'shared' })).id;
+      const weak71 = (await o71g.storeMemory({ content: 'Plavet hosts keep the nightly backup window short.', tier: 'memory', type: 'note', scope: 'shared' })).id;
+      const g0 = await rank71('quorvex zibbon plavet', true, o71g);
+      o71g.memory.setFavorite(weak71, true);
+      const g1 = await rank71('quorvex zibbon plavet', true, o71g);
+      ok(g0[0].id === strong71 && g0[0].score - g0[1].score < o71g.cfg.favoriteWeight && g1[0].id === strong71 && g1[1].id === weak71 && g1[1].rank.favoriteGuard === true && g1[1].score < g1[0].score,
+        `guard: the one-word favorite stays under the all-words entry (gap ${(g0[0].score - g0[1].score).toFixed(6)} < favoriteWeight ${o71g.cfg.favoriteWeight}; rank.favoriteGuard)`);
       // Off switches: weight 0 → no boost; a non-numeric env weight scores no NaN.
-      const o60z = new Orchestrator(base60(path.join(dir60, 'guard.db'), { favoriteWeight: 0, favoriteHelpfulWeight: Number('typo') }));
-      others60.push(o60z);
-      const z1 = await rank60('quorvex zibbon plavet', true, o60z);
-      const zw = z1.find((r) => r.id === weak60);
+      const o71z = new Orchestrator(base71(path.join(dir71, 'guard.db'), { favoriteWeight: 0, favoriteHelpfulWeight: Number('typo') }));
+      others71.push(o71z);
+      const z1 = await rank71('quorvex zibbon plavet', true, o71z);
+      const zw = z1.find((r) => r.id === weak71);
       ok(zw && zw.rank.favorite === undefined && zw.rank.favoriteHelpful === undefined && z1.every((r) => Number.isFinite(r.score)), 'favoriteWeight 0 (or a NaN weight) → no favorite boost, no NaN score');
       // KC's acceptance shape through the CLI: two equally relevant captures, both favorites, one also voted Helpful.
       const kcQ = 'FAVSIXTY lighthouse beacon restoration';
-      const eK1 = (await cap60('fav60k', 'FAVSIXTY KILO: the volunteers finished the lighthouse beacon restoration on the headland.')).entry.id;
-      const eK2 = (await cap60('fav60l', 'FAVSIXTY LIMA: the volunteers finished the lighthouse beacon restoration on the headland.')).entry.id;
-      for (const id of [eK1, eK2]) cli60('feedback', id, '--favorite');
-      const second = cli60('query', kcQ, '--projects', 'library').out.results.filter((r) => [eK1, eK2].includes(r.id))[1].id; // the lower of the two now
-      cli60('feedback', second); // a Helpful vote on the one ranked lower
-      const kq = cli60('query', kcQ, '--projects', 'library').out.results.filter((r) => [eK1, eK2].includes(r.id));
-      ok(kq.length === 2 && kq[0].id === second && kq[0].rank.favoriteHelpful === o60.cfg.favoriteHelpfulWeight && kq[1].rank.favoriteHelpful === undefined, 'CLI query: favorite + Helpful ranks above an equally relevant favorite-only capture');
+      const eK1 = (await cap71('fav71k', 'FAVSIXTY KILO: the volunteers finished the lighthouse beacon restoration on the headland.')).entry.id;
+      const eK2 = (await cap71('fav71l', 'FAVSIXTY LIMA: the volunteers finished the lighthouse beacon restoration on the headland.')).entry.id;
+      for (const id of [eK1, eK2]) cli71('feedback', id, '--favorite');
+      const second = cli71('query', kcQ, '--projects', 'library').out.results.filter((r) => [eK1, eK2].includes(r.id))[1].id; // the lower of the two now
+      cli71('feedback', second); // a Helpful vote on the one ranked lower
+      const kq = cli71('query', kcQ, '--projects', 'library').out.results.filter((r) => [eK1, eK2].includes(r.id));
+      ok(kq.length === 2 && kq[0].id === second && kq[0].rank.favoriteHelpful === o71.cfg.favoriteHelpfulWeight && kq[1].rank.favoriteHelpful === undefined, 'CLI query: favorite + Helpful ranks above an equally relevant favorite-only capture');
 
-      // 60.7 — migration 5 → 6 on a copy-shaped store: active, archived (superseded + by id), wisdom and deleted rows
+      // 71.7 — migration 5 → 6 on a copy-shaped store: active, archived (superseded + by id), wisdom and deleted rows
       //        with votes, retrievals, claims and vectors; then the same file reopened by the v6 code.
-      const mdir = path.join(dir60, 'mig');
+      const mdir = path.join(dir71, 'mig');
       fs.mkdirSync(mdir, { recursive: true });
       const mdb = path.join(mdir, 'state.db');
-      const om = new Orchestrator(base60(mdb));
-      const mcap = (docId, content) => om.ingestContent({ content, source: src60(docId), type: 'web-article', authority: 'web', project: 'library' });
+      const om = new Orchestrator(base71(mdb));
+      const mcap = (docId, content) => om.ingestContent({ content, source: src71(docId), type: 'web-article', authority: 'web', project: 'library' });
       const m1 = (await mcap('mig-a', 'MIGSIX alpha: the botanical garden opened a glasshouse for desert succulents.')).entry.id;
       const m2old = (await mcap('mig-b', 'MIGSIX bravo: the night market added a row of food stalls.')).entry.id;
       await mcap('mig-b', 'MIGSIX bravo, revised: the night market moved its food stalls to the pier.'); // supersedes m2old
@@ -3148,7 +3841,7 @@ try {
       om.feedbackIfActive(m1, true); om.feedbackIfActive(m1, false); om.feedback(mW, true);
       await om.query('MIGSIX glasshouse garden', { limit: 5 });
       const mQ = async (oo) => (await hybridSearch(oo.db, oo.memory, oo.embedder, 'MIGSIX glasshouse garden market archive', { limit: 20, lexicalOnly: true })).map((r) => r.id).join(' ');
-      const qBefore60 = await mQ(om);
+      const qBefore71 = await mQ(om);
       om.close();
       // A v5 store never had the two columns: drop them and set schema_version back to 5 (the v5 shape, byte for byte).
       const raw = new DatabaseSync(mdb);
@@ -3163,7 +3856,7 @@ try {
       // store at once; both wait (busy_timeout) and the columns are added exactly once.
       const hold = new DatabaseSync(mdb);
       hold.exec('PRAGMA busy_timeout = 5000; BEGIN IMMEDIATE;');
-      hold.prepare("INSERT INTO log(ts, operation, detail) VALUES(?, 'smoke-60-writer', '{}')").run(new Date().toISOString());
+      hold.prepare("INSERT INTO log(ts, operation, detail) VALUES(?, 'smoke-71-writer', '{}')").run(new Date().toISOString());
       const dbUrl = new URL('../src/db.mjs', import.meta.url).href;
       const opener = () => {
         let started; const startedP = new Promise((r) => { started = r; });
@@ -3183,44 +3876,44 @@ try {
       const [rA, rB] = await Promise.all([A.done, B.done]);
       const jA = JSON.parse(rA.out.split('\n').filter(Boolean).pop() || '{}'); const jB = JSON.parse(rB.out.split('\n').filter(Boolean).pop() || '{}');
       ok(rA.code === 0 && rB.code === 0 && jA.n === 2 && jB.n === 2 && Math.max(jA.ms, jB.ms) >= 300, `two processes migrating at once behind a writer: both exit 0, the columns exist once (waited ${jA.ms} / ${jB.ms} ms)${rA.err || rB.err ? ` [${(rA.err + rB.err).slice(0, 200)}]` : ''}`);
-      const om2 = new Orchestrator(base60(mdb));
-      others60.push(om2);
+      const om2 = new Orchestrator(base71(mdb));
+      others71.push(om2);
       const mcols = om2.db.prepare('PRAGMA table_info(entries)').all();
       const after = om2.db.prepare('SELECT * FROM entries ORDER BY rowid').all();
       const strip = (r) => { const { favorite, favorite_helpful, ...rest } = r; void favorite; void favorite_helpful; return rest; };
       ok(mcols.filter((c) => c.name === 'favorite').length === 1 && mcols.filter((c) => c.name === 'favorite_helpful').length === 1 && mcols.at(-2).name === 'favorite' && mcols.at(-1).name === 'favorite_helpful'
         && om2.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value === '6', 'after the migration: the two columns appended once, schema_version 6');
       ok(after.length === v5rows.length && JSON.stringify(after.map(strip)) === JSON.stringify(v5rows) && after.every((r) => r.favorite === 0 && r.favorite_helpful === 0), 'every v5 column of every row is unchanged; every row reads favorite 0 / favorite_helpful 0');
-      let ftsOk60 = true;
-      try { om2.db.exec("INSERT INTO entries_fts(entries_fts) VALUES('integrity-check'); INSERT INTO entries_fts_trigram(entries_fts_trigram) VALUES('integrity-check');"); } catch { ftsOk60 = false; }
-      ok(om2.db.prepare('PRAGMA integrity_check').get().integrity_check === 'ok' && ftsOk60 && (await mQ(om2)) === qBefore60, 'integrity_check ok, both FTS indexes pass their integrity-check, and a query ranks exactly as before');
+      let ftsOk71 = true;
+      try { om2.db.exec("INSERT INTO entries_fts(entries_fts) VALUES('integrity-check'); INSERT INTO entries_fts_trigram(entries_fts_trigram) VALUES('integrity-check');"); } catch { ftsOk71 = false; }
+      ok(om2.db.prepare('PRAGMA integrity_check').get().integrity_check === 'ok' && ftsOk71 && (await mQ(om2)) === qBefore71, 'integrity_check ok, both FTS indexes pass their integrity-check, and a query ranks exactly as before');
       const mf1 = om2.feedbackIfActive(m1, true, { favorite: true });
       const mf2 = om2.feedbackIfActive(m2old, true, { favorite: true });
       const mf3 = om2.feedbackIfActive(mW, true, { favorite: true });
       ok(mf1.changed && mf1.helpful_count === 2 && mf2.reason === 'not-active' && mf2.status === 'archived' && mf3.changed && mf3.favorite === true, 'migrated rows: an active and a wisdom entry take a favorite; an archived one is refused');
-      const om3 = new Orchestrator(base60(mdb));
-      others60.push(om3);
+      const om3 = new Orchestrator(base71(mdb));
+      others71.push(om3);
       ok(om3.db.prepare('PRAGMA table_info(entries)').all().filter((c) => c.name.startsWith('favorite')).length === 2 && om3.recall(m1).favorite === 1, 'reopening a schema-6 store is a no-op (idempotent migration; the favorite stays)');
 
-      // 60.8 — the 2026-10-21 review fixes.
+      // 71.8 — the 2026-10-21 review fixes.
       // (1) One better match above an equal trio. The favorites the guard holds under it keep their order, and an
       //     entry its OWN explicit vote lifts past the better match (as it lifts any non-favorite) keeps that place:
       //     the guard's floor is the entry's score as a non-favorite, so starring never lowers an entry. Each
       //     favorite is compared with its own twin: the same configuration with only that entry unstarred.
-      const o60b = new Orchestrator(base60(path.join(dir60, 'better.db')));
-      others60.push(o60b);
-      const capB = async (docId, content) => (await o60b.ingestContent({ content, source: { libraryId: L60, docId, canonicalUri: `https://news.example.test/60b/${docId}` }, type: 'web-article', authority: 'web', project: 'library' })).entry.id;
+      const o71b = new Orchestrator(base71(path.join(dir71, 'better.db')));
+      others71.push(o71b);
+      const capB = async (docId, content) => (await o71b.ingestContent({ content, source: { libraryId: L71, docId, canonicalUri: `https://news.example.test/71b/${docId}` }, type: 'web-article', authority: 'web', project: 'library' })).entry.id;
       const strongB = await capB('better-strong', 'Lighthouse beacon restoration: the volunteers finished the lighthouse beacon restoration on the headland.');
       const trioB = [];
       for (const tag of ['KXQ', 'KXR', 'KXS']) trioB.push(await capB(`better-${tag}`, `${tag} the volunteers repainted the lighthouse on the headland before the winter storms arrived.`));
-      const resetB = () => { for (const id of trioB) o60b.db.prepare('UPDATE entries SET favorite = 0, favorite_helpful = 0, helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(id); };
-      const qB = (lexicalOnly) => hybridSearch(o60b.db, o60b.memory, o60b.embedder, 'lighthouse beacon restoration', { limit: 10, lexicalOnly });
+      const resetB = () => { for (const id of trioB) o71b.db.prepare('UPDATE entries SET favorite = 0, favorite_helpful = 0, helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(id); };
+      const qB = (lexicalOnly) => hybridSearch(o71b.db, o71b.memory, o71b.embedder, 'lighthouse beacon restoration', { limit: 10, lexicalOnly });
       let orderedB = 0, keptB = 0, betterB = 0, ownVoteB = 0;
       const rolesB = (fh, f, unstarred = null) => {
         resetB();
-        o60b.memory.recordFeedback(trioB[fh], true); // fh's explicit helpful vote, starred or not
-        if (unstarred !== fh) o60b.memory.setFavorite(trioB[fh], true);
-        if (unstarred !== f) o60b.memory.setFavorite(trioB[f], true);
+        o71b.memory.recordFeedback(trioB[fh], true); // fh's explicit helpful vote, starred or not
+        if (unstarred !== fh) o71b.memory.setFavorite(trioB[fh], true);
+        if (unstarred !== f) o71b.memory.setFavorite(trioB[f], true);
       };
       for (const [fh, f, n] of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]) {
         for (const lexicalOnly of [true, false]) {
@@ -3243,9 +3936,9 @@ try {
       let invB = 0, invTotal = 0, liftedB = 0, liftedKept = 0;
       for (const m of trioB) {
         for (const lexicalOnly of [true, false]) {
-          resetB(); o60b.memory.recordFeedback(m, true);
+          resetB(); o71b.memory.recordFeedback(m, true);
           const uRes = await qB(lexicalOnly);
-          o60b.memory.setFavorite(m, true);
+          o71b.memory.setFavorite(m, true);
           const sRes = await qB(lexicalOnly);
           const at = (res, id) => res.findIndex((r) => r.id === id);
           invTotal++;
@@ -3257,150 +3950,150 @@ try {
       ok(invB === invTotal && liftedB >= 1 && liftedKept === liftedB, `starred ≥ unstarred in every configuration (${invB}/${invTotal}); the ${liftedB} that rank above the better match on their own vote stay there starred (${liftedKept}/${liftedB})`);
       // (2a) Coverage words are Unicode-aware (round 2: unigrams too, the length rule on Latin only, Latin diacritics
       //      folded, runs split at script boundaries, Turkish İ, question words out).
-      const cw60 = (s) => JSON.stringify(coverageWords(s));
-      ok(cw60('Маяк, реставрация и берег') === '["маяк","реставрация","берег"]' && cw60('ＦＵＬＬ width') === '["full","width"]' && cw60('Αθήνα') === '["αθήνα"]',
+      const cw71 = (s) => JSON.stringify(coverageWords(s));
+      ok(cw71('Маяк, реставрация и берег') === '["маяк","реставрация","берег"]' && cw71('ＦＵＬＬ width') === '["full","width"]' && cw71('Αθήνα') === '["αθήνα"]',
         'coverageWords: \\p{L}\\p{N} runs of any script, NFKC-folded; a one-letter Cyrillic word (и) is no topic');
-      ok(cw60('灯塔修复') === '["灯","灯塔","塔","塔修","修","修复","复"]' && cw60('塔') === '["塔"]' && new Set(coverageWords('灯塔修复')).has('塔'), 'coverageWords: unspaced scripts count each character and each pair — a one-character query word (塔) matches');
-      ok(cw60('학교') === '["학","학교","교"]' && new Set(coverageWords('학교에서 도서관')).has('학교'), 'coverageWords: a two-syllable Korean word is kept (the > 2 rule is Latin-only) and found inside 학교에서');
-      ok(cw60('The café résumé') === '["cafe","resume"]' && cw60('İstanbul ISTANBUL') === '["istanbul","istanbul"]' && cw60('Straße') === '["straße"]' && cw60('がっこう').includes('"が"'),
+      ok(cw71('灯塔修复') === '["灯","灯塔","塔","塔修","修","修复","复"]' && cw71('塔') === '["塔"]' && new Set(coverageWords('灯塔修复')).has('塔'), 'coverageWords: unspaced scripts count each character and each pair — a one-character query word (塔) matches');
+      ok(cw71('학교') === '["학","학교","교"]' && new Set(coverageWords('학교에서 도서관')).has('학교'), 'coverageWords: a two-syllable Korean word is kept (the > 2 rule is Latin-only) and found inside 학교에서');
+      ok(cw71('The café résumé') === '["cafe","resume"]' && cw71('İstanbul ISTANBUL') === '["istanbul","istanbul"]' && cw71('Straße') === '["straße"]' && cw71('がっこう').includes('"が"'),
         'coverageWords: Latin diacritics fold as FTS unicode61 folds them (café = cafe; Turkish İ → i); kana voicing marks stay');
-      ok(cw60('iPhone手机') === '["iphone","手","手机","机"]' && cw60('COVID19 2026年') === '["covid19","2026","年"]', 'coverageWords: runs split at script boundaries (iphone + 手机); digits stay with Latin');
-      ok(cw60('what did the minister say about the tariffs') === '["minister","tariffs"]' && cw60('it’s the café—not a bar') === '["cafe","bar"]', 'coverageWords: question and reporting words name no topic (what / say out)');
+      ok(cw71('iPhone手机') === '["iphone","手","手机","机"]' && cw71('COVID19 2026年') === '["covid19","2026","年"]', 'coverageWords: runs split at script boundaries (iphone + 手机); digits stay with Latin');
+      ok(cw71('what did the minister say about the tariffs') === '["minister","tariffs"]' && cw71('it’s the café—not a bar') === '["cafe","bar"]', 'coverageWords: question and reporting words name no topic (what / say out)');
       // (2b) A dense embedder makes every entry a vector candidate: a favorite the query does not match lexically is
       //      lifted only inside the vector lane's top favoriteVectorTopK (10). Hand-made 8-dim vectors, all cos > 0.
-      const unit60 = (v) => { const n = Math.hypot(...v); return v.map((x) => x / n); };
+      const unit71 = (v) => { const n = Math.hypot(...v); return v.map((x) => x / n); };
       const q8 = [1, 0, 0, 0, 0, 0, 0, 0];
       const denseEmb = (vec) => ({ embed: async () => ({ vector: vec, model: 'smoke-dense-8', mode: 'lmstudio' }) });
-      const o60d = new Orchestrator(base60(path.join(dir60, 'dense.db')));
-      others60.push(o60d);
+      const o71d = new Orchestrator(base71(path.join(dir71, 'dense.db')));
+      others71.push(o71d);
       const vecIds = [];
       for (let r = 1; r <= 14; r++) {
-        const id = (await o60d.storeMemory({ content: `Filler note ${'abcdefghijklmn'[r - 1].repeat(4)} about the harbour authority and the night ferry timetable.`, tier: 'memory', type: 'note', scope: 'shared' })).id;
-        await o60d.memory.upsertVector(id, unit60([1, 0.08 * r, 0, 0, 0, 0, 0, 0]), 'smoke-dense-8', 'lmstudio');
+        const id = (await o71d.storeMemory({ content: `Filler note ${'abcdefghijklmn'[r - 1].repeat(4)} about the harbour authority and the night ferry timetable.`, tier: 'memory', type: 'note', scope: 'shared' })).id;
+        await o71d.memory.upsertVector(id, unit71([1, 0.08 * r, 0, 0, 0, 0, 0, 0]), 'smoke-dense-8', 'lmstudio');
         vecIds.push(id);
       }
-      const denseQ = (oo = o60d) => hybridSearch(oo.db, oo.memory, denseEmb(q8), 'zylophant quarvex', { limit: 20 });
+      const denseQ = (oo = o71d) => hybridSearch(oo.db, oo.memory, denseEmb(q8), 'zylophant quarvex', { limit: 20 });
       const d0 = await denseQ();
       ok(d0.length === 14 && d0.every((r, i) => r.id === vecIds[i] && r.rank.vector === i + 1 && !r.rank.fts && !r.rank.trigram), 'dense fixture: no lexical hit; the vector lane returns all 14 entries, ranked 1..14');
       // Where two helpful votes alone put the vector-rank-11 entry (no favorite): votes move any entry's trust.
-      o60d.memory.recordFeedback(vecIds[10], true); o60d.memory.recordFeedback(vecIds[10], true);
+      o71d.memory.recordFeedback(vecIds[10], true); o71d.memory.recordFeedback(vecIds[10], true);
       const votesOnly11 = (await denseQ()).findIndex((r) => r.id === vecIds[10]);
-      o60d.db.prepare('UPDATE entries SET helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(vecIds[10]);
-      o60d.memory.setFavorite(vecIds[10], true); o60d.memory.recordFeedback(vecIds[10], true); // vector rank 11, favorite + helpful
+      o71d.db.prepare('UPDATE entries SET helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(vecIds[10]);
+      o71d.memory.setFavorite(vecIds[10], true); o71d.memory.recordFeedback(vecIds[10], true); // vector rank 11, favorite + helpful
       const d1 = await denseQ();
       const p11 = d1.findIndex((r) => r.id === vecIds[10]);
       ok(p11 === votesOnly11 && d1[p11].favorite === true && d1[p11].rank.favorite === undefined && d1[p11].rank.favoriteHelpful === undefined,
         `vector rank 11 (past the top 10), no lexical hit: no favorite boost — it ranks where its votes alone put it (#${p11 + 1})`);
-      o60d.memory.setFavorite(vecIds[4], true); // vector rank 5
+      o71d.memory.setFavorite(vecIds[4], true); // vector rank 5
       const d2 = await denseQ();
-      ok(d2[0].id === vecIds[4] && d2[0].rank.favorite === o60d.cfg.favoriteWeight && d2.findIndex((r) => r.id === vecIds[10]) === p11, 'vector rank 5 (inside the top 10): boosted, so it is reordered among the ten nearest (here to the top)');
-      const o60k = new Orchestrator(base60(path.join(dir60, 'dense.db'), { favoriteVectorTopK: 0 }));
-      others60.push(o60k);
-      const dk = await denseQ(o60k);
+      ok(d2[0].id === vecIds[4] && d2[0].rank.favorite === o71d.cfg.favoriteWeight && d2.findIndex((r) => r.id === vecIds[10]) === p11, 'vector rank 5 (inside the top 10): boosted, so it is reordered among the ten nearest (here to the top)');
+      const o71k = new Orchestrator(base71(path.join(dir71, 'dense.db'), { favoriteVectorTopK: 0 }));
+      others71.push(o71k);
+      const dk = await denseQ(o71k);
       ok(dk.every((r) => r.rank.favorite === undefined && r.rank.favoriteHelpful === undefined) && dk[0].id === vecIds[0], 'favoriteVectorTopK 0 → vector-only favorites get no boost at all (the vector top hit stays first)');
       // (2b′) The vector top 10 is counted over what the filters leave (round 2): 20 entries alternate type note /
       //       insight by vector rank; the 8th insight is vector rank 16 overall — boosted under types: ['insight'].
-      const o60t = new Orchestrator(base60(path.join(dir60, 'typed.db')));
-      others60.push(o60t);
+      const o71t = new Orchestrator(base71(path.join(dir71, 'typed.db')));
+      others71.push(o71t);
       const typedIds = [];
       for (let r = 1; r <= 20; r++) {
-        const id = (await o60t.storeMemory({ content: `Typed filler ${'abcdefghijklmnopqrst'[r - 1].repeat(4)} about the night ferry timetable.`, tier: 'memory', type: r % 2 ? 'note' : 'insight', scope: 'shared' })).id;
-        await o60t.memory.upsertVector(id, unit60([1, 0.05 * r, 0, 0, 0, 0, 0, 0]), 'smoke-dense-8', 'lmstudio');
+        const id = (await o71t.storeMemory({ content: `Typed filler ${'abcdefghijklmnopqrst'[r - 1].repeat(4)} about the night ferry timetable.`, tier: 'memory', type: r % 2 ? 'note' : 'insight', scope: 'shared' })).id;
+        await o71t.memory.upsertVector(id, unit71([1, 0.05 * r, 0, 0, 0, 0, 0, 0]), 'smoke-dense-8', 'lmstudio');
         typedIds.push(id);
       }
       const eighthInsight = typedIds[15]; // vector rank 16 overall, the 8th of type insight
-      o60t.memory.setFavorite(eighthInsight, true);
-      const tAll = await hybridSearch(o60t.db, o60t.memory, denseEmb(q8), 'zylophant quarvex', { limit: 30 });
-      const tIns = await hybridSearch(o60t.db, o60t.memory, denseEmb(q8), 'zylophant quarvex', { limit: 30, types: ['insight'] });
+      o71t.memory.setFavorite(eighthInsight, true);
+      const tAll = await hybridSearch(o71t.db, o71t.memory, denseEmb(q8), 'zylophant quarvex', { limit: 30 });
+      const tIns = await hybridSearch(o71t.db, o71t.memory, denseEmb(q8), 'zylophant quarvex', { limit: 30, types: ['insight'] });
       const fAll = tAll.find((r) => r.id === eighthInsight), fIns = tIns.find((r) => r.id === eighthInsight);
-      ok(fAll.rank.vector === 16 && fAll.rank.favorite === undefined && tIns.every((r) => r.type === 'insight') && fIns.rank.favorite === o60t.cfg.favoriteWeight && tIns[0].id === eighthInsight,
+      ok(fAll.rank.vector === 16 && fAll.rank.favorite === undefined && tIns.every((r) => r.type === 'insight') && fIns.rank.favorite === o71t.cfg.favoriteWeight && tIns[0].id === eighthInsight,
         'the vector top 10 counts the candidates the filters leave: vector rank 16 overall, 8th of its type → boosted under types:[insight], not without the filter');
       // (2c) A non-Latin query: no lexical lane answers it (the FTS lanes tokenize ASCII), and the Unicode guard keeps
       //      an unrelated favorite inside the vector top 10 below the entry holding all three words.
-      const o60c = new Orchestrator(base60(path.join(dir60, 'cyrillic.db')));
-      others60.push(o60c);
-      const cyr = async (content, vec) => { const id = (await o60c.storeMemory({ content, tier: 'memory', type: 'note', scope: 'shared' })).id; await o60c.memory.upsertVector(id, unit60(vec), 'smoke-dense-8', 'lmstudio'); return id; };
+      const o71c = new Orchestrator(base71(path.join(dir71, 'cyrillic.db')));
+      others71.push(o71c);
+      const cyr = async (content, vec) => { const id = (await o71c.storeMemory({ content, tier: 'memory', type: 'note', scope: 'shared' })).id; await o71c.memory.upsertVector(id, unit71(vec), 'smoke-dense-8', 'lmstudio'); return id; };
       const cStrong = await cyr('Маяк, реставрация, берег: волонтёры закончили реставрацию на берегу.', [1, 0.05, 0, 0, 0, 0, 0, 0]);
       for (let i = 0; i < 2; i++) await cyr(`Заметка ${i + 1}: расписание ночного парома у старой пристани.`, [1, 0.1 + 0.02 * i, 0, 0, 0, 0, 0, 0]);
       const cFav = await cyr('Волонтёры покрасили ограду у школы до первых холодов.', [1, 0.2, 0, 0, 0, 0, 0, 0]);
-      o60c.memory.setFavorite(cFav, true); o60c.memory.recordFeedback(cFav, true);
-      const cy1 = await hybridSearch(o60c.db, o60c.memory, denseEmb(q8), 'маяк реставрация берег', { limit: 10 });
+      o71c.memory.setFavorite(cFav, true); o71c.memory.recordFeedback(cFav, true);
+      const cy1 = await hybridSearch(o71c.db, o71c.memory, denseEmb(q8), 'маяк реставрация берег', { limit: 10 });
       const cyF = cy1.find((r) => r.id === cFav);
-      ok(cy1[0].id === cStrong && cyF.rank.favorite === o60c.cfg.favoriteWeight && cyF.rank.favoriteGuard === true && cy1.findIndex((r) => r.id === cFav) === 1 && cy1.every((r) => !r.rank.fts && !r.rank.trigram),
+      ok(cy1[0].id === cStrong && cyF.rank.favorite === o71c.cfg.favoriteWeight && cyF.rank.favoriteGuard === true && cy1.findIndex((r) => r.id === cFav) === 1 && cy1.every((r) => !r.rank.fts && !r.rank.trigram),
         'Cyrillic query (vector-only): the boosted unrelated favorite is held below the entry holding маяк / реставрация / берег (rank.favoriteGuard)');
       // (2d) A question matches nearly every entry lexically (the, about: 3+-letter stopwords; trigram substrings), so
       //      the lexical gate wants a CONTENT word of the query in the favorite (round 2); with none in the query,
       //      any lexical hit still counts.
-      const o60q = new Orchestrator(base60(path.join(dir60, 'question.db')));
-      others60.push(o60q);
-      const qTarget = (await o60q.storeMemory({ content: 'The minister said the tariffs on steel would rise after the summit in the capital.', tier: 'memory', type: 'note', scope: 'shared' })).id;
-      const qOther = (await o60q.storeMemory({ content: 'The museum reopened its gallery about the history of the old harbour wall.', tier: 'memory', type: 'note', scope: 'shared' })).id;
-      for (const id of [qTarget, qOther]) { o60q.memory.setFavorite(id, true); o60q.memory.recordFeedback(id, true); }
-      const qa = await hybridSearch(o60q.db, o60q.memory, o60q.embedder, 'what did the minister say about the tariffs', { limit: 10, lexicalOnly: true });
+      const o71q = new Orchestrator(base71(path.join(dir71, 'question.db')));
+      others71.push(o71q);
+      const qTarget = (await o71q.storeMemory({ content: 'The minister said the tariffs on steel would rise after the summit in the capital.', tier: 'memory', type: 'note', scope: 'shared' })).id;
+      const qOther = (await o71q.storeMemory({ content: 'The museum reopened its gallery about the history of the old harbour wall.', tier: 'memory', type: 'note', scope: 'shared' })).id;
+      for (const id of [qTarget, qOther]) { o71q.memory.setFavorite(id, true); o71q.memory.recordFeedback(id, true); }
+      const qa = await hybridSearch(o71q.db, o71q.memory, o71q.embedder, 'what did the minister say about the tariffs', { limit: 10, lexicalOnly: true });
       const qT = qa.find((r) => r.id === qTarget), qO = qa.find((r) => r.id === qOther);
-      ok(qO && qO.rank.fts && qO.rank.favorite === undefined && qO.rank.favoriteHelpful === undefined && qT.rank.favorite === o60q.cfg.favoriteWeight && qT.rank.favoriteHelpful === o60q.cfg.favoriteHelpfulWeight && qa[0].id === qTarget,
+      ok(qO && qO.rank.fts && qO.rank.favorite === undefined && qO.rank.favoriteHelpful === undefined && qT.rank.favorite === o71q.cfg.favoriteWeight && qT.rank.favoriteHelpful === o71q.cfg.favoriteHelpfulWeight && qa[0].id === qTarget,
         'question form: the unrelated favorite is a lexical hit (the / about) but holds none of minister / tariffs — no boost; the target keeps its own');
-      const qb = await hybridSearch(o60q.db, o60q.memory, o60q.embedder, 'what did they say about it', { limit: 10, lexicalOnly: true });
-      ok(coverageWords('what did they say about it').length === 0 && qb.find((r) => r.id === qOther)?.rank.favorite === o60q.cfg.favoriteWeight, 'a query with no coverage words: any lexical hit counts (the fallback)');
+      const qb = await hybridSearch(o71q.db, o71q.memory, o71q.embedder, 'what did they say about it', { limit: 10, lexicalOnly: true });
+      ok(coverageWords('what did they say about it').length === 0 && qb.find((r) => r.id === qOther)?.rank.favorite === o71q.cfg.favoriteWeight, 'a query with no coverage words: any lexical hit counts (the fallback)');
       // (3) A favorite set through a linked duplicate lands on the holder that N sources share: the result says so.
-      const tL60 = 'FAVSIXTY lima-two: the coastguard station reopened its visitor gallery on the cliff.';
-      const iL1 = await cap60('fav60-l1', tL60);
-      const iL2 = await cap60('fav60-l2', tL60, { favorite: true });
-      ok(iL2.reason === 'linked-duplicate' && iL2.favorite?.linkedDuplicate === true && iL2.favorite.holder === iL1.entry.id && iL2.favorite.id === iL1.entry.id && keys60(iL2.favorite) === 'changed,favorite,helpful_count,holder,id,linkedDuplicate,success,trust_score',
+      const tL71 = 'FAVSIXTY lima-two: the coastguard station reopened its visitor gallery on the cliff.';
+      const iL1 = await cap71('fav71-l1', tL71);
+      const iL2 = await cap71('fav71-l2', tL71, { favorite: true });
+      ok(iL2.reason === 'linked-duplicate' && iL2.favorite?.linkedDuplicate === true && iL2.favorite.holder === iL1.entry.id && iL2.favorite.id === iL1.entry.id && keys71(iL2.favorite) === 'changed,favorite,helpful_count,holder,id,linkedDuplicate,success,trust_score',
         'ingest --favorite of a linked duplicate → favorite.linkedDuplicate true + holder (the shared entry)');
-      const iL3 = await cap60('fav60-l2', tL60, { favorite: true });
-      const iL4 = await cap60('fav60-l1', tL60, { favorite: true });
+      const iL3 = await cap71('fav71-l2', tL71, { favorite: true });
+      const iL4 = await cap71('fav71-l1', tL71, { favorite: true });
       ok(iL3.reason === 'unchanged' && iL3.favorite?.linkedDuplicate === true && iL3.favorite.holder === iL1.entry.id && iL3.favorite.changed === false && iL4.reason === 'unchanged' && iL4.favorite?.linkedDuplicate === undefined && iL4.favorite.id === iL1.entry.id,
         'unchanged re-ingest: through the linked source → linkedDuplicate + holder; through the holder\'s own source → no marker');
       // (5) A favorite is a LIVE flag: an archived version (a historical read) is no favorite and gets no boost.
-      const iH1 = await cap60('fav60-h', 'FAVSIXTY history one: the pier lights were replaced with low-glare lamps.', { favorite: true });
-      const iH2 = await cap60('fav60-h', 'FAVSIXTY history two: the pier lights were replaced with low-glare amber lamps.');
-      o60.feedbackIfActive(iH2.entry.id, true, { favorite: false });
-      ok(row60(iH1.entry.id).status === 'archived' && row60(iH1.entry.id).favorite === 1 && row60(iH1.entry.id).favorite_helpful === 1 && row60(iH2.entry.id).favorite === 0, 'fixture: the archived version keeps favorite = 1 as history; the live version was unstarred');
-      const hq = await hybridSearch(o60.db, o60.memory, o60.embedder, 'FAVSIXTY pier lights lamps', { limit: 20, historical: true, lexicalOnly: true });
+      const iH1 = await cap71('fav71-h', 'FAVSIXTY history one: the pier lights were replaced with low-glare lamps.', { favorite: true });
+      const iH2 = await cap71('fav71-h', 'FAVSIXTY history two: the pier lights were replaced with low-glare amber lamps.');
+      o71.feedbackIfActive(iH2.entry.id, true, { favorite: false });
+      ok(row71(iH1.entry.id).status === 'archived' && row71(iH1.entry.id).favorite === 1 && row71(iH1.entry.id).favorite_helpful === 1 && row71(iH2.entry.id).favorite === 0, 'fixture: the archived version keeps favorite = 1 as history; the live version was unstarred');
+      const hq = await hybridSearch(o71.db, o71.memory, o71.embedder, 'FAVSIXTY pier lights lamps', { limit: 20, historical: true, lexicalOnly: true });
       const hOld = hq.find((r) => r.id === iH1.entry.id);
       ok(hOld && hOld.status === 'archived' && hOld.favorite === false && hOld.rank.favorite === undefined && hOld.rank.favoriteGuard === undefined && hq.find((r) => r.id === iH2.entry.id)?.favorite === false,
         'query --historical: the archived favorite reports favorite false and gets no boost');
-      const hv = o60.entryStatus({ ids: [iH1.entry.id] }).entries[0];
+      const hv = o71.entryStatus({ ids: [iH1.entry.id] }).entries[0];
       ok(hv.favorite === false && hv.favoriteHelpful === true && hv.helpfulCount === 1, 'entries on the archived version: favorite false; favoriteHelpful / helpfulCount stay as vote history');
       // (6) feedback refuses every switch but its three, and a second id — a misspelt '--favourite' never votes.
-      const eS60 = (await cap60('fav60-s', 'FAVSIXTY sierra: the ferry pier got a new gangway for wheelchair users.')).entry.id;
-      const rowS0 = JSON.stringify(row60(eS60));
-      const s1 = cli60('feedback', eS60, '--favourite');
-      const s2 = cli60('feedback', eS60, '--favorite', '--project', 'library');
-      const s3 = cli60('feedback', eS60, eG60);
-      const s4 = cli60('feedback', '--favourite', eS60);
+      const eS71 = (await cap71('fav71-s', 'FAVSIXTY sierra: the ferry pier got a new gangway for wheelchair users.')).entry.id;
+      const rowS0 = JSON.stringify(row71(eS71));
+      const s1 = cli71('feedback', eS71, '--favourite');
+      const s2 = cli71('feedback', eS71, '--favorite', '--project', 'library');
+      const s3 = cli71('feedback', eS71, eG71);
+      const s4 = cli71('feedback', '--favourite', eS71);
       ok(s1.code === 1 && /^ERROR: feedback takes only --unhelpful, --favorite or --unfavorite \(got --favourite\)/.test(s1.err) && s2.code === 1 && /\(got --project\)/.test(s2.err)
-        && s3.code === 1 && /^ERROR: feedback takes one <entryId>/.test(s3.err) && s4.code === 1 && JSON.stringify(row60(eS60)) === rowS0,
+        && s3.code === 1 && /^ERROR: feedback takes one <entryId>/.test(s3.err) && s4.code === 1 && JSON.stringify(row71(eS71)) === rowS0,
         'CLI feedback: an unknown switch (--favourite, --project) or a second id → exit 1 + ERROR:, nothing written');
       // --unhelpful is a bare switch too (round 2): a stray token after it is a second id, never swallowed as its value.
-      const s5 = cli60('feedback', eS60, '--unhelpful', 'extra');
-      const rowS5 = JSON.stringify(row60(eS60)); // before s6, which casts its (intended) unhelpful vote
-      const s6 = cli60('feedback', '--unhelpful', eS60);
-      ok(s5.code === 1 && /^ERROR: feedback takes one <entryId>/.test(s5.err) && rowS5 === rowS0 && s6.code === 0 && s6.out?.helpful === false && s6.out.id === eS60,
+      const s5 = cli71('feedback', eS71, '--unhelpful', 'extra');
+      const rowS5 = JSON.stringify(row71(eS71)); // before s6, which casts its (intended) unhelpful vote
+      const s6 = cli71('feedback', '--unhelpful', eS71);
+      ok(s5.code === 1 && /^ERROR: feedback takes one <entryId>/.test(s5.err) && rowS5 === rowS0 && s6.code === 0 && s6.out?.helpful === false && s6.out.id === eS71,
         'CLI feedback <id> --unhelpful extra → exit 1, nothing written; --unhelpful before the id is a plain unhelpful vote');
       // (7) The mutants that survived the first round. (7.1) The in-UPDATE status clause: a NON-favorite archived row
       //     is refused by setFavorite({ activeOnly }) itself, both ways, and the row is unchanged.
-      const eT60 = (await cap60('fav60-t', 'FAVSIXTY tango: the tide mill museum restored its waterwheel.')).entry.id;
-      await o60.archiveEntries({ ids: [eT60], reason: 'smoke 60.8' });
-      const rowT0 = JSON.stringify(row60(eT60));
-      const t1 = o60.memory.setFavorite(eT60, true, { activeOnly: true });
-      o60.db.prepare('UPDATE entries SET favorite = 1, favorite_helpful = 1 WHERE id = ?').run(eT60);
-      const rowT1 = JSON.stringify(row60(eT60));
-      const t2 = o60.memory.setFavorite(eT60, false, { activeOnly: true });
-      ok(t1.reason === 'not-active' && t1.status === 'archived' && JSON.stringify(row60(eT60)) === rowT1 && t2.reason === 'not-active' && rowT0 !== rowT1,
+      const eT71 = (await cap71('fav71-t', 'FAVSIXTY tango: the tide mill museum restored its waterwheel.')).entry.id;
+      await o71.archiveEntries({ ids: [eT71], reason: 'smoke 71.8' });
+      const rowT0 = JSON.stringify(row71(eT71));
+      const t1 = o71.memory.setFavorite(eT71, true, { activeOnly: true });
+      o71.db.prepare('UPDATE entries SET favorite = 1, favorite_helpful = 1 WHERE id = ?').run(eT71);
+      const rowT1 = JSON.stringify(row71(eT71));
+      const t2 = o71.memory.setFavorite(eT71, false, { activeOnly: true });
+      ok(t1.reason === 'not-active' && t1.status === 'archived' && JSON.stringify(row71(eT71)) === rowT1 && t2.reason === 'not-active' && rowT0 !== rowT1,
         'setFavorite({ activeOnly }) refuses an archived row in the UPDATE itself: a non-favorite is not favorited, a favorite is not taken back');
       // (7.2) The prelim ignores a favorite's own vote: here that vote (+0.0005) would lift the 6th hit into the top 5,
       //       whose concepts decide the ref-chain boost — the 7th hit shares the 6th's concept and must get no boost.
-      const o60p = new Orchestrator(base60(path.join(dir60, 'prelim.db')));
-      others60.push(o60p);
+      const o71p = new Orchestrator(base71(path.join(dir71, 'prelim.db')));
+      others71.push(o71p);
       const pIds = [];
       for (const [i, tag] of ['kaa', 'kab', 'kac', 'kad', 'kae', 'kaf', 'kag'].entries()) {
-        pIds.push((await o60p.storeMemory({ content: `GRAPHSIX ${tag} note on the shared marker.`, tier: 'memory', type: 'note', scope: 'shared', concepts: [{ name: i < 5 ? 'alphaconcept' : 'zetaconcept', type: 'concept' }] })).id);
+        pIds.push((await o71p.storeMemory({ content: `GRAPHSIX ${tag} note on the shared marker.`, tier: 'memory', type: 'note', scope: 'shared', concepts: [{ name: i < 5 ? 'alphaconcept' : 'zetaconcept', type: 'concept' }] })).id);
       }
-      const p0 = await hybridSearch(o60p.db, o60p.memory, o60p.embedder, 'graphsix marker', { limit: 10, lexicalOnly: true });
-      o60p.memory.setFavorite(pIds[5], true);
-      const p1 = await hybridSearch(o60p.db, o60p.memory, o60p.embedder, 'graphsix marker', { limit: 10, lexicalOnly: true });
+      const p0 = await hybridSearch(o71p.db, o71p.memory, o71p.embedder, 'graphsix marker', { limit: 10, lexicalOnly: true });
+      o71p.memory.setFavorite(pIds[5], true);
+      const p1 = await hybridSearch(o71p.db, o71p.memory, o71p.embedder, 'graphsix marker', { limit: 10, lexicalOnly: true });
       // The prelim compares scores before the ref-chain boost: here the fused lanes (+ equal authority / recency).
       const rrf = (r) => 1 / (60 + r.rank.fts - 1) + 0.5 / (60 + r.rank.trigram - 1);
       const gap56 = rrf(p0.find((r) => r.id === pIds[4])) - rrf(p0.find((r) => r.id === pIds[5]));
@@ -3408,15 +4101,15 @@ try {
         && p1.find((r) => r.id === pIds[6]).rank.graph === undefined && p1.find((r) => r.id === pIds[5]).rank.graph === undefined && p1.find((r) => r.id === pIds[0]).rank.graph === 1,
         `prelim: the favorite's vote (+0.0005 > the 5th/6th prelim gap ${gap56.toFixed(6)}) does not pull its concept into the top 5 — the 7th hit gets no ref-chain boost`);
       // (7.3) An unfavorite takes back only a vote the favorite added: favorite_helpful = 0 → counters untouched.
-      const eU60 = (await cap60('fav60-u', 'FAVSIXTY uniform: the boatyard relaunched the restored pilot cutter.')).entry.id;
-      o60.feedbackIfActive(eU60, true); o60.feedbackIfActive(eU60, true);
-      o60.db.prepare('UPDATE entries SET favorite = 1, favorite_helpful = 0 WHERE id = ?').run(eU60);
-      const u60 = o60.feedbackIfActive(eU60, true, { favorite: false });
-      ok(u60.changed === true && u60.favorite === false && u60.helpful_count === 2 && u60.trust_score === 0.6 && JSON.stringify(pick60(row60(eU60))) === '{"favorite":0,"favorite_helpful":0,"helpful_count":2,"trust":0.6}',
+      const eU71 = (await cap71('fav71-u', 'FAVSIXTY uniform: the boatyard relaunched the restored pilot cutter.')).entry.id;
+      o71.feedbackIfActive(eU71, true); o71.feedbackIfActive(eU71, true);
+      o71.db.prepare('UPDATE entries SET favorite = 1, favorite_helpful = 0 WHERE id = ?').run(eU71);
+      const u71 = o71.feedbackIfActive(eU71, true, { favorite: false });
+      ok(u71.changed === true && u71.favorite === false && u71.helpful_count === 2 && u71.trust_score === 0.6 && JSON.stringify(pick71(row71(eU71))) === '{"favorite":0,"favorite_helpful":0,"helpful_count":2,"trust":0.6}',
         'unfavorite with favorite_helpful = 0 clears the favorite and takes back no vote (helpful_count 2, trust 0.6 stay)');
     } finally {
-      for (const x of others60) x.close();
-      o60.close();
+      for (const x of others71) x.close();
+      o71.close();
     }
   }
 

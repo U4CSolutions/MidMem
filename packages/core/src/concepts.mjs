@@ -162,18 +162,24 @@ export async function refreshConceptGraph(o, { maxEmbedPerPass } = {}) {
   const cap = maxEmbedPerPass ?? rc.maxEmbedPerPass ?? 60;
   const nodes = o.graph.allNodes().filter((n) => n.type !== 'community'); // hierarchy nodes aren't embedded
   let embedded = 0;
+  let stopped = null;
   for (const n of nodes) {
     if (embedded >= cap) break;
     const digest = nodeDigest(o.db, n);
     const h = sha12(digest);
     if (n.properties?.embDigestHash === h && Array.isArray(n.properties?.embedding)) continue; // unchanged
-    const { vector } = await o.embedder.embed(digest);
+    // One attempt, and stop at the first fallback: a hash vector must never be stored as a concept
+    // embedding (it would route queries to wrong neighbours until the digest changes), and a down
+    // embedder must not cost this pass up to 60 × the retry budget.
+    const { vector, mode } = await o.embedder.embed(digest, { retries: 0 });
+    // With the model OFF the deterministic hash vectors are the design (offline mode), not an outage.
+    if (mode === 'fallback' && o.cfg.llmEnabled) { stopped = 'embedder-offline'; break; }
     o.db.prepare('UPDATE nodes SET properties=?, updated_at=? WHERE id=?')
       .run(JSON.stringify({ ...n.properties, embedding: vector, embDigestHash: h }), nowISO(), n.id);
     embedded++;
   }
   const communities = detectCommunities(o);
-  return { nodes: nodes.length, embedded, communities: communities.count, communityParents: communities.parents, deduped: deduped.merged };
+  return { nodes: nodes.length, embedded, communities: communities.count, communityParents: communities.parents, deduped: deduped.merged, ...(stopped ? { stopped } : {}) };
 }
 
 /**

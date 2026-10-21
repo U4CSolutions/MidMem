@@ -17,7 +17,8 @@ import * as path from 'node:path';
 export function walkMarkdown(root, { recursive = true, exclude = [] } = {}) {
   const out = [];
   // Excluded subfolders are matched by path relative to the root ('research', 'reports/drafts');
-  // another source owns them (e.g. a shared-scope deliverables source) — skipping is not loss.
+  // another source owns them (e.g. a shared-scope deliverables source) — skipping is not loss — or
+  // they hold no knowledge at all (a stack's generated reflection logs, config GENERATED_LOG_DIRS).
   const ex = new Set((exclude || []).map((e) => String(e).replace(/^\/+|\/+$/g, '')).filter(Boolean));
   const visit = (dir, rel) => {
     let ents = [];
@@ -35,7 +36,7 @@ export function walkMarkdown(root, { recursive = true, exclude = [] } = {}) {
 
 /**
  * @param {import('./orchestrator.mjs').Orchestrator} o
- * @param {{sources?:Array<{dir:string,scope:string,type?:string,project?:string|null,recursive?:boolean}>, project?:boolean}} [opts]
+ * @param {{sources?:Array<{dir:string,scope:string,type?:string,project?:string|null,recursive?:boolean,exclude?:string[]}>, project?:boolean}} [opts]
  *   `project:true` here means "reproject the vault afterwards" (legacy name); a source's own
  *   `project` field is the project-axis tag its files are ingested under.
  */

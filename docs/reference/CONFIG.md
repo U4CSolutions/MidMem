@@ -7,15 +7,18 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | env var | source context (default visible) |
 |---|---|
 | `MIDMEM_DB_PATH` | `const dbPath = env('DB_PATH') \|\| path.join(REPO, 'state.db');` |
+| `MIDMEM_BRIDGE_EXCLUDE` | `const bridgeExclude = parseBridgeExclude(env('BRIDGE_EXCLUDE')); // comma-separated subfolders EVERY bridge source skips; default none` |
 | `MIDMEM_CONTENT_INGEST_DIR` | `contentIngestDir: env('CONTENT_INGEST_DIR') \|\| path.join(path.dirname(dbPath), 'ingest-content'),` |
 | `MIDMEM_SOURCE_ROOTS` | `sourceRoots: (env('SOURCE_ROOTS') \|\|` |
-| `MIDMEM_BRIDGE_SOURCES` | `bridgeSources: parseBridgeSources(env('BRIDGE_SOURCES')) \|\| [` |
+| `MIDMEM_BRIDGE_SOURCES` | `bridgeSources: withBridgeExclude(parseBridgeSources(env('BRIDGE_SOURCES')) \|\| [` |
 | `MIDMEM_BRIDGE_RECURSIVE` | `bridgeRecursive: env('BRIDGE_RECURSIVE') !== '0',` |
 | `MIDMEM_LLM_ENDPOINT` | `llmEndpoint: env('LLM_ENDPOINT') \|\| 'http://localhost:1234/v1',` |
 | `MIDMEM_EMBED_MODEL` | `embedModel: env('EMBED_MODEL') \|\| 'nomic-embed-text',` |
 | `MIDMEM_EXTRACT_MODEL` | `extractModel: env('EXTRACT_MODEL') \|\| 'qwen/qwen3.6-35b-a3b',` |
 | `MIDMEM_LLM_ENABLED` | `llmEnabled: env('LLM_ENABLED') !== '0',` |
 | `MIDMEM_LLM_TIMEOUT_MS` | `llmTimeoutMs: Number(env('LLM_TIMEOUT_MS') \|\| 20000),` |
+| `MIDMEM_EMBED_RETRIES` | `embedRetries: Number(env('EMBED_RETRIES') ?? 2),` |
+| `MIDMEM_EMBED_RETRY_MS` | `embedRetryMs: Number(env('EMBED_RETRY_MS') ?? 250),` |
 | `MIDMEM_FAVORITE_WEIGHT` | `favoriteWeight: Number(env('FAVORITE_WEIGHT') ?? 0.004),` |
 | `MIDMEM_FAVORITE_HELPFUL_WEIGHT` | `favoriteHelpfulWeight: Number(env('FAVORITE_HELPFUL_WEIGHT') ?? 0.002),` |
 | `MIDMEM_FAVORITE_VECTOR_TOP_K` | `favoriteVectorTopK: Number(env('FAVORITE_VECTOR_TOP_K') ?? 10),` |
@@ -39,6 +42,8 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_MAINTENANCE` | `enabled: env('MAINTENANCE') !== '0',` |
 | `MIDMEM_MAINT_INTERVAL_MS` | `intervalMs: Number(env('MAINT_INTERVAL_MS') \|\| 3600e3), // lazy sweep ≤ 1/hour` |
 | `MIDMEM_RETENTION_DAYS` | `retentionDays: Number(env('RETENTION_DAYS') \|\| 90),` |
+| `MIDMEM_MAINTAIN_REEXTRACT` | `reextractLimit: Number(env('MAINTAIN_REEXTRACT') ?? 20),` |
+| `MIDMEM_MAINTAIN_REEMBED` | `reembedLimit: Number(env('MAINTAIN_REEMBED') ?? 200),` |
 | `MIDMEM_EXPORT_ENABLED` | `enabled: env('EXPORT_ENABLED') !== '0',` |
 | `MIDMEM_EXPORT_PATH` | `path: env('EXPORT_PATH') \|\| path.join(REPO, 'snapshots', 'state-export.jsonl'),` |
 | `MIDMEM_CAPTURE_PACKS_ENABLED` | `enabled: env('CAPTURE_PACKS_ENABLED') !== '0',` |
@@ -69,6 +74,7 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_DEFER_CONTRADICTORY` | `deferContradictory: env('DEFER_CONTRADICTORY') !== '0',` |
 | `MIDMEM_CLAIM_CONTRADICTION_MIN_CONTAINMENT` | `contradictionMinContainment: Number(env('CLAIM_CONTRADICTION_MIN_CONTAINMENT') ?? 0.6),` |
 | `MIDMEM_DEFER_AGE_DAYS` | `deferAgeDays: Number(env('DEFER_AGE_DAYS') \|\| 14),` |
+| `MIDMEM_CLAIM_STANCE` | `stance: env('CLAIM_STANCE') !== '0',` |
 | `MIDMEM_WORK_MEMORY` | `enabled: env('WORK_MEMORY') !== '0',` |
 | `MIDMEM_GUARD_OPAQUE_TASK_LABELS` | `guardOpaqueTaskLabels: env('GUARD_OPAQUE_TASK_LABELS') !== '0',` |
 | `MIDMEM_AUTO_INGEST` | `enabled: env('AUTO_INGEST') !== '0',` |
@@ -90,4 +96,4 @@ Every knob honors the `MIDMEM_` prefix (legacy `OCMW_` still read as fallback). 
 | `MIDMEM_PROJECT` | `project: normalizeProject(env('PROJECT')),` |
 | `MIDMEM_PROJECT_LIFT` | `liftOnCurated: env('PROJECT_LIFT') !== '0',` |
 
-_83 env knobs._
+_89 env knobs._

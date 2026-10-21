@@ -5,7 +5,13 @@
  * deterministic `dim`-wide vector per input. Behaviour is scripted per call through `state`:
  *   state.chat  = 'ok' | 'http-<status>' (e.g. 'http-500', 'http-400') | 'hang' | 'unparseable' | 'think' (inline <think> block before the JSON)
  *   state.queue = [behaviour, …] consumed first, one per chat call
- *   state.embed = 'ok' | 'http-500'
+ *   state.embed = 'ok' | 'http-<status>' (e.g. 'http-500', 'http-429', 'http-400') | 'hang' (never answers)
+ *                 | 'fail-then-ok:<n>' (HTTP 503 for the next n embed calls, then ok; the count restarts
+ *                 whenever state.embed changes, or when state.embedFailures is reset to 0). Any other
+ *                 value answers 500, as before.
+ *   state.embedLog = [{ at, status }] one per embed call: arrival time (performance.now(), ms) and the
+ *                 status sent (null for a hang) — for measuring a client's retry backoff.
+ * `GET /v1/models` lists the models (a cheap reachability probe, no model call).
  * The 'ok' answer is built from the article text: a grounded summary (its first sentence), two
  * grounded concepts (`state.grounded(text)`), one fabricated concept, its first two sentences as
  * claims and one fabricated claim — so the grounding step must quarantine exactly 1 + 1.
@@ -13,6 +19,7 @@
  */
 import * as http from 'node:http';
 import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 
 export const FABRICATED_CONCEPT = 'Zanzibar quokka telemetry';
 export const FABRICATED_CLAIM = 'The Andromeda treaty of 1823 banned submarine chess in Lisbon.';
@@ -20,7 +27,8 @@ export const FABRICATED_CLAIM = 'The Andromeda treaty of 1823 banned submarine c
 const sentences = (text) => text.replace(/\s+/g, ' ').split(/(?<=[.!?])\s+/).filter((s) => s.trim().length > 15);
 
 export async function startFakeOpenAI({ dim = 16 } = {}) {
-  const state = { chat: 'ok', queue: [], embed: 'ok', chatCalls: 0, embedCalls: 0, models: [], grounded: () => [] };
+  const state = { chat: 'ok', queue: [], embed: 'ok', chatCalls: 0, embedCalls: 0, embedFailures: 0, embedLog: [], models: [], grounded: () => [] };
+  let embedMode = 'ok'; // the state.embed value embedFailures counts against
   const answer = (text) => {
     const ss = sentences(text);
     return {
@@ -45,9 +53,17 @@ export async function startFakeOpenAI({ dim = 16 } = {}) {
       try { msg = JSON.parse(body || '{}'); } catch { return send(400, { error: 'bad JSON' }); }
       if (req.method === 'POST' && req.url === '/v1/embeddings') {
         state.embedCalls++;
-        if (state.embed !== 'ok') return send(500, { error: 'embedder down' });
-        return send(200, { data: [{ embedding: vector(msg.input), index: 0 }], model: msg.model });
+        if (state.embed !== embedMode) { embedMode = state.embed; state.embedFailures = 0; }
+        const at = performance.now();
+        const answer = (status, obj) => { state.embedLog.push({ at, status }); return send(status, obj); };
+        const ft = /^fail-then-ok:(\d+)$/.exec(state.embed);
+        if (state.embed === 'hang') { state.embedLog.push({ at, status: null }); return; } // the caller's timeout fires
+        if (ft && state.embedFailures < Number(ft[1])) { state.embedFailures++; return answer(503, { error: 'embedder busy' }); }
+        if (/^http-\d{3}$/.test(state.embed)) return answer(Number(state.embed.slice(5)), { error: `embedder answered ${state.embed}` });
+        if (state.embed !== 'ok' && !ft) return answer(500, { error: 'embedder down' });
+        return answer(200, { data: [{ embedding: vector(msg.input), index: 0 }], model: msg.model });
       }
+      if (req.method === 'GET' && req.url === '/v1/models') return send(200, { object: 'list', data: [{ id: 'stub-model', object: 'model' }] });
       if (req.method === 'POST' && req.url === '/v1/chat/completions') {
         state.chatCalls++;
         state.models.push(msg.model);

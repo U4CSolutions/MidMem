@@ -12,12 +12,25 @@ below assume a `midmem` wrapper (see [GETTING-STARTED.md](GETTING-STARTED.md)).
   passes: concept embedding + communities, retention pruning, projection QA, expected-query
   probes, global consistency check, revision export. Schedule exactly one owner for this.
 
+**Nightly repair batches** (since 2026-10-19, forced pass only, after the consistency check): the
+pass re-embeds at most `MIDMEM_MAINTAIN_REEMBED` (default 200) hash-placeholder vectors through
+`reembed`'s own self-gating (its first embed is the probe; offline → nothing touched, `reason:
+embedder-offline`), then re-extracts at most `MIDMEM_MAINTAIN_REEXTRACT` (default 20) fallback-extracted
+entries through `reextract` — only when the endpoint answers a cheap `GET /models` probe (never a model
+call just to test); otherwise `reextracted: { skipped: true, reason }`. Capture children that run with
+`MIDMEM_LLM_ENABLED=0` by contract and entries ingested while the box was down are repaired without a
+hand run. Both summaries land in the `maintain` result and log row as `reembedded` / `reextracted`; an
+error is recorded there and never fails the pass; with the model off in the maintaining process both
+read `{ skipped: true, reason: 'disabled' }`. `0` disables either. Note `reextract`'s default selection
+includes legacy entries that carry no extraction record, and what it rewrites is projected by the next pass.
+
 ## The review queues (judgment work, surfaced by `midmem lint` / MCP `audit`)
 
 | queue | what it means | your action |
 |---|---|---|
 | `deferredClaims` | contradictory evidence parked pending judgment | `claim-resolve <id>` accept/reject (`claims-deferred` lists oldest-first) |
 | `writeConflicts` | live claims tagged contradictory at write (legacy/accepted) | supersede the stale side, or defer; tags written before the containment floor → `claims-reclassify` (below) |
+| `fragmentClaims` / `orphanClaims` | live claims that are not claim-shaped, or whose source entry is gone (counts) | `claims-sweep --dryRun`, then `claims-sweep` (below) |
 | `stalePaths` | concepts + community parents touched by a superseded claim | review, then `stale-clear <ids>` |
 | `dupeConcepts` | near-duplicate concept candidates | `merge-concepts "<variant>" "<canonical>"` if truly the same |
 | `lowTrustWisdom` | curated entries the feedback loop buried | re-verify or forget — wisdom never auto-archives |
@@ -50,6 +63,39 @@ floor) are re-judged by `midmem claims-reclassify --dryRun`, then without `--dry
 tags become `additive`, the claims the write path deferred for them are released to `active`, and
 claims deferred by judgment are never touched. Deterministic; the run is logged as `claims-reclassify`.
 
+**Claim shape** (since 2026-10-19): a claim must look like a statement. `isClaimShaped` (grounding.mjs,
+deterministic, no knob) refuses text that opens with markdown structure — a heading, a table row, a
+quote, a `* ` bullet, a bullet or numbered item with a bold lead, a bold or italic-wrapped lead-in, a code
+fence — carries a `Session Key` / `Session ID` / `**Session` label, has fewer than 3 words, has no
+letter, or is more than 60 % non-letters. The fallback extractor (claims from the lead sentences, now
+split per markdown block so a heading no longer swallows the sentence under it) and the model path both
+drop such text (`droppedFragments`), and the ingest / reextract grounding check quarantines any that
+reach it with `reason: 'not-a-claim'` before the overlap check; the grounding report and the `ingest` /
+`reextract` log rows count both as `notClaim`. Measured before it: 125 live fragment claims (headings,
+table rows, bullets) from fallback ingests, colliding with real claims as false contradictions.
+
+**Claims that should not be live** are cleared by `midmem claims-sweep [--no-fragments] [--no-orphans]
+[--dryRun]` (MCP `claims_sweep`): fragments (not claim-shaped, `archivedBy.reason: not-a-claim`) and
+orphans — a claim whose `source.sourceId` has no active entry (superseded by a re-ingest, archived,
+forgotten), or a legacy claim without one whose path no active entry stands for (`source-gone`,
+`archivedBy.entry` when known). Archived, never deleted; each leaves every `contradictedBy` list. One
+transaction, deterministic, logged as `claims-sweep`; `lint` / MCP `audit` show the queue as
+`fragmentClaims` / `orphanClaims`. A re-ingest supersedes the old entry but not its claims, so orphans
+accumulate between sweeps; a claim made by `claim_supersede` inherits its predecessor's source and is
+swept with it, as the forget cascade would archive it.
+
+**Claim stance** (since 2026-10-12, roadmap #33): every claim is tagged at commit with
+`metadata.stance` — `observed` (the default), `provisional` (could / might / would / if we / plan to /
+dry run / simulated …), `quoted` (according to / said that / reportedly …) or `rejected` (decided
+against / ruled out / withdrawn …) — by fixed word lists (`stanceOf` in `claims.mjs`, the only source;
+`metadata.stanceMarkers` records what fired). A non-observed claim asserts nothing: it never defers, never
+counts as a neighbour or a contradiction side, never lands in `writeConflicts`, and `midmem claims <q>` (the
+current read) leaves it out. To see it, use `midmem claims <q> --all-stances` (or `--stances provisional,quoted`;
+MCP `claims` with `allStances: true` / `stances`); `claims <q> --all` returns every status and stance.
+`lint` reports the live mix as `stances`, `brief` as `claims.byStance`. A research claim of the form "the
+paper reports X" stays `observed` — the source speaking is not a quotation. `MIDMEM_CLAIM_STANCE=0` turns
+tagging off and every read behaves as before; claims written earlier keep their tag.
+
 ## Health signals worth watching
 
 - `midmem brief` — tier counts, claim stats, vector health, recent ops.
@@ -74,6 +120,14 @@ claims deferred by judgment are never touched. Deterministic; the run is logged 
   are marked fallback — `midmem reembed` repairs them once the model is back; entries extracted while
   the model was down (`extraction.mode: fallback` in `midmem entries`) get model concepts and claims
   from `midmem reextract` (see Enabling an on-network model).
+- **Embed retries** (since 2026-10-19): a timeout, a refused connection or an HTTP 5xx / 429 from the
+  embed endpoint is retried `MIDMEM_EMBED_RETRIES` times (default 2), waiting `MIDMEM_EMBED_RETRY_MS ×
+  2^attempt` (default 250 ms, then 500 ms), before the hash placeholder; any other 4xx falls back at
+  once. Measured before it: one agent process wrote 37 placeholders in a day after single timeouts
+  while CLI ingests in the same hours embedded normally. An `ingest` / `remember` log row carries
+  `embedAttempts` when the embed needed more than one. Each attempt gets the full
+  `MIDMEM_LLM_TIMEOUT_MS`, so against a hung box (not a refusing one) every embed — query embeds
+  included — waits up to (retries + 1) timeouts; lower the retries where that latency matters.
 
 ## Backup & restore
 

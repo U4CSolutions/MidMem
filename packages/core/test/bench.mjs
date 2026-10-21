@@ -13,6 +13,12 @@
  * recall of a saved article by its body, site filtering, the instruction-likeness guard, bounded
  * web occupancy against an operator line), and a promotion VERDICT:
  *
+ * Roadmap #33 adds the protected slice `stance-admission` (CASK, arXiv 2610.09008): four ingested
+ * statements about one subject — an observation, a hypothetical, a simulated tool outcome and a quoted
+ * belief — must leave only the observation current, all four on the --all read with their stances, and
+ * a later observed contradiction of the hypothetical active (not deferred because of it). The BASELINE
+ * store runs with stance tagging off (the pre-#33 behaviour), the TREATMENT with it on.
+ *
  *   REJECT  — a protected slice regressed, a capture slice is 0, the inject budget is exceeded, or
  *             any of the pre-#35 gate rules failed (the gate is exactly as strict as before).
  *   FLAG    — nothing rejects, but the inject cost is above 80% of its budget, or a protected slice
@@ -25,7 +31,7 @@
  */
 import * as fs from 'node:fs'; import * as os from 'node:os'; import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Orchestrator } from '../src/index.mjs';
+import { Orchestrator, loadConfig } from '../src/index.mjs';
 
 const JSON_ONLY = process.argv.includes('--json');
 const say = (...a) => { if (!JSON_ONLY) console.log(...a); };
@@ -37,6 +43,8 @@ const base = (over) => ({ vaultPath: path.join(tmp, 'v'), llmEnabled: false, sou
 const BASELINE = new Orchestrator(base({
   dbPath: path.join(tmp, 'baseline.db'),
   workflowBoost: { enabled: false }, conceptRouting: { enabled: false }, proactiveRecall: { enabled: false },
+  // Pre-#33 claim behaviour: no stance tagging (the other claim knobs restated — cfg overrides are shallow).
+  claims: { ...loadConfig().claims, stance: false },
 }));
 const TREATMENT = new Orchestrator(base({
   dbPath: path.join(tmp, 'treatment.db'),
@@ -193,6 +201,40 @@ async function captureSlices(o) {
   return { recall, filter, injectionGuard, occupancy };
 }
 
+// --- Stance admission (#33). One nonsense subject; the four statements share no word with the
+//     capture corpus or the Brain dataset, and none carries a negation marker. The later
+//     contradiction negates the hypothetical (containment 7/8) but shares only 3 tokens with the
+//     observation (containment 3/8, below the 0.6 floor), so only the hypothetical can defer it. ---
+const STANCE_QUERY = 'vorpelline gantry';
+const STANCE_STATEMENTS = [
+  ['observed', /ships brask modules/, 'The vorpelline gantry ships brask modules to the kettering depot every friday.'],
+  ['provisional', /could move/, 'We could move the vorpelline gantry onto the zindle rack next quarter.'],
+  ['provisional', /dry run/, 'The dry run of the vorpelline gantry would return a clean zindle manifest.'],
+  ['quoted', /according to the vendor/i, 'According to the vendor the vorpelline gantry firmware fixed the brask jam.'],
+];
+const STANCE_CONTRADICTION = 'We did not move the vorpelline gantry onto the zindle rack.';
+
+async function stanceSlice(o) {
+  const dir = path.join(tmp, 'stance');
+  fs.mkdirSync(dir, { recursive: true });
+  const p1 = path.join(dir, 'stance-001.md'); const p2 = path.join(dir, 'stance-002.md');
+  fs.writeFileSync(p1, STANCE_STATEMENTS.map(([, , s]) => s).join('\n') + '\n');
+  fs.writeFileSync(p2, STANCE_CONTRADICTION + '\n');
+  await o.ingest({ path: p1, type: 'note', title: 'Gantry Log', scope: 'shared' });
+  const cur = o.currentClaims(STANCE_QUERY, { limit: 20 });
+  const all = o.searchClaims(STANCE_QUERY, { limit: 20 });
+  const find = (rows, re) => rows.find((c) => re.test(c.content));
+  const obsCurrent = !!find(cur, STANCE_STATEMENTS[0][1]);
+  const nonCurrent = STANCE_STATEMENTS.slice(1).filter(([, re]) => !find(cur, re)).length;
+  const held = STANCE_STATEMENTS.every(([, re]) => find(all, re));
+  const stancesRight = STANCE_STATEMENTS.every(([st, re]) => find(all, re)?.metadata?.stance === st);
+  await o.ingest({ path: p2, type: 'note', title: 'Gantry Followup', scope: 'shared' });
+  const later = find(o.searchClaims(STANCE_QUERY, { limit: 20 }), /did not move/);
+  const notDeferred = !!later && later.status !== 'deferred';
+  // 1.0 = none of the three non-observed statements is current, with the gates held.
+  return obsCurrent && held && stancesRight && notDeferred ? Number((nonCurrent / 3).toFixed(3)) : 0;
+}
+
 async function run() {
   await seed(BASELINE); await seed(TREATMENT);
   await TREATMENT.refreshConcepts(); // build concept graph for the treatment
@@ -218,6 +260,8 @@ async function run() {
   // Capture slices run on the TREATMENT store only, after the Brain metrics (so the corpus
   // cannot move them); the baseline reports n/a.
   const C = await captureSlices(TREATMENT);
+  // Stance admission (#33) last, on both stores: its claims cannot reach the slices above.
+  const S = { baseline: await stanceSlice(BASELINE), treatment: await stanceSlice(TREATMENT) };
 
   const BUDGET = 300;
   const NA = 'n/a';
@@ -235,6 +279,7 @@ async function run() {
   row('capture-filter', NA, C.filter);
   row('capture-injection-guard', NA, C.injectionGuard, P);
   row('capture-occupancy', NA, C.occupancy, P);
+  row('stance-admission', S.baseline, S.treatment, P);
 
   // Regression gate: treatment must not lose on any Brain metric, and must win on the work-memory
   // ones (the pre-#35 rules, unchanged), plus the #35 protected-slice and capture-slice rules.
@@ -244,6 +289,7 @@ async function run() {
   if (M.treatment.deadEndAvoided < 1) reasons.push('dead-end not flagged by treatment');
   if (M.treatment.currentClaim < 1) reasons.push('current-claim not resolved by treatment');
   if (M.treatment.injectTokens > BUDGET) reasons.push('proactive inject over budget');
+  if (S.treatment < 1) reasons.push('stance-admission not held by treatment');
 
   // Slice table for the verdict. ok = the slice passes every rule that can reject it.
   const brainOk = (b, t) => t >= b && t >= 1;
@@ -257,6 +303,7 @@ async function run() {
     'capture-filter': { baseline: NA, treatment: C.filter, protected: false, ok: C.filter === 1 },
     'capture-injection-guard': { baseline: NA, treatment: C.injectionGuard, protected: true, ok: C.injectionGuard === 1 },
     'capture-occupancy': { baseline: NA, treatment: C.occupancy, protected: true, ok: C.occupancy === 1 },
+    'stance-admission': { baseline: S.baseline, treatment: S.treatment, protected: true, ok: brainOk(S.baseline, S.treatment) },
   };
   const numeric = (s) => typeof s.baseline === 'number';
   for (const [name, s] of Object.entries(slices)) {
