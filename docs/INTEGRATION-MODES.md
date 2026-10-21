@@ -222,8 +222,11 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
      vectors): the order above holds in every role assignment, also under one better match; starring never
      lowers an entry; no favorite passes a target holding more of the query's words except on its own explicit
      vote; past the vector top 10 a favorite gains nothing (without that gate one at vector rank 40 reached #1);
-     Cyrillic and CJK favorites stay below the entry holding the query's words; on question-form queries
-     starring unrelated entries brings none of them into a top 3.
+     Cyrillic and CJK favorites stay below the entry holding the query's words; on question-form queries the
+     word gate keeps starred unrelated entries out of a top 3 (0 of 15 synonym questions; 15 of 15 without the
+     gate). The vector side trusts the embedder: the offline hash embedder (no model configured) hashes stopwords
+     like words, and in its deep pass 1 synonym question in 15 lifted a starred unrelated entry from its vector
+     top 10 into the top 3.
    - **Capability check:** every `entries` row of a favorites-capable MidMem carries `favorite` (item 7).
      Never send the switches to an older MidMem: its CLI ignores unknown switches, so it would count
      `--favorite` AND `--unfavorite` as plain helpful votes.
