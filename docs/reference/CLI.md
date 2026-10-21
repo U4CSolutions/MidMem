@@ -7,14 +7,14 @@ Parsed from `packages/core/bin/cli.mjs` (the wrapper `midmem <command>` in a dep
 | command | flags read |
 |---|---|
 | `init` | — |
-| `ingest` | `--sections` `--type` `--title` `--scope` `--curated` `--authority` |
-| `ingest-content` | `--stdin` `--type` `--title` `--scope` `--authority` `--curated` |
+| `ingest` | `--sections` `--type` `--title` `--scope` `--curated` `--authority` `--favorite` |
+| `ingest-content` | `--stdin` `--type` `--title` `--scope` `--authority` `--curated` `--favorite` |
 | `remember` | `--tier` `--type` `--scope` `--curated` `--function` `--authority` |
 | `query` | `--tiers` `--scopes` `--functions` `--limit` `--graph` `--minAuthority` `--deep` `--historical` `--statuses` `--asOf` `--bounded` `--includeWorking` |
 | `bridge` | — |
 | `handoff` | `--profile` `--scopes` `--tiers` |
 | `recall` | — |
-| `feedback` | `--unhelpful` |
+| `feedback` | `--unhelpful` `--favorite` `--unfavorite` |
 | `entries` | `--library` `--claims` `--limit` `--offset` |
 | `reextract` | `--library` `--all` `--limit` `--dryRun` |
 | `forget-source` | `--library` `--dryRun` |
@@ -69,7 +69,8 @@ Usage: ocmw <init|ingest <path>|ingest-content <text>|remember <text>|query <tex
   query / handoff / recall-check metadata filters (AND): --site --author --library --doc-id --capture-method --source-uri --canonical-uri --language --published-after --published-before --captured-after --captured-before <ISO> | --types a,b
   library lane (#49): libraries (list registered, MIDMEM_LIBRARIES) | library-get <libraryId> <docId> --locator <JSON {docId,version,charStart,charEnd}>; query / handoff / recall-check take --libraries a,b (ask only those) | --no-libraries (skip the lane)
   ingest-content <text> | --stdin: same source flags (one of --canonical-uri/--source-uri/--doc-id required) + --type --title --scope --authority (default web) --curated
-  capture systems (INTEGRATION-MODES §6): feedback <entryId> [--unhelpful] (active entries only; else {success:false, reason}) | entries <entry ids…> | entries --library <id> [--doc-ids a,b] [--limit <n ≤ 5000, default 500>] [--offset <n>] [--claims] (lifecycle read; never a recall) | forget-source --library <id> --doc-id <docId> [--dryRun] (soft-forgets every entry from that source, unlinks it from alsoSources) | reextract [--library <id> [--doc-ids a,b]] [--only-fallback (default) | --all] [--limit <n ≤ 5000, default 100>] [--retry-failed] [--dry-run] (re-runs model extraction on active entries whose source file is unchanged, in place: id, tier, lease and counters kept; writes only when the model answers; never curated entries; an entry whose answer failed is retried after 24 h, or now with --retry-failed)
+  favorites (schema 6): feedback <entryId> --favorite | --unfavorite (idempotent; a favorite is ONE helpful vote and the unfavorite takes back only that vote; active entries only; {success, id, favorite, helpful_count, trust_score, changed}) | ingest <path> … --favorite (also ingest-content; the entry the ingest stands for becomes a favorite; a re-ingest that supersedes a favorite carries it and its vote, once)
+  capture systems (INTEGRATION-MODES §6): feedback <entryId> [--unhelpful | --favorite | --unfavorite] (active entries only; else {success:false, reason}) | entries <entry ids…> | entries --library <id> [--doc-ids a,b] [--limit <n ≤ 5000, default 500>] [--offset <n>] [--claims] (lifecycle read; never a recall) | forget-source --library <id> --doc-id <docId> [--dryRun] (soft-forgets every entry from that source, unlinks it from alsoSources) | reextract [--library <id> [--doc-ids a,b]] [--only-fallback (default) | --all] [--limit <n ≤ 5000, default 100>] [--retry-failed] [--dry-run] (re-runs model extraction on active entries whose source file is unchanged, in place: id, tier, lease and counters kept; writes only when the model answers; never curated entries; an entry whose answer failed is retried after 24 h, or now with --retry-failed)
 ```
 
 ## Sub-command usage

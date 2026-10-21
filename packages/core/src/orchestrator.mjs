@@ -185,11 +185,15 @@ export class Orchestrator {
   /** Record a structured domain entry via a pack-registered type (governed storeMemory inside). */
   async recordPattern(rec = {}) { return recordPattern(this, rec); }
 
-  /** Ingest a raw source: extract → store (memory tier, or a capture-pack type's tier) → embed → graph → claims → verify. */
-  async ingest({ path, type = 'note', title, metadata = {}, curated = false, scope = this.cfg.agentScope, authority, project = this.cfg.project, source }) {
+  /** Ingest a raw source: extract → store (memory tier, or a capture-pack type's tier) → embed → graph → claims → verify.
+   *  `favorite` (2026-10-21, CLI `ingest --favorite`): the entry this ingest stands for — the new one, the live holder
+   *  of a linked duplicate, or the active entry of an unchanged source — is (or stays) a favorite, one helpful vote
+   *  applied once. A new entry that supersedes a favorite inherits the favorite and its vote with or without it. */
+  async ingest({ path, type = 'note', title, metadata = {}, curated = false, scope = this.cfg.agentScope, authority, project = this.cfg.project, source, favorite = false }) {
     // Authority assigned at origin (roadmap #10): explicit label wins; curation implies operator;
     // otherwise ingested material is 'doc'. Unknown labels are rejected, not silently mapped.
     if (authority !== undefined && !normalizeAuthority(authority)) throw new Error(`unknown authority: ${authority} (expected operator|stack|doc|web)`);
+    if (typeof favorite !== 'boolean') throw new Error('favorite must be true or false');
     const auth = normalizeAuthority(authority) || (curated ? 'operator' : 'doc');
     const proj = normalizeProject(project); // project axis (#18): null = global
     const guardText = this.cfg.ingest?.secretTextGuard !== false;
@@ -213,7 +217,7 @@ export class Orchestrator {
     if (packDef && this.cfg.tiers.find((t) => t.name === entryTier)?.curatedOnly && curated !== true) {
       throw new Error(`pack type '${type}' targets curated-only tier '${entryTier}'; pass curated:true`);
     }
-    const ctx = { path, type, scope, curated, authority: auth, project: proj, tier: entryTier, ...(src ? { source: Object.keys(src) } : {}) };
+    const ctx = { path, type, scope, curated, authority: auth, project: proj, tier: entryTier, ...(src ? { source: Object.keys(src) } : {}), ...(favorite ? { favorite: true } : {}) };
     const r = await governed(this.gov, 'ingest', ctx, async () => {
       const canon = canonicalPath(given);
       const text = await fs.readFile(canon, 'utf8');
@@ -237,7 +241,13 @@ export class Orchestrator {
       // Identity matches the canonical path OR the given literal: a row stored before canonical paths
       // (under a symlink alias or a relative spelling) still counts when reached by the same spelling.
       const samePath = same.find((row) => (row.path === canon || row.path === given) && standing.get(row.id, row.id));
-      if (samePath) { this.db.logOp('ingest-skip', { path: canon, hash, sourceId: samePath.id }); return { success: true, skipped: true, reason: 'unchanged', sourceId: samePath.id }; }
+      if (samePath) {
+        this.db.logOp('ingest-skip', { path: canon, hash, sourceId: samePath.id });
+        const res = { success: true, skipped: true, reason: 'unchanged', sourceId: samePath.id };
+        // --favorite on an unchanged source: the active entry standing for it (its own, or a holder linking it).
+        if (favorite) { const live = this.#entryIdOf(res); res.favorite = live ? this.favorite(live, true, { activeOnly: true, via: 'ingest' }) : { success: false, reason: 'no-active-entry' }; }
+        return res;
+      }
       if (same.length) {
         const linked = this.db.tx(() => {
           const active = this.db.prepare("SELECT id, provenance FROM entries WHERE source_id=? AND status='active'");
@@ -256,7 +266,8 @@ export class Orchestrator {
           // Metadata-only: updated_at stays untouched (the knowledge did not change).
           this.db.prepare('UPDATE entries SET provenance=? WHERE id=?').run(JSON.stringify(p), live.id);
           this.db.logOp('ingest-link', { path: canon, entry: live.id, sourceId: newSourceId });
-          return { success: true, skipped: true, reason: 'linked-duplicate', entry: live.id, sourceId: newSourceId };
+          const fav = favorite ? this.favorite(live.id, true, { via: 'ingest' }) : null; // the holder now stands for this source too
+          return { success: true, skipped: true, reason: 'linked-duplicate', entry: live.id, sourceId: newSourceId, ...(fav ? { favorite: fav } : {}) };
         });
         if (linked) return linked;
       }
@@ -291,15 +302,24 @@ export class Orchestrator {
       // be archived without the replacement landing. "Same path" = canonical OR the given
       // literal, so pre-canonical rows stored under that spelling are superseded too.
       let superseded = [];
+      let carriedFrom = [];
+      let fav = null;
       const stored = this.db.tx(() => {
-        superseded = this.db.prepare(
-          "SELECT e.id FROM entries e JOIN sources s ON e.source_id = s.id WHERE s.path IN (?, ?) AND e.status = 'active'",
-        ).all(canon, given).map((r) => r.id);
+        const prior = this.db.prepare(
+          "SELECT e.id, e.favorite FROM entries e JOIN sources s ON e.source_id = s.id WHERE s.path IN (?, ?) AND e.status = 'active'",
+        ).all(canon, given);
+        superseded = prior.map((r) => r.id);
+        // A favorite survives its source's re-capture (2026-10-21): a superseded favorite hands the favorite and
+        // its one helpful vote to the new entry — once, whether or not --favorite is passed too. The archived
+        // version keeps its own counters (history is not rewritten).
+        carriedFrom = prior.filter((r) => r.favorite === 1).map((r) => r.id);
         const sup = this.db.prepare("UPDATE entries SET status='archived', updated_at=? WHERE id=?");
         for (const id of superseded) sup.run(nowISO(), id);
         this.db.prepare('INSERT INTO sources(id,path,type,title,hash,ingested_at,metadata) VALUES(?,?,?,?,?,?,?)')
           .run(sourceId, canon, type, title || null, hash, nowISO(), JSON.stringify(sourceMeta));
-        return this.memory.store({ content: ex.summary, type: entryType, tier: entryTier, scope, sourceId, provenance: prov, concepts: gc.grounded, memFunction: packDef ? packDef.function : null, project: proj, ...(packDef?.ttlDays ? { ttlMs: packDef.ttlDays * 864e5 } : {}) });
+        const st = this.memory.store({ content: ex.summary, type: entryType, tier: entryTier, scope, sourceId, provenance: prov, concepts: gc.grounded, memFunction: packDef ? packDef.function : null, project: proj, ...(packDef?.ttlDays ? { ttlMs: packDef.ttlDays * 864e5 } : {}) });
+        if (favorite || carriedFrom.length) fav = this.favorite(st.id, true, { via: carriedFrom.length ? 'carry-over' : 'ingest', carriedFrom });
+        return st;
       });
       await this.memory.upsertVector(stored.id, vector, model, mode);
 
@@ -313,7 +333,7 @@ export class Orchestrator {
       const verification = this.verifier.verifyConcepts(gc.grounded);
       this.db.logOp('ingest', { path: canon, entry: stored.id, concepts: gc.grounded.length, claims: gcl.grounded.length, quarantined: gc.ungrounded.length + gcl.ungrounded.length, summaryScore: grounding.summaryScore, mode: ex.mode, conflicts: verification.conflicts.length, superseded: superseded.length });
       this.#markVaultDirty();
-      return { success: true, entry: stored, concepts: gc.grounded.length, claims: gcl.grounded.length, grounding, verification, mode: ex.mode, superseded };
+      return { success: true, entry: stored, concepts: gc.grounded.length, claims: gcl.grounded.length, grounding, verification, mode: ex.mode, superseded, ...(fav ? { favorite: { ...fav, ...(carriedFrom.length ? { carriedFrom } : {}) } } : {}) };
     });
     await this.#maybeMaintain();
     return r;
@@ -326,7 +346,7 @@ export class Orchestrator {
    * SAME path: unchanged content dedups by hash, changed content supersedes through the existing
    * path-keyed supersede. Authority defaults to 'web'. Then it is an ordinary governed ingest.
    */
-  async ingestContent({ content, source, type = 'note', title, scope, project, authority = 'web', curated = false, metadata = {} } = {}) {
+  async ingestContent({ content, source, type = 'note', title, scope, project, authority = 'web', curated = false, metadata = {}, favorite = false } = {}) {
     if (typeof content !== 'string' || !content.length) throw new Error('ingestContent requires non-empty string content');
     const sourceKey = source?.canonicalUri || source?.sourceUri || source?.docId;
     if (!sourceKey) throw new Error('ingestContent requires source.canonicalUri, source.sourceUri or source.docId');
@@ -339,7 +359,7 @@ export class Orchestrator {
     const filePath = nodePath.join(dir, sha12(sourceKey) + '.md');
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(filePath, content);
-    return this.ingest({ path: filePath, type, title, source, scope, project, authority, curated, metadata });
+    return this.ingest({ path: filePath, type, title, source, scope, project, authority, curated, metadata, favorite });
   }
 
   /**
@@ -352,15 +372,15 @@ export class Orchestrator {
    * Sections inherit the digest's EFFECTIVE authority (doc unless curated/explicit) — ingestContent's
    * 'web' default does not apply to text the operator handed over as a file. Fewer than `minSections`
    * distinct qualifying citations → the file is not a digest: the parent stands alone. `source`
-   * (optional) is the digest's own provenance and goes to the parent only.
+   * (optional) is the digest's own provenance and goes to the parent only, like `favorite`.
    */
-  async ingestSections({ path, type = 'research', title, scope, project, authority, curated = false, metadata = {}, source, minChars = 200, minSections = 2 } = {}) {
+  async ingestSections({ path, type = 'research', title, scope, project, authority, curated = false, metadata = {}, source, minChars = 200, minSections = 2, favorite = false } = {}) {
     for (const [k, v] of [['minChars', minChars], ['minSections', minSections]]) {
       if (!Number.isInteger(v) || v < 0) throw new Error(`ingestSections ${k} must be a non-negative integer`);
     }
     // 1. The digest first: governance (the path policy) and its own dedup/supersede. A denial
     //    propagates from here, before any section file is materialized.
-    const parent = await this.ingest({ path, type, title, metadata, curated, scope, authority, project, source });
+    const parent = await this.ingest({ path, type, title, metadata, curated, scope, authority, project, source, favorite });
     // 2. Split exactly what the governed ingest read: same canonical path, and the text must hash to
     //    the parent's sources row — a file swapped or edited in between is refused, not sectioned.
     const canon = canonicalPath(path);
@@ -1188,9 +1208,19 @@ export class Orchestrator {
   /** Feedback loop — caller marks a recalled entry helpful/unhelpful (nudges trust_score). */
   feedback(id, helpful = true) { const r = this.memory.recordFeedback(id, helpful); this.db.logOp('feedback', { id, helpful }); return r; }
 
+  /** The operator's favorite (schema 6; CLI `feedback <id> --favorite|--unfavorite`, `ingest --favorite`, the
+   *  re-ingest carry-over): one helpful vote that the unfavorite takes back, idempotent (TieredMemory.setFavorite).
+   *  Every answered call is logged ('favorite', with `changed` and where it came from). */
+  favorite(id, on = true, { activeOnly = false, via = 'feedback', carriedFrom = [] } = {}) {
+    const r = this.memory.setFavorite(id, on, { activeOnly });
+    if (r.success) this.db.logOp('favorite', { id, favorite: r.favorite, changed: r.changed, via, ...(carriedFrom.length ? { carriedFrom } : {}) });
+    return r;
+  }
+
   /** Operator feedback for a capture system (CLI `feedback`, §6 6b): refuses unknown / non-active entries
-   *  as a JSON result `{ success:false, reason }` instead of nudging a dead row. */
-  feedbackIfActive(id, helpful = true) { return feedbackIfActive(this, id, { helpful }); }
+   *  as a JSON result `{ success:false, reason }` instead of nudging a dead row. `favorite: true|false` sets /
+   *  clears the favorite instead of a plain vote. */
+  feedbackIfActive(id, helpful = true, { favorite } = {}) { return feedbackIfActive(this, id, { helpful, favorite }); }
 
   /** Lifecycle read (CLI `entries`, MCP `entry_status`, §6 item 7): tier, lease, counters, concepts, claims,
    *  promotion progress + the thresholds. Never a recall — no recordRetrieval, no lease renewal, no writes. */
@@ -1222,6 +1252,7 @@ export class Orchestrator {
     const out = {
       tiers: this.memory.stats(),
       projects: this.memory.projectStats(),
+      favorites: this.db.prepare("SELECT COUNT(*) c FROM entries WHERE status='active' AND favorite=1").get().c, // schema 6
       claims: this.claims.stats(),
       graph: { nodes: g.nodes.length, edges: g.edges.length },
       vectors: await this.memory.vectorHealth(),

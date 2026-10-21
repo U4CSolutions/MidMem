@@ -11,7 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 export class StateDB {
   /** @param {string} dbPath */
@@ -139,6 +139,9 @@ export class StateDB {
     // to scope (access). NULL = global. Reads return project + global (see projectaxis.mjs).
     this.#ensureColumn('entries', 'project', 'TEXT');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_entries_project ON entries(project)');
+    // v6 (2026-10-21): favorites — an operator's favorite counts as ONE helpful vote that `--unfavorite`
+    // takes back; favorite_helpful records whether the favorite added that vote (the only vote taken back).
+    this.#ensureColumns('entries', [['favorite', 'INTEGER NOT NULL DEFAULT 0'], ['favorite_helpful', 'INTEGER NOT NULL DEFAULT 0']]);
     // v3: backfill the trigram index once for pre-existing rows (triggers cover new rows).
     if (!this.db.prepare("SELECT 1 FROM meta WHERE key='trigram_built'").get()) {
       if (this.db.prepare('SELECT COUNT(*) c FROM entries').get().c > 0)
@@ -153,6 +156,23 @@ export class StateDB {
   #ensureColumn(table, col, def) {
     const cols = this.db.prepare(`PRAGMA table_info(${table})`).all();
     if (!cols.some((c) => c.name === col)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+  }
+
+  /** Add a set of columns atomically (v6+). The common path (all present) takes no lock; otherwise the
+   *  check repeats under the write lock (BEGIN IMMEDIATE waits out busy_timeout), so two processes opening
+   *  one store at the first start after an upgrade never both ALTER, and a crash leaves all or none. A
+   *  constant DEFAULT makes ADD COLUMN a schema-only change: no row is rewritten, whatever the store size. */
+  #ensureColumns(table, defs) {
+    const missing = () => {
+      const have = new Set(this.db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
+      return defs.filter(([col]) => !have.has(col));
+    };
+    if (!missing().length) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const [col, def] of missing()) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+      this.db.exec('COMMIT');
+    } catch (e) { try { this.db.exec('ROLLBACK'); } catch {} throw e; }
   }
 
   /** Run fn inside a transaction; rolls back on throw (atomic writes across tables). */

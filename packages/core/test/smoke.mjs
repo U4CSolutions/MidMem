@@ -2855,6 +2855,350 @@ try {
     }
   }
 
+  // 60. Favorites (2026-10-21, schema 6; INTEGRATION-MODES §6 6b): `feedback <id> --favorite | --unfavorite` — one
+  //     helpful vote that the unfavorite takes back (idempotent, metadata-only, active entries only); `ingest
+  //     --favorite` and the carry-over when a re-capture supersedes a favorite (applied once); the read surfaces
+  //     and the export; the ranking boosts (favorite + helpful > favorite > neither at equal relevance, candidates
+  //     only, never past a candidate holding more of the query's words); and the 5 → 6 migration on a copy-shaped
+  //     store. Own temp stores, so rankings see only these fixtures.
+  {
+    const { DatabaseSync } = await import('node:sqlite');
+    const { hybridSearch } = await import('../src/retrieval.mjs');
+    const { HELPFUL_TRUST_DELTA } = await import('../src/memory.mjs');
+    const { FEEDBACK_TRUST_DELTAS } = await import('../src/entrystatus.mjs');
+    const dir60 = path.join(tmp, 'fav60');
+    fs.mkdirSync(dir60, { recursive: true });
+    const db60 = path.join(dir60, 'state.db');
+    const exp60 = path.join(dir60, 'export.jsonl');
+    const base60 = (dbPath, extra = {}) => ({ dbPath, vaultPath: path.join(dir60, 'vault'), llmEnabled: false, sourceRoots: [tmp], autoIngest: { enabled: false, onMaintain: false }, export: { enabled: true, path: exp60 }, ...extra });
+    const o60 = new Orchestrator(base60(db60));
+    const others60 = [];
+    try {
+      const L60 = 'kb-article-library';
+      const src60 = (docId) => ({ libraryId: L60, docId, canonicalUri: `https://news.example.test/60/${docId}` });
+      const cap60 = (docId, content, extra = {}) => o60.ingestContent({ content, source: src60(docId), type: 'web-article', authority: 'web', project: 'library', ...extra });
+      const row60 = (id) => o60.db.prepare('SELECT * FROM entries WHERE id = ?').get(id);
+      const pick60 = (r) => ({ favorite: r.favorite, favorite_helpful: r.favorite_helpful, helpful_count: r.helpful_count, trust: Number(r.trust_score.toFixed(3)) });
+      const err60 = (fn) => { try { fn(); return null; } catch (e) { return e.message; } };
+      const FAV_KEYS = 'changed,favorite,helpful_count,id,success,trust_score';
+      const keys60 = (v) => Object.keys(v || {}).sort().join(',');
+
+      // 60.1 — schema 6: two INTEGER NOT NULL DEFAULT 0 columns; a new entry starts as no favorite.
+      const cols60 = o60.db.prepare('PRAGMA table_info(entries)').all();
+      const fcol = (n) => cols60.find((c) => c.name === n);
+      ok(fcol('favorite')?.type === 'INTEGER' && fcol('favorite').notnull === 1 && fcol('favorite').dflt_value === '0' && fcol('favorite_helpful')?.type === 'INTEGER' && fcol('favorite_helpful').notnull === 1 && fcol('favorite_helpful').dflt_value === '0',
+        'schema 6: entries.favorite and entries.favorite_helpful are INTEGER NOT NULL DEFAULT 0');
+      ok(o60.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value === '6', 'meta schema_version = 6');
+      const tA60 = 'FAVSIXTY alpha: the harbour authority published the quarterly tide gauge report for the estuary. Engineers logged the readings twice a day.';
+      const iA60 = await cap60('fav60a', tA60);
+      const eA60 = iA60.entry.id;
+      ok(JSON.stringify(pick60(row60(eA60))) === '{"favorite":0,"favorite_helpful":0,"helpful_count":0,"trust":0.5}' && iA60.favorite === undefined, 'a new capture starts with favorite 0, favorite_helpful 0 (no favorite block in the ingest result)');
+
+      // 60.2 — favorite / unfavorite: one vote, idempotent, only the favorite's own vote taken back, metadata-only.
+      const before60 = JSON.stringify(row60(eA60));
+      const f1 = o60.feedbackIfActive(eA60, true, { favorite: true });
+      ok(keys60(f1) === FAV_KEYS && f1.success === true && f1.id === eA60 && f1.favorite === true && f1.helpful_count === 1 && f1.trust_score === 0.55 && f1.changed === true,
+        'favorite → {success, id, favorite: true, helpful_count 1, trust_score 0.55, changed: true}');
+      ok(Number((f1.trust_score - 0.5).toFixed(3)) === FEEDBACK_TRUST_DELTAS.helpful && HELPFUL_TRUST_DELTA === FEEDBACK_TRUST_DELTAS.helpful && JSON.stringify(pick60(row60(eA60))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}',
+        'the favorite is exactly one helpful vote (the reported helpful delta); favorite_helpful = 1 records it');
+      const f2 = o60.feedbackIfActive(eA60, true, { favorite: true });
+      ok(keys60(f2) === FAV_KEYS && f2.success && f2.favorite === true && f2.helpful_count === 1 && f2.trust_score === 0.55 && f2.changed === false, 'favorite again → changed: false, nothing moves (idempotent)');
+      const u1 = o60.feedbackIfActive(eA60, true, { favorite: false });
+      ok(keys60(u1) === FAV_KEYS && u1.favorite === false && u1.helpful_count === 0 && u1.trust_score === 0.5 && u1.changed === true && JSON.stringify(row60(eA60)) === before60,
+        'unfavorite → the vote is taken back and the row is byte-identical to before the favorite (updated_at, lease and counters untouched)');
+      const u2 = o60.feedbackIfActive(eA60, true, { favorite: false });
+      ok(u2.success && u2.changed === false && u2.favorite === false && u2.helpful_count === 0 && JSON.stringify(row60(eA60)) === before60, 'unfavorite of a non-favorite → changed: false; no vote is taken back');
+      o60.feedbackIfActive(eA60, true, { favorite: true });
+      o60.feedbackIfActive(eA60, true); // an explicit helpful vote on top of the favorite
+      ok(JSON.stringify(pick60(row60(eA60))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":2,"trust":0.6}', 'favorite + an explicit helpful vote → helpful_count 2, trust 0.6');
+      const pr60 = o60.entryStatus({ ids: [eA60] }).entries[0].promotion;
+      ok(pr60.progress.helpful.have === 2 && !pr60.blockers.includes('needs-helpful'), 'the favorite\'s vote counts toward promotion (helpful have 2 = minHelpful; promotion still runs only in maintain)');
+      const u3 = o60.feedbackIfActive(eA60, true, { favorite: false });
+      ok(u3.changed && u3.helpful_count === 1 && u3.trust_score === 0.55 && JSON.stringify(pick60(row60(eA60))) === '{"favorite":0,"favorite_helpful":0,"helpful_count":1,"trust":0.55}', 'unfavorite takes back only the favorite\'s vote: the explicit helpful vote stays');
+      // Clamping, both ends, and helpful_count never below 0.
+      o60.db.prepare('UPDATE entries SET trust_score = 0.98 WHERE id = ?').run(eA60);
+      const c1 = o60.feedbackIfActive(eA60, true, { favorite: true });
+      const c2 = o60.feedbackIfActive(eA60, true, { favorite: false });
+      ok(c1.trust_score === 1 && c2.trust_score === 0.95, `trust clamps at 1 (0.98 → ${c1.trust_score}); the unfavorite takes the helpful delta off the clamped value (→ ${c2.trust_score})`);
+      o60.db.prepare('UPDATE entries SET trust_score = 0.03, helpful_count = 0, favorite = 1, favorite_helpful = 1 WHERE id = ?').run(eA60);
+      const c3 = o60.feedbackIfActive(eA60, true, { favorite: false });
+      ok(c3.changed && c3.trust_score === 0 && c3.helpful_count === 0 && row60(eA60).helpful_count === 0, 'the take-back clamps trust at 0 and never takes helpful_count below 0');
+      o60.db.prepare('UPDATE entries SET trust_score = 0.5, helpful_count = 0, favorite = 0, favorite_helpful = 0 WHERE id = ?').run(eA60);
+      // Usage errors and refusals.
+      ok(/one vote/.test(err60(() => o60.feedbackIfActive(eA60, false, { favorite: true })) || '') && /true or false/.test(err60(() => o60.feedbackIfActive(eA60, true, { favorite: 'yes' })) || '') && /bad entry id/.test(err60(() => o60.feedbackIfActive('bad id', true, { favorite: true })) || ''),
+        'favorite with an unhelpful vote, a non-boolean favorite or a malformed id is an error');
+      const nf60 = o60.feedbackIfActive('memory-nope-000000000000', true, { favorite: true });
+      ok(nf60.success === false && nf60.reason === 'not-found', 'favorite on an unknown entry → {success:false, reason:not-found}');
+      const tB60 = 'FAVSIXTY bravo: the ferry operator restored the night crossing after the harbour wall repair.';
+      const iB60 = await cap60('fav60b', tB60);
+      o60.feedbackIfActive(iB60.entry.id, true, { favorite: true });
+      await o60.archiveEntries({ ids: [iB60.entry.id], reason: 'smoke 60' });
+      const archived60 = JSON.stringify(row60(iB60.entry.id));
+      const na1 = o60.feedbackIfActive(iB60.entry.id, true, { favorite: false });
+      const na2 = o60.feedbackIfActive(iB60.entry.id, true, { favorite: true });
+      ok(na1.success === false && na1.reason === 'not-active' && na1.status === 'archived' && na2.reason === 'not-active' && JSON.stringify(row60(iB60.entry.id)) === archived60,
+        'an archived entry refuses --favorite and --unfavorite like feedback ({success:false, reason:not-active, status:archived}); nothing moves');
+      ok(o60.memory.setFavorite(iB60.entry.id, true, { activeOnly: true }).reason === 'not-active', 'setFavorite({ activeOnly }) refuses a non-active row in the UPDATE itself (an archive landing between the CLI\'s check and its write)');
+      const logs60 = o60.db.prepare("SELECT detail FROM log WHERE operation='favorite'").all().map((r) => JSON.parse(r.detail));
+      ok(logs60.length >= 8 && logs60.some((d) => d.id === eA60 && d.favorite === true && d.changed === true && d.via === 'feedback') && logs60.some((d) => d.changed === false), `every answered favorite call is logged with changed + via (${logs60.length} rows)`);
+
+      // 60.3 — ingest --favorite and the carry-over across a re-capture (applied once; explicit votes do not carry).
+      const tC1 = 'FAVSIXTY charlie: the lighthouse keeper logged a fog bank rolling in from the north channel.';
+      const iC1 = await cap60('fav60c', tC1, { favorite: true });
+      ok(iC1.favorite?.success && iC1.favorite.favorite === true && iC1.favorite.changed === true && JSON.stringify(pick60(row60(iC1.entry.id))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}',
+        'ingest --favorite → the new entry starts as a favorite with its one vote (helpful 1, trust 0.55)');
+      o60.feedbackIfActive(iC1.entry.id, true); o60.feedbackIfActive(iC1.entry.id, true); // two explicit votes on the first version
+      const iC2 = await cap60('fav60c', 'FAVSIXTY charlie, revised: the fog bank cleared before the ferry left the north channel.');
+      ok(JSON.stringify(iC2.superseded) === JSON.stringify([iC1.entry.id]) && iC2.favorite?.favorite === true && JSON.stringify(iC2.favorite.carriedFrom) === JSON.stringify([iC1.entry.id])
+        && JSON.stringify(pick60(row60(iC2.entry.id))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}',
+        're-capture without --favorite → the new entry inherits the favorite and its ONE vote (the old entry\'s explicit votes stay with it)');
+      ok(row60(iC1.entry.id).status === 'archived' && JSON.stringify(pick60(row60(iC1.entry.id))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":3,"trust":0.65}', 'the superseded version keeps its own counters and favorite (history is not rewritten)');
+      const iC3 = await cap60('fav60c', 'FAVSIXTY charlie, final: the north channel reopened at dawn after the fog bank cleared.', { favorite: true });
+      ok(iC3.favorite?.changed === true && JSON.stringify(iC3.favorite.carriedFrom) === JSON.stringify([iC2.entry.id]) && JSON.stringify(pick60(row60(iC3.entry.id))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}',
+        're-capture of a favorite WITH --favorite → still exactly one vote (carry-over and flag applied once)');
+      ok(o60.db.prepare("SELECT COUNT(*) c FROM log WHERE operation='favorite' AND detail LIKE ?").get(`%"id":"${iC3.entry.id}"%`).c === 1, 'one favorite write logged for that entry (via carry-over)');
+      o60.feedbackIfActive(iC3.entry.id, true, { favorite: false });
+      const iC4 = await cap60('fav60c', 'FAVSIXTY charlie, appendix: the keeper added the tide tables for the north channel.');
+      ok(iC4.favorite === undefined && JSON.stringify(pick60(row60(iC4.entry.id))) === '{"favorite":0,"favorite_helpful":0,"helpful_count":0,"trust":0.5}', 'once unfavorited, a re-capture carries nothing');
+      const iD60 = await cap60('fav60d', 'FAVSIXTY delta: the council approved the new cycle lane along the quay.');
+      const iD2 = await cap60('fav60d', 'FAVSIXTY delta, revised: the council delayed the cycle lane along the quay to spring.');
+      ok(iD2.favorite === undefined && row60(iD2.entry.id).favorite === 0, 're-capture of a non-favorite → no favorite');
+      // Unchanged source: --favorite favorites the live entry (once); with no active entry it reports why.
+      const iD3 = await cap60('fav60d', 'FAVSIXTY delta, revised: the council delayed the cycle lane along the quay to spring.', { favorite: true });
+      const iD4 = await cap60('fav60d', 'FAVSIXTY delta, revised: the council delayed the cycle lane along the quay to spring.', { favorite: true });
+      ok(iD3.skipped && iD3.reason === 'unchanged' && iD3.favorite?.id === iD2.entry.id && iD3.favorite.changed === true && iD4.favorite?.changed === false && row60(iD2.entry.id).helpful_count === 1,
+        'unchanged re-ingest with --favorite → the live entry becomes a favorite; a repeat changes nothing');
+      await o60.archiveEntries({ ids: [iD2.entry.id], reason: 'smoke 60' });
+      const iD5 = await cap60('fav60d', 'FAVSIXTY delta, revised: the council delayed the cycle lane along the quay to spring.', { favorite: true });
+      ok(iD5.skipped && iD5.reason === 'unchanged' && iD5.favorite?.success === false && iD5.favorite.reason === 'no-active-entry', 'unchanged with no active entry standing → favorite {success:false, reason:no-active-entry}');
+      // Linked duplicate: the holder now stands for the second source too and becomes the favorite.
+      const tE60 = 'FAVSIXTY echo: the museum reopened its maritime gallery with the restored figurehead.';
+      const iE1 = await cap60('fav60e', tE60);
+      const iE2 = await cap60('fav60f', tE60, { favorite: true });
+      ok(iE2.reason === 'linked-duplicate' && iE2.entry === iE1.entry.id && iE2.favorite?.id === iE1.entry.id && iE2.favorite.changed === true && row60(iE1.entry.id).favorite === 1, 'linked duplicate with --favorite → the live holder becomes the favorite');
+      let badFav60 = null;
+      try { await o60.ingest({ path: path.join(dir60, 'absent.md'), favorite: 'yes' }); } catch (e) { badFav60 = e.message; }
+      ok(/favorite must be true or false/.test(badFav60 || ''), 'ingest refuses a non-boolean favorite before reading anything');
+
+      // 60.4 — read surfaces: entries / entry_status, recall, query rows, brief, the export.
+      const v60 = o60.entryStatus({ libraryId: L60, docIds: ['fav60c', 'fav60a'] }).entries;
+      const vc60 = v60.find((e) => e.docId === 'fav60c'); const va60 = v60.find((e) => e.docId === 'fav60a');
+      ok(vc60.id === iC4.entry.id && vc60.favorite === false && vc60.favoriteHelpful === false && va60.favorite === false, 'entries: favorite / favoriteHelpful booleans on every view');
+      o60.feedbackIfActive(eA60, true, { favorite: true });
+      const va60b = o60.entryStatus({ ids: [eA60] }).entries[0];
+      ok(va60b.favorite === true && va60b.favoriteHelpful === true && va60b.helpfulCount === 1, 'entries after a favorite: favorite true, favoriteHelpful true, helpfulCount includes the vote');
+      ok(o60.recall(eA60).favorite === 1 && o60.recall(eA60).favorite_helpful === 1, 'recall returns the stored favorite / favorite_helpful columns');
+      const q60 = await o60.query('FAVSIXTY harbour tide gauge estuary', { projects: ['library'], limit: 10 });
+      const qa60 = q60.results.find((r) => r.id === eA60);
+      ok(qa60?.favorite === true && qa60.rank.favorite === o60.cfg.favoriteWeight && qa60.rank.favoriteHelpful === undefined && q60.results.every((r) => r.favorite === (row60(r.id).favorite === 1) && (r.rank.favorite !== undefined) === r.favorite),
+        'query rows carry favorite; rank.favorite = favoriteWeight on favorites only; no favoriteHelpful without an explicit vote');
+      ok((await o60.brief()).favorites === o60.db.prepare("SELECT COUNT(*) c FROM entries WHERE status='active' AND favorite=1").get().c, `brief reports the active favorites (${(await o60.brief()).favorites})`);
+      o60.exportKnowledge();
+      const ex60 = fs.readFileSync(exp60, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r._table === 'entries');
+      ok(ex60.length > 0 && ex60.every((r) => 'favorite' in r && 'favorite_helpful' in r) && ex60.find((r) => r.id === eA60)?.favorite === 1 && !('helpful_count' in ex60[0]),
+        'the export keeps favorite and favorite_helpful on every entry line (counters stay out as volatile)');
+
+      // 60.5 — the CLI: the KC argv shapes (flag after the id, or anywhere), the fixed JSON, usage errors, refusals.
+      const bin60 = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin');
+      const env60 = { ...process.env, MIDMEM_DB_PATH: db60, OBSIDIAN_VAULT_PATH: path.join(dir60, 'vault'), MIDMEM_SOURCE_ROOTS: tmp, MIDMEM_LLM_ENABLED: '0', MIDMEM_AUTO_INGEST: '0', MIDMEM_MAINTENANCE: '0', MIDMEM_EXPORT_ENABLED: '0' };
+      const cli60 = (...args) => {
+        const r = spawnSync(process.execPath, [path.join(bin60, 'cli.mjs'), ...args], { env: env60, encoding: 'utf8', timeout: 30000 });
+        let parsed = null; try { parsed = JSON.parse(r.stdout); } catch { /* not JSON */ }
+        return { code: r.status, out: parsed, err: r.stderr };
+      };
+      const tG60 = 'FAVSIXTY golf: the observatory volunteers counted forty meteors over the dunes before dawn.';
+      const eG60 = (await cap60('fav60g', tG60)).entry.id;
+      const k1 = cli60('feedback', eG60, '--favorite');
+      ok(k1.code === 0 && keys60(k1.out) === FAV_KEYS && k1.out.favorite === true && k1.out.helpful_count === 1 && k1.out.trust_score === 0.55 && k1.out.changed === true, 'CLI feedback <id> --favorite → exit 0, exactly {success, id, favorite, helpful_count, trust_score, changed}');
+      const k2 = cli60('feedback', '--favorite', eG60);
+      ok(k2.code === 0 && k2.out?.id === eG60 && k2.out.changed === false && k2.out.helpful_count === 1, 'CLI --favorite is a bare switch: before the id too, and idempotent (changed false)');
+      const k3 = cli60('feedback', eG60, '--unfavorite');
+      ok(k3.code === 0 && keys60(k3.out) === FAV_KEYS && k3.out.favorite === false && k3.out.helpful_count === 0 && k3.out.trust_score === 0.5 && k3.out.changed === true, 'CLI feedback <id> --unfavorite → the vote taken back');
+      const k4 = cli60('feedback', eG60, '--favorite', '--unhelpful');
+      const k5 = cli60('feedback', eG60, '--unfavorite', '--favorite');
+      const k6 = cli60('feedback', eG60, '--unhelpful', '--unfavorite');
+      ok([k4, k5, k6].every((k) => k.code === 1 && /^ERROR: feedback takes one of --unhelpful, --favorite, --unfavorite/.test(k.err)) && row60(eG60).helpful_count === 0 && row60(eG60).favorite === 0,
+        'CLI: two votes in one call (--favorite/--unfavorite/--unhelpful) → exit 1 + ERROR:, nothing written');
+      const k7 = cli60('feedback', iB60.entry.id, '--favorite');
+      const k8 = cli60('feedback', 'memory-nope-000000000000', '--unfavorite');
+      ok(k7.code === 0 && k7.out?.success === false && k7.out.reason === 'not-active' && k7.out.status === 'archived' && k8.code === 0 && k8.out?.reason === 'not-found', 'CLI favorite on an archived / unknown entry → exit 0, {success:false, reason}');
+      const k9 = cli60('feedback', eG60);
+      const k10 = cli60('feedback', eG60, '--unhelpful');
+      ok(k9.code === 0 && keys60(k9.out) === 'helpful,id,success,trust_score' && k9.out.trust_score === 0.55 && k10.code === 0 && keys60(k10.out) === 'helpful,id,success,trust_score' && k10.out.helpful === false,
+        'the existing KC argv is unchanged: feedback <id> [--unhelpful] → {success, id, trust_score, helpful}');
+      const arch60 = path.join(tmp, 'fav60-archive', 'web', 'a1b2c3d4e5f6');
+      fs.mkdirSync(arch60, { recursive: true });
+      fs.writeFileSync(path.join(arch60, 'article.md'), 'FAVSIXTY hotel: the tram depot opened its doors for the heritage weekend and ran the restored cars.');
+      const kcArgv = (extra) => ['ingest', path.join(arch60, 'article.md'), '--type', 'web-article', '--authority', 'web', '--scope', 'shared', '--project', 'library', '--title', 'Heritage trams', '--source-uri', 'https://news.example.test/60/trams', '--canonical-uri', 'https://news.example.test/60/trams', '--library', L60, '--doc-id', 'a1b2c3d4e5f6', '--capture-method', 'url_fetch', '--captured-at', '2026-10-21T00:00:00Z', ...extra];
+      const k11 = cli60(...kcArgv(['--favorite']));
+      const eH60 = k11.out?.entry?.id;
+      ok(k11.code === 0 && eH60 && k11.out.favorite?.favorite === true && JSON.stringify(pick60(row60(eH60))) === '{"favorite":1,"favorite_helpful":1,"helpful_count":1,"trust":0.55}', 'CLI: the KC ingest argv + --favorite → the new entry is a favorite with its one vote');
+      fs.writeFileSync(path.join(arch60, 'article.md'), 'FAVSIXTY hotel, updated: the tram depot extended the heritage weekend by a day and ran the restored cars again.');
+      const k12 = cli60('ingest', '--favorite', ...kcArgv([]).slice(1));
+      ok(k12.code === 0 && JSON.stringify(k12.out?.superseded) === JSON.stringify([eH60]) && JSON.stringify(k12.out.favorite?.carriedFrom) === JSON.stringify([eH60]) && row60(k12.out.entry.id).helpful_count === 1,
+        'CLI: --favorite before the path is a switch too; the re-capture carries the favorite once');
+      const k13 = cli60(...kcArgv(['--unfavorite']));
+      ok(k13.code === 1 && /^ERROR: ingest takes --favorite only/.test(k13.err), 'CLI ingest --unfavorite → exit 1 + ERROR: (clearing is feedback --unfavorite)');
+      const k14 = cli60('entries', '--library', L60, '--doc-ids', 'a1b2c3d4e5f6');
+      ok(k14.code === 0 && k14.out?.entries?.[0]?.favorite === true && k14.out.entries[0].favoriteHelpful === true && k14.out.entries[0].helpfulCount === 1, 'CLI entries → favorite / favoriteHelpful on the view');
+      // MCP read tools: entry_status, recall and query show the favorite.
+      const mcp60 = await new Promise((resolve, reject) => {
+        const p = spawn(process.execPath, [path.join(bin60, 'mcp-server.mjs')], { env: env60, stdio: ['pipe', 'pipe', 'ignore'] });
+        const lines = []; let buf = '';
+        const timer = setTimeout(() => { p.kill(); reject(new Error('mcp-server timed out')); }, 30000);
+        p.stdout.on('data', (d) => {
+          buf += d;
+          let nl; while ((nl = buf.indexOf('\n')) >= 0) { lines.push(JSON.parse(buf.slice(0, nl))); buf = buf.slice(nl + 1); }
+          if (lines.length === 3) { clearTimeout(timer); p.kill(); resolve(lines); }
+        });
+        p.on('error', reject);
+        p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'entry_status', arguments: { entryIds: [eA60] } } }) + '\n');
+        p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'recall', arguments: { entryId: eA60 } } }) + '\n');
+        p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'query', arguments: { query: 'FAVSIXTY harbour tide gauge estuary', projects: ['library'] } } }) + '\n');
+      });
+      const mcpOut = (id) => JSON.parse(mcp60.find((m) => m.id === id).result.content[0].text);
+      ok(mcpOut(1).entries[0].favorite === true && mcpOut(1).entries[0].favoriteHelpful === true && mcpOut(2).favorite === 1 && mcpOut(3).results.find((r) => r.id === eA60)?.favorite === true,
+        'MCP entry_status / recall / query show the favorite');
+
+      // 60.6 — ranking on fixed fixtures (hybridSearch directly: a pure read, so every run sees the same store).
+      const o60r = new Orchestrator(base60(path.join(dir60, 'rank.db')));
+      others60.push(o60r);
+      const rank60 = (q, lexicalOnly, oo = o60r) => hybridSearch(oo.db, oo.memory, oo.embedder, q, { limit: 50, lexicalOnly });
+      const lead60 = 'the harbour authority published the quarterly tide gauge report for the estuary. Engineers logged the gauge readings at the estuary twice a day.';
+      const trio60 = [];
+      for (const tag of ['KXQ', 'KXR', 'KXS']) trio60.push((await o60r.storeMemory({ content: `${tag} ${lead60}`, tier: 'memory', type: 'note', scope: 'shared' })).id);
+      const distract60 = (await o60r.storeMemory({ content: 'An unrelated note about sourdough starter, flour and salt.', tier: 'memory', type: 'note', scope: 'shared' })).id;
+      const reset60 = () => { for (const id of [...trio60, distract60]) o60r.db.prepare('UPDATE entries SET favorite = 0, favorite_helpful = 0, helpful_count = 0, trust_score = 0.5 WHERE id = ?').run(id); };
+      const Q60 = 'quarterly tide gauge estuary';
+      let ordered60 = 0, total60 = 0;
+      for (const [fh, f, n] of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]) {
+        reset60();
+        o60r.memory.setFavorite(trio60[fh], true); o60r.memory.recordFeedback(trio60[fh], true);
+        o60r.memory.setFavorite(trio60[f], true);
+        for (const lexical of [true, false]) {
+          const res = await rank60(Q60, lexical);
+          const at = (id) => res.findIndex((r) => r.id === id);
+          total60++;
+          if (at(trio60[fh]) === 0 && at(trio60[f]) === 1 && at(trio60[n]) === 2) ordered60++;
+        }
+      }
+      ok(ordered60 === 12, `equal relevance: favorite + helpful > favorite > neither for all 6 role assignments, lexical and deep (${ordered60}/12)`);
+      reset60();
+      const plain60 = (await rank60(Q60, true)).map((r) => r.id);
+      o60r.memory.setFavorite(distract60, true); o60r.memory.recordFeedback(distract60, true);
+      const lexFav60 = await rank60(Q60, true);
+      ok(JSON.stringify(lexFav60.map((r) => r.id).sort()) === JSON.stringify([...plain60].sort()) && !lexFav60.some((r) => r.id === distract60), 'no boost for a non-candidate: a favorite matching none of the words never joins the lexical results');
+      ok(!(await rank60(Q60, false)).some((r) => r.id === distract60), 'deep pass: no lane returns the unrelated favorite (zero vector similarity), so it is never added');
+      // The strongest vector-only candidate there can be: its vector IS the query's embedding (vector rank 1, no query word).
+      await o60r.memory.upsertVector(distract60, (await o60r.embedder.embed(Q60)).vector, 'fallback-hash-256', 'fallback');
+      const deepFav60 = await rank60(Q60, false);
+      const dPos60 = deepFav60.findIndex((r) => r.id === distract60);
+      ok(dPos60 === trio60.length && deepFav60[dPos60]?.rank.vector === 1 && trio60.every((id) => deepFav60.findIndex((r) => r.id === id) < dPos60) && deepFav60[dPos60].favorite === true,
+        'deep pass: the unrelated favorite as the top vector match (no query word) still stays below every entry holding the query\'s words');
+      ok(deepFav60[dPos60]?.rank.favorite === o60r.cfg.favoriteWeight && deepFav60[dPos60].rank.favoriteHelpful === o60r.cfg.favoriteHelpfulWeight, 'rank carries favorite / favoriteHelpful (the boosts it received)');
+      // The guard: a favorite holding one of three words, one rank under the entry holding all three.
+      const o60g = new Orchestrator(base60(path.join(dir60, 'guard.db')));
+      others60.push(o60g);
+      const strong60 = (await o60g.storeMemory({ content: 'Quorvex zibbon plavet: the quorvex ledger syncs zibbon shards across the plavet mesh.', tier: 'memory', type: 'note', scope: 'shared' })).id;
+      const weak60 = (await o60g.storeMemory({ content: 'Plavet hosts keep the nightly backup window short.', tier: 'memory', type: 'note', scope: 'shared' })).id;
+      const g0 = await rank60('quorvex zibbon plavet', true, o60g);
+      o60g.memory.setFavorite(weak60, true);
+      const g1 = await rank60('quorvex zibbon plavet', true, o60g);
+      ok(g0[0].id === strong60 && g0[0].score - g0[1].score < o60g.cfg.favoriteWeight && g1[0].id === strong60 && g1[1].id === weak60 && g1[1].rank.favoriteGuard === true && g1[1].score < g1[0].score,
+        `guard: the one-word favorite stays under the all-words entry (gap ${(g0[0].score - g0[1].score).toFixed(6)} < favoriteWeight ${o60g.cfg.favoriteWeight}; rank.favoriteGuard)`);
+      // Off switches: weight 0 → no boost; a non-numeric env weight scores no NaN.
+      const o60z = new Orchestrator(base60(path.join(dir60, 'guard.db'), { favoriteWeight: 0, favoriteHelpfulWeight: Number('typo') }));
+      others60.push(o60z);
+      const z1 = await rank60('quorvex zibbon plavet', true, o60z);
+      const zw = z1.find((r) => r.id === weak60);
+      ok(zw && zw.rank.favorite === undefined && zw.rank.favoriteHelpful === undefined && z1.every((r) => Number.isFinite(r.score)), 'favoriteWeight 0 (or a NaN weight) → no favorite boost, no NaN score');
+      // KC's acceptance shape through the CLI: two equally relevant captures, both favorites, one also voted Helpful.
+      const kcQ = 'FAVSIXTY lighthouse beacon restoration';
+      const eK1 = (await cap60('fav60k', 'FAVSIXTY KILO: the volunteers finished the lighthouse beacon restoration on the headland.')).entry.id;
+      const eK2 = (await cap60('fav60l', 'FAVSIXTY LIMA: the volunteers finished the lighthouse beacon restoration on the headland.')).entry.id;
+      for (const id of [eK1, eK2]) cli60('feedback', id, '--favorite');
+      const second = cli60('query', kcQ, '--projects', 'library').out.results.filter((r) => [eK1, eK2].includes(r.id))[1].id; // the lower of the two now
+      cli60('feedback', second); // a Helpful vote on the one ranked lower
+      const kq = cli60('query', kcQ, '--projects', 'library').out.results.filter((r) => [eK1, eK2].includes(r.id));
+      ok(kq.length === 2 && kq[0].id === second && kq[0].rank.favoriteHelpful === o60.cfg.favoriteHelpfulWeight && kq[1].rank.favoriteHelpful === undefined, 'CLI query: favorite + Helpful ranks above an equally relevant favorite-only capture');
+
+      // 60.7 — migration 5 → 6 on a copy-shaped store: active, archived (superseded + by id), wisdom and deleted rows
+      //        with votes, retrievals, claims and vectors; then the same file reopened by the v6 code.
+      const mdir = path.join(dir60, 'mig');
+      fs.mkdirSync(mdir, { recursive: true });
+      const mdb = path.join(mdir, 'state.db');
+      const om = new Orchestrator(base60(mdb));
+      const mcap = (docId, content) => om.ingestContent({ content, source: src60(docId), type: 'web-article', authority: 'web', project: 'library' });
+      const m1 = (await mcap('mig-a', 'MIGSIX alpha: the botanical garden opened a glasshouse for desert succulents.')).entry.id;
+      const m2old = (await mcap('mig-b', 'MIGSIX bravo: the night market added a row of food stalls.')).entry.id;
+      await mcap('mig-b', 'MIGSIX bravo, revised: the night market moved its food stalls to the pier.'); // supersedes m2old
+      const m3 = (await mcap('mig-c', 'MIGSIX charlie: the city archive digitized its census ledgers.')).entry.id;
+      await om.archiveEntries({ ids: [m3], reason: 'migration fixture' });
+      const mW = (await om.storeMemory({ content: 'MIGSIX wisdom: curated note on the glasshouse watering schedule.', tier: 'wisdom', type: 'note', curated: true })).id;
+      const mDel = (await om.storeMemory({ content: 'MIGSIX scratch entry to forget.', tier: 'memory', type: 'note' })).id;
+      await om.forget(mDel, { soft: true });
+      om.feedbackIfActive(m1, true); om.feedbackIfActive(m1, false); om.feedback(mW, true);
+      await om.query('MIGSIX glasshouse garden', { limit: 5 });
+      const mQ = async (oo) => (await hybridSearch(oo.db, oo.memory, oo.embedder, 'MIGSIX glasshouse garden market archive', { limit: 20, lexicalOnly: true })).map((r) => r.id).join(' ');
+      const qBefore60 = await mQ(om);
+      om.close();
+      // A v5 store never had the two columns: drop them and set schema_version back to 5 (the v5 shape, byte for byte).
+      const raw = new DatabaseSync(mdb);
+      raw.exec('ALTER TABLE entries DROP COLUMN favorite; ALTER TABLE entries DROP COLUMN favorite_helpful;');
+      raw.prepare("UPDATE meta SET value = '5' WHERE key = 'schema_version'").run();
+      const v5sql = raw.prepare("SELECT sql FROM sqlite_schema WHERE name = 'entries'").get().sql;
+      const v5rows = raw.prepare('SELECT * FROM entries ORDER BY rowid').all();
+      raw.close();
+      ok(!/favorite/.test(v5sql) && v5rows.length === 6 && ['active', 'archived', 'deleted'].every((s) => v5rows.some((r) => r.status === s)) && v5rows.some((r) => r.tier === 'wisdom') && v5rows.some((r) => r.helpful_count > 0) && v5rows.some((r) => r.retrieval_count > 0),
+        `fixture: a schema-5 entries table (${v5rows.length} rows: active, archived, wisdom, deleted; votes and retrievals)`);
+      // The first open after the upgrade, while a capture system holds the write lock: two v6 processes open the v5
+      // store at once; both wait (busy_timeout) and the columns are added exactly once.
+      const hold = new DatabaseSync(mdb);
+      hold.exec('PRAGMA busy_timeout = 5000; BEGIN IMMEDIATE;');
+      hold.prepare("INSERT INTO log(ts, operation, detail) VALUES(?, 'smoke-60-writer', '{}')").run(new Date().toISOString());
+      const dbUrl = new URL('../src/db.mjs', import.meta.url).href;
+      const opener = () => {
+        let started; const startedP = new Promise((r) => { started = r; });
+        const done = new Promise((resolve) => {
+          const p = spawn(process.execPath, ['--input-type=module', '-e', `import { StateDB } from ${JSON.stringify(dbUrl)}; console.log('start'); const t0 = Date.now(); const d = new StateDB(${JSON.stringify(mdb)}); const n = d.prepare('PRAGMA table_info(entries)').all().filter((c) => c.name.startsWith('favorite')).length; d.close(); console.log(JSON.stringify({ ms: Date.now() - t0, n }));`], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 });
+          let outText = '', errText = '';
+          p.stdout.on('data', (d) => { outText += d; if (outText.includes('start')) started(); });
+          p.stderr.on('data', (d) => { errText += d; });
+          p.on('close', (code) => { started(); resolve({ code, out: outText, err: errText }); });
+        });
+        return { started: startedP, done };
+      };
+      const A = opener(); const B = opener();
+      await Promise.all([A.started, B.started]);
+      await new Promise((r) => setTimeout(r, 400)); // both are inside the migration's BEGIN IMMEDIATE by now
+      hold.exec('COMMIT;'); hold.close();
+      const [rA, rB] = await Promise.all([A.done, B.done]);
+      const jA = JSON.parse(rA.out.split('\n').filter(Boolean).pop() || '{}'); const jB = JSON.parse(rB.out.split('\n').filter(Boolean).pop() || '{}');
+      ok(rA.code === 0 && rB.code === 0 && jA.n === 2 && jB.n === 2 && Math.max(jA.ms, jB.ms) >= 300, `two processes migrating at once behind a writer: both exit 0, the columns exist once (waited ${jA.ms} / ${jB.ms} ms)${rA.err || rB.err ? ` [${(rA.err + rB.err).slice(0, 200)}]` : ''}`);
+      const om2 = new Orchestrator(base60(mdb));
+      others60.push(om2);
+      const mcols = om2.db.prepare('PRAGMA table_info(entries)').all();
+      const after = om2.db.prepare('SELECT * FROM entries ORDER BY rowid').all();
+      const strip = (r) => { const { favorite, favorite_helpful, ...rest } = r; void favorite; void favorite_helpful; return rest; };
+      ok(mcols.filter((c) => c.name === 'favorite').length === 1 && mcols.filter((c) => c.name === 'favorite_helpful').length === 1 && mcols.at(-2).name === 'favorite' && mcols.at(-1).name === 'favorite_helpful'
+        && om2.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value === '6', 'after the migration: the two columns appended once, schema_version 6');
+      ok(after.length === v5rows.length && JSON.stringify(after.map(strip)) === JSON.stringify(v5rows) && after.every((r) => r.favorite === 0 && r.favorite_helpful === 0), 'every v5 column of every row is unchanged; every row reads favorite 0 / favorite_helpful 0');
+      let ftsOk60 = true;
+      try { om2.db.exec("INSERT INTO entries_fts(entries_fts) VALUES('integrity-check'); INSERT INTO entries_fts_trigram(entries_fts_trigram) VALUES('integrity-check');"); } catch { ftsOk60 = false; }
+      ok(om2.db.prepare('PRAGMA integrity_check').get().integrity_check === 'ok' && ftsOk60 && (await mQ(om2)) === qBefore60, 'integrity_check ok, both FTS indexes pass their integrity-check, and a query ranks exactly as before');
+      const mf1 = om2.feedbackIfActive(m1, true, { favorite: true });
+      const mf2 = om2.feedbackIfActive(m2old, true, { favorite: true });
+      const mf3 = om2.feedbackIfActive(mW, true, { favorite: true });
+      ok(mf1.changed && mf1.helpful_count === 2 && mf2.reason === 'not-active' && mf2.status === 'archived' && mf3.changed && mf3.favorite === true, 'migrated rows: an active and a wisdom entry take a favorite; an archived one is refused');
+      const om3 = new Orchestrator(base60(mdb));
+      others60.push(om3);
+      ok(om3.db.prepare('PRAGMA table_info(entries)').all().filter((c) => c.name.startsWith('favorite')).length === 2 && om3.recall(m1).favorite === 1, 'reopening a schema-6 store is a no-op (idempotent migration; the favorite stays)');
+    } finally {
+      for (const x of others60) x.close();
+      o60.close();
+    }
+  }
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;

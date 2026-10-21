@@ -82,6 +82,11 @@ export function loadConfig(overrides = {}) {
     /** Additive ranking boosts, kept small vs a single RRF rank (≈ 1/60 ≈ 0.0167). */
     trustWeight: 0.01, // × (trust_score − 0.5) → ±0.005
     graphBoost: 0.004, // × shared-concept count (capped at 3)
+    /** Favorites (2026-10-21, schema 6): an operator's favorite gets favoriteWeight; a favorite that ALSO has an
+     *  explicit helpful vote (helpful_count − favorite_helpful ≥ 1) gets favoriteHelpfulWeight on top. Candidates
+     *  only, and never past a candidate holding more of the query's words (retrieval.mjs). 0 turns one off. */
+    favoriteWeight: Number(env('FAVORITE_WEIGHT') ?? 0.004),
+    favoriteHelpfulWeight: Number(env('FAVORITE_HELPFUL_WEIGHT') ?? 0.002),
     /** P4 temporal/workflow boosts — fused after RRF like trust/graph. Recency + proven usefulness
      *  lift entries; corrections/decisions (work-memory) are boosted because they reshape behavior;
      *  dead-ends are DEMOTED and flagged (rank.deadEndWarning) so they surface as warnings, not

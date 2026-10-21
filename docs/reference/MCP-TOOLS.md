@@ -39,7 +39,7 @@ Ingest text that has no file of its own (a captured web page, a library document
 
 ## `query`
 
-Hybrid (lexical+vector) search of the knowledge store with provenance. Defaults to this agent's scope + shared (and this process's project + global); pass scopes/projects to override.
+Hybrid (lexical+vector) search of the knowledge store with provenance. Defaults to this agent's scope + shared (and this process's project + global); pass scopes/projects to override. Each row carries favorite (an operator's favorite, set by a capture system); rank.favorite / rank.favoriteHelpful show its small ranking boosts, which only reorder rows the query already matched and never lift a favorite past a row holding more of the query's words (rank.favoriteGuard).
 
 | arg | type | required | notes |
 |---|---|---|---|
@@ -105,7 +105,7 @@ Store a memory entry (tier default: memory; wisdom requires curated:true). scope
 
 ## `entry_status`
 
-Read-only lifecycle view of entries (INTEGRATION-MODES §6 item 7): tier, lease (expiresAt), trust/retrieval/helpful counters, concepts, claims, extraction ({mode, model, at}: which extractor produced them — lmstudio or fallback; null for a legacy entry) and promotion progress (next tier, rule, blockers, have/need, grounding gate; promotion runs only in maintain), plus the store's promotion thresholds and feedback trust deltas. Give entryIds, or libraryId (optionally docIds) for one head entry per source doc with history and linkedTo. Reading is NOT a recall: it never bumps retrieval_count or renews a lease.
+Read-only lifecycle view of entries (INTEGRATION-MODES §6 item 7): tier, lease (expiresAt), trust/retrieval/helpful counters, favorite (the operator's favorite) and favoriteHelpful (its one helpful vote is inside helpfulCount), concepts, claims, extraction ({mode, model, at}: which extractor produced them — lmstudio or fallback; null for a legacy entry) and promotion progress (next tier, rule, blockers, have/need, grounding gate; promotion runs only in maintain), plus the store's promotion thresholds and feedback trust deltas. Give entryIds, or libraryId (optionally docIds) for one head entry per source doc with history and linkedTo. Reading is NOT a recall: it never bumps retrieval_count or renews a lease.
 
 | arg | type | required | notes |
 |---|---|---|---|
@@ -118,7 +118,7 @@ Read-only lifecycle view of entries (INTEGRATION-MODES §6 item 7): tier, lease 
 
 ## `recall`
 
-Retrieve a memory entry by id.
+Retrieve a memory entry by id (the stored row, favorite and favorite_helpful included).
 
 | arg | type | required | notes |
 |---|---|---|---|
@@ -126,7 +126,7 @@ Retrieve a memory entry by id.
 
 ## `brief`
 
-Summary of knowledge state across tiers.
+Summary of knowledge state across tiers (and the count of active favorites).
 
 _No arguments._
 

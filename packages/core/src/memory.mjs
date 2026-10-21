@@ -6,6 +6,11 @@ import { genId, nowISO, json } from './util.mjs';
 import { functionForType, MEMORY_FUNCTIONS } from './workmemory.mjs';
 import { normalizeProject, projectClause } from './projectaxis.mjs';
 
+/** The trust nudges of one vote (FEEDBACK_TRUST_DELTAS in entrystatus.mjs reports them; the smoke test asserts
+ *  the two agree). A favorite counts as one helpful vote. */
+export const HELPFUL_TRUST_DELTA = 0.05;
+const UNHELPFUL_TRUST_DELTA = -0.10;
+
 export class TieredMemory {
   /** @param {import('./db.mjs').StateDB} db @param {object} cfg */
   constructor(db, cfg, vectorStore) {
@@ -104,10 +109,34 @@ export class TieredMemory {
   recordFeedback(id, helpful = true) {
     const e = this.db.prepare('SELECT trust_score FROM entries WHERE id=?').get(id);
     if (!e) return { success: false, message: `not found: ${id}` };
-    const trust = Math.max(0, Math.min(1, (e.trust_score ?? 0.5) + (helpful ? 0.05 : -0.10)));
+    const trust = Math.max(0, Math.min(1, (e.trust_score ?? 0.5) + (helpful ? HELPFUL_TRUST_DELTA : UNHELPFUL_TRUST_DELTA)));
     this.db.prepare('UPDATE entries SET helpful_count = helpful_count + ?, trust_score = ?, updated_at = ? WHERE id = ?')
       .run(helpful ? 1 : 0, trust, nowISO(), id);
     return { success: true, id, trust_score: Number(trust.toFixed(3)), helpful };
+  }
+
+  /** Favorite (schema 6): a favorite counts as ONE helpful vote — helpful_count + 1, trust + the helpful delta
+   *  (clamped), recorded in favorite_helpful — and `on = false` takes back exactly that vote (helpful_count − 1,
+   *  never below 0; trust − the delta, clamped); explicit votes stay. Idempotent: each write is ONE conditional
+   *  UPDATE, so a repeat or a concurrent twin changes nothing and the vote lands once, and it is safe inside a
+   *  caller's transaction (ingest's carry-over). Metadata only — updated_at, the lease and the other counters are
+   *  untouched — so an unfavorite leaves the row as it was before the favorite (trust clamping aside).
+   *  `activeOnly` refuses a row that stopped being active before the UPDATE ran (the CLI's check-then-act).
+   *  → { success, id, favorite, helpful_count, trust_score, changed } | { success:false, reason, id[, status] } */
+  setFavorite(id, on = true, { activeOnly = false } = {}) {
+    const live = activeOnly ? " AND status = 'active'" : '';
+    const [row] = on
+      ? this.db.prepare(`UPDATE entries SET favorite = 1, favorite_helpful = 1, helpful_count = helpful_count + (1 - favorite_helpful),
+          trust_score = CASE WHEN favorite_helpful = 1 THEN trust_score ELSE MIN(1.0, MAX(0.0, trust_score + ?)) END
+          WHERE id = ? AND favorite = 0${live} RETURNING favorite, helpful_count, trust_score`).all(HELPFUL_TRUST_DELTA, id)
+      : this.db.prepare(`UPDATE entries SET favorite = 0, favorite_helpful = 0,
+          helpful_count = CASE WHEN favorite_helpful = 1 THEN MAX(0, helpful_count - 1) ELSE helpful_count END,
+          trust_score = CASE WHEN favorite_helpful = 1 THEN MIN(1.0, MAX(0.0, trust_score - ?)) ELSE trust_score END
+          WHERE id = ? AND (favorite = 1 OR favorite_helpful = 1)${live} RETURNING favorite, helpful_count, trust_score`).all(HELPFUL_TRUST_DELTA, id);
+    const r = row ?? this.db.prepare('SELECT favorite, helpful_count, trust_score, status FROM entries WHERE id = ?').get(id);
+    if (!r) return { success: false, reason: 'not-found', id };
+    if (!row && activeOnly && r.status !== 'active') return { success: false, reason: 'not-active', id, status: r.status };
+    return { success: true, id, favorite: r.favorite === 1, helpful_count: r.helpful_count, trust_score: Number(r.trust_score.toFixed(3)), changed: !!row };
   }
 
   /** Vector store health: canonical dim (dim-guard) + backend-specific counts.

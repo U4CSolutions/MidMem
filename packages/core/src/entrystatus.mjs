@@ -6,7 +6,9 @@
  *   not a recall, so it neither renews a lease nor bumps retrieval_count/last_accessed_at), never runs
  *   maintenance and writes nothing — not even a log row.
  * - `feedbackIfActive` is the CLI `feedback` verb: the agents' feedback loop, refused (as a JSON result,
- *   not an error) for an unknown or non-active entry so a capture system can mark its row dead.
+ *   not an error) for an unknown or non-active entry so a capture system can mark its row dead. With
+ *   `favorite` (2026-10-21, schema 6) it sets or clears the operator's favorite instead — one helpful vote
+ *   that the unfavorite takes back (TieredMemory.setFavorite).
  * - `forgetSource` soft-forgets every entry a library source produced (active AND superseded history)
  *   through the governed `forget` (#41 cascade) and unlinks the source from other entries'
  *   `provenance.alsoSources`. Idempotent: a second call matches nothing.
@@ -93,6 +95,8 @@ function view(o, e, withClaims) {
     authority: p.authority ?? null, memFunction: e.mem_function ?? null, category: p.category ?? null,
     createdAt: e.created_at, updatedAt: e.updated_at, expiresAt: e.expires_at ?? null,
     trustScore: round3(e.trust_score), retrievalCount: e.retrieval_count, helpfulCount: e.helpful_count,
+    // Schema 6: the operator's favorite, and whether its one helpful vote is inside helpfulCount.
+    favorite: e.favorite === 1, favoriteHelpful: e.favorite_helpful === 1,
     lastAccessedAt: e.last_accessed_at ?? null,
     summary: clip(e.content, 600),
     concepts: (Array.isArray(e.concepts) ? e.concepts : []).slice(0, MAX_CONCEPTS).map((c) => ({
@@ -180,14 +184,20 @@ export function entryStatus(o, { ids = [], libraryId = null, docIds = [], claims
   return out;
 }
 
-/** CLI `feedback <entryId> [--unhelpful]` (§6 item 6b): the agents' feedback loop for one ACTIVE entry.
- *  Unknown / non-active → a JSON refusal (`reason`), never an error, so the caller can stop retrying. */
-export function feedbackIfActive(o, id, { helpful = true } = {}) {
+/** CLI `feedback <entryId> [--unhelpful | --favorite | --unfavorite]` (§6 item 6b): the agents' feedback loop
+ *  for one ACTIVE entry. Unknown / non-active → a JSON refusal (`reason`), never an error, so the caller can
+ *  stop retrying. `favorite: true | false` (schema 6) sets / clears the favorite instead of a plain vote →
+ *  `{ success, id, favorite, helpful_count, trust_score, changed }`; it is one vote, so it never combines with
+ *  `helpful: false`. */
+export function feedbackIfActive(o, id, { helpful = true, favorite } = {}) {
   if (typeof id !== 'string' || !id) throw new Error('feedback needs <entryId>');
   checkId(id, 'entry id');
+  if (favorite !== undefined && typeof favorite !== 'boolean') throw new Error('favorite must be true or false');
+  if (favorite !== undefined && helpful === false) throw new Error('feedback takes one vote: --unhelpful, --favorite or --unfavorite');
   const e = o.recall(id);
   if (!e) return { success: false, reason: 'not-found', id };
   if (e.status !== 'active') return { success: false, reason: 'not-active', id, status: e.status };
+  if (favorite !== undefined) return o.favorite(id, favorite, { activeOnly: true });
   return o.feedback(id, helpful !== false);
 }
 
