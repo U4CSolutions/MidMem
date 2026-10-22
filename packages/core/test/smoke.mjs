@@ -4113,6 +4113,307 @@ try {
     }
   }
 
+  // 72. The nightly repair batches keep favorites (2026-10-21, card mm-sync-main-2: main's #57 batches merged into the
+  //     favorites line). The forced maintain re-embeds placeholder vectors (active AND archived rows) and re-extracts
+  //     fallback entries IN PLACE — content, concepts, provenance and updated_at only — so favorite, favorite_helpful,
+  //     helpful_count and trust_score never move: a favorite keeps exactly ONE vote through any number of nightly
+  //     passes, and an unreachable endpoint changes no entry, vector or claim row at all.
+  {
+    const { startFakeOpenAI: startFake72 } = await import('./helpers/fake-openai.mjs');
+    const { loadConfig: loadConfig72 } = await import('../src/index.mjs');
+    const fake72 = await startFake72({ dim: 16 });
+    const dead72 = await deadUrl66();
+    fs.mkdirSync(path.join(tmp, 's72'), { recursive: true });
+    const o72 = new Orchestrator(base66('s72', { export: { enabled: false }, embedRetryMs: 1, maintenance: { ...loadConfig72().maintenance, intervalMs: 0 } }));
+    try {
+      const cap72 = (docId, content, extra = {}) => o72.ingestContent({ content, source: { libraryId: 'kb-article-library', docId, canonicalUri: `https://news.example.test/72/${docId}` }, type: 'web-article', authority: 'web', project: 'library', ...extra });
+      const row72 = (id) => o72.db.prepare('SELECT * FROM entries WHERE id = ?').get(id);
+      const votes72 = (id) => { const r = row72(id); return `${r.favorite}/${r.favorite_helpful}/${r.helpful_count}/${Number(r.trust_score.toFixed(3))}`; };
+      const vmodel72 = (id) => o72.db.prepare('SELECT model FROM vectors WHERE entry_id = ?').get(id)?.model ?? '';
+      const mode72 = (id) => JSON.parse(row72(id).provenance).extraction?.mode;
+      const favLogs72 = () => o72.db.prepare("SELECT COUNT(*) c FROM log WHERE operation='favorite'").get().c;
+      const T72 = {
+        a: '# Quillan ferry timetable\n\nThe quillan72 ferry added a dawn sailing to the outer islands. Deckhands loaded the mail sacks before six.\n',
+        b: '# Morrow lighthouse survey\n\nThe morrow72 lighthouse survey counted eleven cracked lenses in the lamp room. Glaziers replaced four of them within a week.\n',
+        c: '# Tansy market report\n\nThe tansy72 market sold out of salt cod by noon on saturday. Traders blamed the storm that kept the boats in harbour.\n',
+        d: '# Halloway quay notes\n\nThe halloway72 quay crane lifted the last timber barge before the tide turned. Dockers stacked the planks under canvas.\n',
+      };
+      const eA72 = (await cap72('q72a', T72.a, { favorite: true })).entry.id; // a favorite (ingest --favorite)
+      const eB72 = (await cap72('q72b', T72.b)).entry.id;
+      o72.feedbackIfActive(eB72, true, { favorite: true }); o72.feedbackIfActive(eB72, true); // a favorite + an explicit vote
+      const eC72 = (await cap72('q72c', T72.c)).entry.id;
+      o72.feedbackIfActive(eC72, true); // a plain vote, no favorite
+      const eD1_72 = (await cap72('q72d', T72.d, { favorite: true })).entry.id;
+      const eD2_72 = (await cap72('q72d', T72.d.replace('before the tide', 'an hour before the tide'))).entry.id; // supersedes D1: archived, the favorite carried
+      const ids72 = [eA72, eB72, eC72, eD1_72, eD2_72];
+      const before72 = new Map(ids72.map((id) => [id, votes72(id)]));
+      ok([...before72.values()].join(' ') === '1/1/1/0.55 1/1/2/0.6 0/0/1/0.55 1/1/1/0.55 1/1/1/0.55' && row72(eD1_72).status === 'archived'
+        && ids72.every((id) => vmodel72(id).startsWith('fallback')) && [eA72, eB72, eC72, eD2_72].every((id) => mode72(id) === 'fallback'),
+        'fixture: captures ingested with the model off (fallback extraction, placeholder vectors) — a favorite, a favorite + helpful, a plain vote, a re-captured favorite whose archived version keeps its history');
+      const snap72 = () => JSON.stringify([o72.db.prepare('SELECT * FROM entries ORDER BY id').all(), o72.db.prepare('SELECT * FROM vectors ORDER BY entry_id').all(), o72.db.prepare('SELECT * FROM claims ORDER BY id').all()]);
+      Object.assign(o72.cfg, { llmEnabled: true, llmEndpoint: dead72, embedModel: 'stub-embed', extractModel: 'stub/extract-72', llmTimeoutMs: 2000 });
+      const s0_72 = snap72(), fl0_72 = favLogs72();
+      const down72 = await o72.maintain({ force: true });
+      ok(down72.reembedded?.reembedded === 0 && down72.reembedded.reason === 'embedder-offline' && down72.reextracted?.skipped === true && down72.reextracted.reason === 'unreachable' && snap72() === s0_72,
+        'endpoint unreachable → both batches skip (embedder-offline / unreachable) and every entry, vector and claim row is byte-identical — favorites and votes included');
+      o72.cfg.llmEndpoint = fake72.url;
+      const live72 = await o72.maintain({ force: true });
+      ok(live72.reembedded?.reembedded === 5 && live72.reembedded.remaining === 0 && live72.reextracted?.reextracted === 4 && live72.reextracted.remaining === 0,
+        `endpoint ok → the reembed batch swaps all 5 placeholders, the archived version's too (${live72.reembedded?.reembedded}); the reextract batch rewrites the 4 active fallback entries (${live72.reextracted?.reextracted})`);
+      ok(ids72.every((id) => votes72(id) === before72.get(id)) && favLogs72() === fl0_72,
+        'favorite, favorite_helpful, helpful_count and trust_score are exactly as before on all 5 rows and no favorite log row was written: the batches add no vote and take none');
+      ok([eA72, eB72, eC72, eD2_72].every((id) => mode72(id) === 'lmstudio' && /^Model summary:/.test(row72(id).content)) && ids72.every((id) => vmodel72(id) === 'stub-embed')
+        && mode72(eD1_72) === 'fallback' && row72(eD1_72).status === 'archived',
+        'the active entries are model-extracted in place (same ids) with real vectors; the archived version got a real vector and no re-extraction');
+      const again72 = await o72.maintain({ force: true });
+      ok(again72.reembedded?.reembedded === 0 && again72.reextracted?.reextracted === 0 && ids72.every((id) => votes72(id) === before72.get(id)),
+        'a second nightly pass selects nothing and still moves no vote');
+      const uA72 = o72.feedbackIfActive(eA72, true, { favorite: false });
+      const uB72 = o72.feedbackIfActive(eB72, true, { favorite: false });
+      ok(uA72.changed === true && votes72(eA72) === '0/0/0/0.5' && uB72.changed === true && votes72(eB72) === '0/0/1/0.55',
+        "after the passes the unfavorite takes back exactly one vote: A back to 0 / 0.5, B keeps its explicit vote (1 / 0.55) — the favorite's vote was never doubled");
+      o72.feedbackIfActive(eA72, true, { favorite: true });
+      const q72 = await o72.query('quillan72 ferry dawn sailing', { limit: 5, audit: true });
+      const hit72 = q72.results.find((r) => r.id === eA72);
+      ok(q72.audit === true && hit72?.favorite === true && hit72.rank.favorite === 0.004 && row72(eA72).retrieval_count === 0,
+        'a re-extracted favorite still ranks as one (favorite: true, rank.favorite 0.004) — and an audit read renews nothing (retrieval_count 0)');
+    } finally { o72.close(); await fake72.close(); }
+  }
+
+  // 73. Re-capture carry-over and claims-sweep under main's guards (card mm-sync-main-2). A favorite's re-capture hands
+  //     the favorite and its ONE vote to the new entry with main's ingest changes in the path (claim-shape drops, an
+  //     embed that needed a retry, a digest's sections with ensureName); the superseded versions' claims stay live (a
+  //     re-ingest supersedes the entry, never its claims) and `claims-sweep` archives exactly those orphans — a
+  //     claims-only write: every entries row, the carried favorite included, is byte-identical afterwards.
+  {
+    const { startFakeOpenAI: startFake73 } = await import('./helpers/fake-openai.mjs');
+    const fake73 = await startFake73({ dim: 16 });
+    const dir73 = path.join(tmp, 's73');
+    fs.mkdirSync(dir73, { recursive: true });
+    const o73 = new Orchestrator(base66('s73', { export: { enabled: false }, embedRetryMs: 1 }));
+    try {
+      const cap73 = (docId, content, extra = {}) => o73.ingestContent({ content, source: { libraryId: 'kb-article-library', docId, canonicalUri: `https://news.example.test/73/${docId}` }, type: 'web-article', authority: 'web', project: 'library', ...extra });
+      const row73 = (id) => o73.db.prepare('SELECT * FROM entries WHERE id = ?').get(id);
+      const votes73 = (id) => { const r = row73(id); return `${r.favorite}/${r.favorite_helpful}/${r.helpful_count}/${Number(r.trust_score.toFixed(3))}`; };
+      const liveClaimsOf73 = (id) => o73.db.prepare("SELECT id FROM claims WHERE json_extract(source,'$.sourceId') = ? AND status IN ('active','verified','deferred')").all(row73(id).source_id).map((r) => r.id);
+      const entries73 = () => JSON.stringify(o73.db.prepare('SELECT * FROM entries ORDER BY id').all());
+      const md73 = (v) => `# Pellow harbour dredging notice ${v}\n\n| berth | depth |\n|---|---|\n| east | 9 m |\n\n- **Owner:** the pellow73 harbour board\n\nThe pellow73 harbour board dredged the east berth to nine metres this month. Pilots now bring the grain ships in at low water. Notice ${v} adds the night schedule for the dredger crews.\n`;
+      const x1 = await cap73('x73', md73(1), { favorite: true });
+      o73.feedbackIfActive(x1.entry.id, true); // an explicit vote on the first version: it stays with that version
+      ok(votes73(x1.entry.id) === '1/1/2/0.6' && x1.grounding.notClaim === 3 && liveClaimsOf73(x1.entry.id).length === 3,
+        `fixture: a starred capture (ingest --favorite) + an explicit vote; main's shape check kept its heading, table row and bullet out of the claims (notClaim ${x1.grounding.notClaim}, ${liveClaimsOf73(x1.entry.id).length} claims)`);
+      Object.assign(o73.cfg, { llmEnabled: true, llmEndpoint: fake73.url, embedModel: 'stub-embed', extractModel: 'stub/extract-73', llmTimeoutMs: 2000, embedRetries: 2 });
+      fake73.state.embed = 'fail-then-ok:1'; fake73.state.embedFailures = 0;
+      const x2 = await cap73('x73', md73(2));
+      const ing73 = JSON.parse(o73.db.prepare("SELECT detail FROM log WHERE operation='ingest' ORDER BY id DESC LIMIT 1").get().detail);
+      const favRows73 = o73.db.prepare("SELECT detail FROM log WHERE operation='favorite'").all().map((r) => JSON.parse(r.detail)).filter((d) => d.id === x2.entry.id);
+      ok(JSON.stringify(x2.superseded) === JSON.stringify([x1.entry.id]) && JSON.stringify(x2.favorite?.carriedFrom) === JSON.stringify([x1.entry.id]) && votes73(x2.entry.id) === '1/1/1/0.55'
+        && x2.mode === 'lmstudio' && ing73.entry === x2.entry.id && ing73.embedAttempts === 2 && x2.grounding.notClaim >= 1 && favRows73.length === 1 && favRows73[0].via === 'carry-over',
+        `re-capture with the model on (the embed retried once: embedAttempts ${ing73.embedAttempts}; notClaim ${x2.grounding.notClaim}) → the favorite and its ONE vote carried (1/1/1/0.55), one favorite log row (via carry-over)`);
+      ok(votes73(x1.entry.id) === '1/1/2/0.6' && row73(x1.entry.id).status === 'archived', 'the superseded version keeps its history (its favorite and both votes)');
+      o73.cfg.llmEnabled = false;
+      const x3 = await cap73('x73', md73(3), { favorite: true });
+      ok(JSON.stringify(x3.favorite?.carriedFrom) === JSON.stringify([x2.entry.id]) && x3.favorite.changed === true && votes73(x3.entry.id) === '1/1/1/0.55',
+        '--favorite passed on top of the carry-over → still ONE vote (1/1/1/0.55)');
+      const orph73 = [...liveClaimsOf73(x1.entry.id), ...liveClaimsOf73(x2.entry.id)];
+      const keep73 = liveClaimsOf73(x3.entry.id);
+      const lint73 = o73.lint();
+      ok(orph73.length === 4 && keep73.length === 3 && lint73.orphanClaims === orph73.length && lint73.fragmentClaims === 0,
+        `the two superseded versions left ${orph73.length} live claims (lint orphanClaims ${lint73.orphanClaims}); no fragment reached the store (fragmentClaims ${lint73.fragmentClaims})`);
+      const e0_73 = entries73();
+      const dry73 = await o73.claimsSweep({ dryRun: true });
+      ok(dry73.orphans === orph73.length && dry73.fragments === 0 && entries73() === e0_73 && orph73.every((id) => o73.claims.get(id).status !== 'archived'), 'claims-sweep --dryRun counts exactly those orphans and writes nothing');
+      const run73 = await o73.claimsSweep();
+      ok(run73.archived === orph73.length && orph73.every((id) => { const c = o73.claims.get(id); return c.status === 'archived' && c.metadata.archivedBy?.reason === 'source-gone' && [x1.entry.id, x2.entry.id].includes(c.metadata.archivedBy.entry); })
+        && keep73.every((id) => o73.claims.get(id).status === 'active'),
+        "claims-sweep archives the superseded versions' claims (source-gone, archivedBy.entry = the old entry); the head's own claims stay active");
+      ok(entries73() === e0_73 && votes73(x3.entry.id) === '1/1/1/0.55' && o73.entryStatus({ ids: [x3.entry.id] }).entries[0].favorite === true,
+        "the sweep is claims-only: every entries row is byte-identical (the carried favorite, its vote and updated_at; the archived versions' history)");
+      const u73 = o73.feedbackIfActive(x3.entry.id, true, { favorite: false });
+      ok(u73.changed === true && votes73(x3.entry.id) === '0/0/0/0.5', 'the carried favorite is still ONE vote: unfavorite → 0/0/0/0.5');
+      // A digest: --favorite goes to the parent only (its sections get ensureName, never the favorite); the changed
+      // digest re-ingested carries the parent's favorite once, and the sweep clears the superseded parent's and
+      // section's claims without touching an entry row.
+      const body73 = (who, extra = '') => `${who} measured the tidal range at the pellow73 harbour mouth for a full lunar cycle and logged every reading against the dredged channel depth. The team found the channel held its depth through two spring tides${extra}. The survey crew filed the readings with the harbour board for the next dredging contract review.`;
+      const dg73 = path.join(dir73, 'digest73.md');
+      const writeDg73 = (extra) => fs.writeFileSync(dg73, ['Weekly pellow73 digest of harbour studies.', '', '### Pellow tide gauge study', '', 'https://arxiv.org/abs/2610.07301', '', body73('The Pellow tide gauge study', extra), '', '### Brannock sounding survey', '', 'https://arxiv.org/abs/2610.07302', '', body73('The Brannock sounding survey'), ''].join('\n'));
+      writeDg73('');
+      const d1_73 = await o73.ingestSections({ path: dg73, favorite: true });
+      const sec73 = (r, h) => r.sections.find((s) => s.heading === h);
+      const s1a73 = sec73(d1_73, 'Pellow tide gauge study')?.entry, s2a73 = sec73(d1_73, 'Brannock sounding survey')?.entry;
+      ok(d1_73.sectionsSummary.ingested === 2 && votes73(d1_73.entry.id) === '1/1/1/0.55' && [s1a73, s2a73].every((id) => id && votes73(id) === '0/0/0/0.5'),
+        'ingest --sections --favorite → the digest entry is the favorite (one vote); its two section entries are not');
+      writeDg73(' and one storm surge');
+      const d2_73 = await o73.ingestSections({ path: dg73, favorite: true });
+      const s1b73 = sec73(d2_73, 'Pellow tide gauge study')?.entry;
+      ok(JSON.stringify(d2_73.superseded) === JSON.stringify([d1_73.entry.id]) && JSON.stringify(d2_73.favorite?.carriedFrom) === JSON.stringify([d1_73.entry.id]) && votes73(d2_73.entry.id) === '1/1/1/0.55'
+        && d2_73.sectionsSummary.ingested === 1 && d2_73.sectionsSummary.unchanged === 1 && s1b73 && s1b73 !== s1a73 && votes73(s1b73) === '0/0/0/0.5',
+        'the changed digest re-ingested → its new entry carries the favorite once; the changed section supersedes its own entry (no favorite), the other is unchanged');
+      const orphD73 = [...liveClaimsOf73(d1_73.entry.id), ...liveClaimsOf73(s1a73)];
+      const e1_73 = entries73();
+      const runD73 = await o73.claimsSweep();
+      ok(orphD73.length >= 2 && runD73.orphans === orphD73.length && runD73.fragments === 0 && entries73() === e1_73 && votes73(d2_73.entry.id) === '1/1/1/0.55',
+        `claims-sweep archives the superseded digest's and section's ${orphD73.length} claims; no entry row changes (the carried favorite included)`);
+    } finally { o73.close(); await fake73.close(); }
+  }
+
+  // 74. Claim stance (#33) and claim shape (#57) are claim-level; the favorites ranking reads entries — content,
+  //     concepts, vectors and votes — so it is the same with stance tagging on or off, and with fragment claims added
+  //     or swept: the same rows, order and scores, the same favorite / rank.favorite / favoriteHelpful / favoriteGuard,
+  //     a starred capture whose every claim is provisional included. (favorite-ranking.mjs measures the ranking
+  //     promises themselves.)
+  {
+    const { hybridSearch: hs74 } = await import('../src/retrieval.mjs');
+    const { loadConfig: loadConfig74 } = await import('../src/index.mjs');
+    const F74 = {
+      prov: 'The skerrow74 harbour board could dredge the east berth next spring if the grant arrives. Engineers might extend the skerrow74 quay as well.',
+      quot: 'According to the skerrow74 harbour board, the east berth was dredged to nine metres. The pilots said that grain ships now dock at low water.',
+      rej: 'The skerrow74 harbour board decided against dredging the west berth. The extension plan was ruled out after the seabed survey.',
+      obs: 'The skerrow74 harbour board dredged the east berth to nine metres in october. Grain ships now dock at the skerrow74 quay at low water.',
+      frag: '# Skerrow74 east berth\n\n| berth | depth |\n\n- **Owner:** the skerrow74 harbour board\n\nThe skerrow74 east berth dredging finished in october after six weeks of work.\n',
+      other: 'The tansy74 market sold out of salt cod by noon on saturday after the storm kept the boats in harbour.',
+    };
+    const build74 = async (dir, stance) => {
+      fs.mkdirSync(path.join(tmp, dir), { recursive: true });
+      const o = new Orchestrator(base66(dir, { export: { enabled: false }, claims: { ...loadConfig74().claims, stance } }));
+      const ids = {};
+      for (const [k, t] of Object.entries(F74)) ids[k] = (await o.ingestContent({ content: t, source: { libraryId: 'kb-article-library', docId: `s74${k}`, canonicalUri: `https://news.example.test/74/${k}` }, type: 'web-article', authority: 'web', project: 'library' })).entry.id;
+      o.feedbackIfActive(ids.prov, true, { favorite: true });
+      o.feedbackIfActive(ids.rej, true, { favorite: true }); o.feedbackIfActive(ids.rej, true);
+      o.feedbackIfActive(ids.frag, true, { favorite: true });
+      return { o, ids };
+    };
+    const on74 = await build74('s74on', true);
+    const off74 = await build74('s74off', false);
+    try {
+      const Q74 = ['skerrow74 harbour board east berth dredging', 'grain ships low water quay', 'west berth seabed survey', 'what did the harbour board say about the berth', 'tansy74 market salt cod'];
+      const view74 = async ({ o, ids }, q, lexicalOnly) => {
+        const doc = new Map(Object.entries(ids).map(([k, id]) => [id, k]));
+        return (await hs74(o.db, o.memory, o.embedder, q, { limit: 10, lexicalOnly })).map((r) => ({ k: doc.get(r.id), s: r.score, f: r.favorite, rf: r.rank.favorite ?? 0, rh: r.rank.favoriteHelpful ?? 0, g: !!r.rank.favoriteGuard }));
+      };
+      const compare74 = async () => {
+        const diffs = []; let rows = 0, boosted = 0;
+        for (const q of Q74) for (const lexicalOnly of [true, false]) {
+          const a = await view74(on74, q, lexicalOnly), b = await view74(off74, q, lexicalOnly);
+          rows += a.length; boosted += a.filter((x) => x.rf > 0).length;
+          if (!(a.length === b.length && a.every((x, i) => x.k === b[i].k && x.f === b[i].f && x.rf === b[i].rf && x.rh === b[i].rh && x.g === b[i].g && Math.abs(x.s - b[i].s) < 1e-6))) diffs.push(`${q} (${lexicalOnly ? 'lexical' : 'deep'})`);
+        }
+        return { diffs, rows, boosted };
+      };
+      const stOn74 = on74.o.claims.stats().byStance, stOff74 = off74.o.claims.stats().byStance;
+      ok(stOn74.provisional === 2 && stOn74.quoted === 2 && stOn74.rejected === 2 && Object.keys(stOff74).join() === 'observed',
+        `fixture: the same six captures in two stores — stance tagging on (${JSON.stringify(stOn74)}) and off (every claim observed)`);
+      const c1_74 = await compare74();
+      ok(c1_74.diffs.length === 0 && c1_74.rows >= 20 && c1_74.boosted >= 4,
+        `5 queries × lexical / deep: the same rows, order, scores and favorite boosts / guard marks with stance tagging on or off (${c1_74.rows} rows, ${c1_74.boosted} boosted; differing: ${c1_74.diffs.join('; ') || 'none'})`);
+      const provHit74 = (await view74(on74, Q74[0], true)).find((x) => x.k === 'prov');
+      const provStances74 = on74.o.db.prepare("SELECT json_extract(metadata,'$.stance') st FROM claims WHERE json_extract(source,'$.sourceId') = ?").all(on74.o.recall(on74.ids.prov).source_id).map((r) => r.st);
+      ok(provHit74?.f === true && provHit74.rf === 0.004 && provStances74.length === 2 && provStances74.every((s) => s === 'provisional'),
+        'a starred capture whose every claim is provisional still gets its favorite boost on a matching query (stance labels claims, never entries)');
+      const sid74 = (k) => off74.o.recall(off74.ids[k]).source_id;
+      for (const k of ['prov', 'rej', 'frag']) off74.o.claims.add({ content: `## Skerrow74 ${k} berth heading`, source: { sourceId: sid74(k), path: off74.o.db.prepare('SELECT path FROM sources WHERE id = ?').get(sid74(k)).path } });
+      const c2_74 = await compare74();
+      const sw74 = await off74.o.claimsSweep();
+      const c3_74 = await compare74();
+      ok(sw74.fragments === 3 && c2_74.diffs.length === 0 && c3_74.diffs.length === 0,
+        `fragment claims added to the starred captures in one store (the shape check bypassed), then swept (${sw74.fragments}): the rankings stay identical to the other store's (${c2_74.diffs.length + c3_74.diffs.length} differing)`);
+    } finally { on74.o.close(); off74.o.close(); }
+  }
+
+  // 75. The strict feedback CLI is feedback's alone (card mm-sync-main-2): main's verbs and flags parse as main
+  //     intends — claims-sweep --no-fragments / --no-orphans / --dryRun in any order, claims --stances / --all-stances /
+  //     --all, query --audit — while feedback still refuses every switch but its three votes, main's flags included.
+  {
+    const { DatabaseSync: DB75 } = await import('node:sqlite');
+    const get75 = (dbPath, sql, ...p) => { const d = new DB75(dbPath); try { return d.prepare(sql).get(...p); } finally { d.close(); } };
+    const dir75 = path.join(tmp, 's75');
+    fs.mkdirSync(dir75, { recursive: true });
+    const db75 = path.join(dir75, 'state.db');
+    const f75 = path.join(dir75, 'ostrel75.md'), g75 = path.join(dir75, 'quellmoor75.md'), k75 = path.join(dir75, 'kerrin75.md');
+    fs.writeFileSync(f75, 'The ostrel75 pump station runs three pumps through the winter months. The ostrel75 crew could add a fourth pump next year if the grant arrives. According to the ostrel75 crew the pump station never flooded in a storm.\n');
+    fs.writeFileSync(g75, 'The quellmoor75 sluice keeper logs every passing barge at noon.\n');
+    fs.writeFileSync(k75, 'The kerrin75 lock keeper opens the upper gate at first light.\n');
+    let o75 = new Orchestrator(base66('s75'));
+    let e75;
+    try {
+      e75 = (await o75.ingest({ path: f75, type: 'note' })).entry.id;
+      const eg75 = (await o75.ingest({ path: g75, type: 'note' })).entry.id;
+      await o75.ingest({ path: k75, type: 'note' });
+      o75.claims.add({ content: '## Kerrin75 lock schedule', source: { path: k75 } }); // a fragment (shape check bypassed, as stored before #57) on a live path
+      o75.cfg.forget.cascade = false;
+      try { await o75.archiveEntries({ ids: [eg75], reason: 'fixture75' }); } finally { o75.cfg.forget.cascade = true; } // its claim is left live: an orphan
+    } finally { o75.close(); }
+    const sw75 = (...a) => { const r = cli53(db75, 'claims-sweep', ...a); return r.code === 0 && r.out?.dryRun === true ? `${r.out.fragments}/${r.out.orphans}` : `exit ${r.code}`; };
+    const sws75 = [['--dryRun'], ['--dryRun', '--no-orphans'], ['--no-orphans', '--dryRun'], ['--no-fragments', '--dryRun'], ['--dryRun', '--no-fragments']].map((a) => sw75(...a));
+    ok(sws75.join(' ') === '1/1 1/0 1/0 0/1 0/1',
+      `CLI claims-sweep: --dryRun / --no-fragments / --no-orphans parse in any order (fragments/orphans ${sws75.join(', ')})`);
+    const st75 = (r) => (r.code === 0 && Array.isArray(r.out) ? r.out.map((c) => c.metadata?.stance).sort().join(',') : `exit ${r.code}`);
+    const cls75 = [[], ['--all-stances'], ['--stances', 'provisional,quoted'], ['--all', '--stances', 'quoted']].map((a) => st75(cli53(db75, 'claims', 'ostrel75', 'pump', ...a)));
+    ok(cls75.join(' ') === 'observed observed,provisional,quoted provisional,quoted quoted',
+      `CLI claims on ingested claims: current → observed only; --all-stances → all three; --stances provisional,quoted; --all --stances quoted (${cls75.join(' | ')})`);
+    const rc75 = () => get75(db75, 'SELECT retrieval_count c FROM entries WHERE id = ?', e75).c;
+    const qa75 = cli53(db75, 'query', 'ostrel75', 'pump', 'station', '--audit');
+    const rcA75 = rc75();
+    const qp75 = cli53(db75, 'query', 'ostrel75', 'pump', 'station');
+    ok(qa75.code === 0 && qa75.out?.audit === true && qa75.out.results.some((r) => r.id === e75) && rcA75 === 0 && qp75.code === 0 && qp75.out.audit === undefined && rc75() === 1,
+      'CLI query --audit → audit: true and nothing renewed (retrieval_count 0); the plain query counts the retrieval (1)');
+    const fbBad75 = [['--dryRun'], ['--audit'], ['--all-stances'], ['--stances', 'observed'], ['--no-orphans']].map((f) => cli53(db75, 'feedback', e75, ...f));
+    const hc75 = () => get75(db75, 'SELECT helpful_count c FROM entries WHERE id = ?', e75).c;
+    ok(fbBad75.every((r) => r.code === 1 && /^ERROR: feedback takes only --unhelpful, --favorite or --unfavorite \(got --/.test(r.err)) && hc75() === 0,
+      'CLI feedback refuses main\'s flags too (--dryRun, --audit, --all-stances, --stances, --no-orphans): exit 1 + ERROR:, nothing written');
+    const fb75 = cli53(db75, 'feedback', e75);
+    const nf75 = cli53(db75, 'claims-sweep', '--unhelpful', '--dryRun');
+    ok(fb75.code === 0 && fb75.out?.success === true && hc75() === 1 && nf75.code === 0 && nf75.out?.dryRun === true && nf75.out.archived === 2,
+      'the strictness is feedback\'s alone: a plain feedback vote lands, and claims-sweep ignores a stray --unhelpful as main\'s verbs ignore unknown switches (still a dry run)');
+  }
+
+  // 76. Embed retries (#57) and a capture system's CLI children (card mm-sync-main-2). The children run with the model
+  //     OFF by contract (INTEGRATION-MODES §6; KC's acceptances export MIDMEM_LLM_ENABLED=0): then no endpoint is ever
+  //     called, so MIDMEM_EMBED_RETRIES cannot add an attempt or a wait — ingest (KC's argv + --favorite), feedback,
+  //     entries and forget-source behave as before. With the model ON (a host env that enables it) the same ingest
+  //     child retries a refused embed (embedAttempts on its log row); MIDMEM_EMBED_RETRIES=0 restores one attempt.
+  {
+    const { startFakeOpenAI: startFake76 } = await import('./helpers/fake-openai.mjs');
+    const { DatabaseSync: DB76 } = await import('node:sqlite');
+    const get76 = (dbPath, sql, ...p) => { const d = new DB76(dbPath); try { return d.prepare(sql).get(...p); } finally { d.close(); } };
+    const fake76 = await startFake76({ dim: 16 });
+    const dead76 = await deadUrl66();
+    try {
+      const dir76 = path.join(tmp, 's76');
+      fs.mkdirSync(dir76, { recursive: true });
+      const db76 = path.join(dir76, 'state.db');
+      const arch76 = path.join(tmp, 's76-archive', 'web', 'c0ffee76c0de');
+      fs.mkdirSync(arch76, { recursive: true });
+      const art76 = path.join(arch76, 'article.md');
+      const cli76 = (extra, ...args) => {
+        const r = spawnSync(process.execPath, [path.join(bin53, 'cli.mjs'), ...args], { env: { ...env53(db76), MIDMEM_LLM_ENDPOINT: fake76.url, MIDMEM_EMBED_RETRIES: '5', MIDMEM_EMBED_RETRY_MS: '400', ...extra }, encoding: 'utf8', timeout: 30000 });
+        let parsed = null; try { parsed = JSON.parse(r.stdout); } catch { /* not JSON */ }
+        return { code: r.status, out: parsed, err: r.stderr };
+      };
+      const kcArgv76 = (extra = []) => ['ingest', art76, '--type', 'web-article', '--authority', 'web', '--scope', 'shared', '--project', 'library', '--title', 'Harbour gauges', '--source-uri', 'https://news.example.test/76/gauges', '--canonical-uri', 'https://news.example.test/76/gauges', '--library', 'kb-article-library', '--doc-id', 'c0ffee76c0de', '--capture-method', 'url_fetch', '--captured-at', '2026-10-21T00:00:00Z', ...extra];
+      const lastIngest76 = () => JSON.parse(get76(db76, "SELECT detail FROM log WHERE operation='ingest' ORDER BY id DESC LIMIT 1").detail);
+      const vmodel76 = (id) => get76(db76, 'SELECT model FROM vectors WHERE entry_id = ?', id)?.model;
+      fs.writeFileSync(art76, 'The harbour76 authority published the tide gauge readings for the estuary. Engineers logged the gauges twice a day through the storm.\n');
+      const i76 = cli76({}, ...kcArgv76(['--favorite']));
+      const e76 = i76.out?.entry?.id;
+      const f76 = cli76({}, 'feedback', e76, '--unfavorite'), g76 = cli76({}, 'feedback', e76, '--favorite');
+      const n76 = cli76({}, 'entries', '--library', 'kb-article-library', '--doc-ids', 'c0ffee76c0de');
+      const r76 = cli76({}, 'forget-source', '--library', 'kb-article-library', '--doc-id', 'c0ffee76c0de', '--dryRun');
+      ok(i76.code === 0 && e76 && i76.out.mode === 'fallback' && i76.out.favorite?.favorite === true && /^fallback-hash/.test(vmodel76(e76) || '') && !('embedAttempts' in lastIngest76())
+        && [f76, g76, n76, r76].every((r) => r.code === 0) && n76.out?.entries?.[0]?.favorite === true && fake76.state.embedCalls === 0 && fake76.state.chatCalls === 0,
+        'model off (the capture contract): KC\'s ingest argv + --favorite, feedback, entries and forget-source children never call the endpoint (0 embed, 0 chat calls) though MIDMEM_EMBED_RETRIES=5 — a placeholder vector, no embedAttempts, nothing to retry');
+      fs.writeFileSync(art76, 'The harbour76 authority published revised tide gauge readings for the estuary. Engineers logged the gauges every hour through the storm.\n');
+      const on76 = cli76({ MIDMEM_LLM_ENABLED: '1', MIDMEM_LLM_ENDPOINT: dead76, MIDMEM_EMBED_RETRIES: '2', MIDMEM_EMBED_RETRY_MS: '1', MIDMEM_LLM_TIMEOUT_MS: '2000' }, ...kcArgv76());
+      const onLog76 = lastIngest76();
+      fs.writeFileSync(art76, 'The harbour76 authority published final tide gauge readings for the estuary. Engineers logged the gauges every hour until the storm passed.\n');
+      const one76 = cli76({ MIDMEM_LLM_ENABLED: '1', MIDMEM_LLM_ENDPOINT: dead76, MIDMEM_EMBED_RETRIES: '0', MIDMEM_LLM_TIMEOUT_MS: '2000' }, ...kcArgv76());
+      const oneLog76 = lastIngest76();
+      ok(on76.code === 0 && on76.out?.mode === 'fallback' && JSON.stringify(on76.out.superseded) === JSON.stringify([e76]) && on76.out.favorite?.favorite === true && onLog76.embedAttempts === 3
+        && one76.code === 0 && one76.out?.favorite?.favorite === true && !('embedAttempts' in oneLog76) && /^fallback-hash/.test(vmodel76(one76.out.entry.id) || ''),
+        `model on (a host env that enables it), endpoint refusing: the ingest child retries the embed (embedAttempts ${onLog76.embedAttempts}) and still succeeds with the favorite carried; MIDMEM_EMBED_RETRIES=0 → one attempt (no embedAttempts)`);
+    } finally { await fake76.close(); }
+  }
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;

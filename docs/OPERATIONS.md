@@ -23,6 +23,16 @@ hand run. Both summaries land in the `maintain` result and log row as `reembedde
 error is recorded there and never fails the pass; with the model off in the maintaining process both
 read `{ skipped: true, reason: 'disabled' }`. `0` disables either. Note `reextract`'s default selection
 includes legacy entries that carry no extraction record, and what it rewrites is projected by the next pass.
+Both batches leave `favorite`, `favorite_helpful`, `helpful_count` and `trust_score` alone (schema 6, merged
+2026-10-22): the re-embed writes vectors only, archived rows included, and the reextract rewrites content,
+concepts, provenance and `updated_at` in place, so a favorite keeps exactly its one vote through any number of
+passes. The reextract half reads the source files: run by the store user (the `midmem-maintain` timer below), the
+sources of a capture system whose archive only its own user can read count `skipped.unreadable` and cost no model
+call. Only the re-embed half, which needs no file, repairs such a store; re-extract its fallback entries as the
+capture system's user (Enabling an on-network model, step 4). With the endpoint unreachable both halves skip in
+about a second and write nothing; against a hung one the re-embed probe waits up to (`MIDMEM_EMBED_RETRIES` + 1)
+× `MIDMEM_LLM_TIMEOUT_MS` and the `/models` probe at most 5 s. A separately scheduled `midmem reembed` finds only
+what this pass left.
 
 ## The review queues (judgment work, surfaced by `midmem lint` / MCP `audit`)
 
@@ -82,7 +92,9 @@ forgotten), or a legacy claim without one whose path no active entry stands for 
 transaction, deterministic, logged as `claims-sweep`; `lint` / MCP `audit` show the queue as
 `fragmentClaims` / `orphanClaims`. A re-ingest supersedes the old entry but not its claims, so orphans
 accumulate between sweeps; a claim made by `claim_supersede` inherits its predecessor's source and is
-swept with it, as the forget cascade would archive it.
+swept with it, as the forget cascade would archive it. The sweep writes claims only: no entry row changes, so
+after a favorite's re-capture the superseded version's claims are archived while the favorite (and its one vote)
+that the new entry carried stays exactly as it was.
 
 **Claim stance** (since 2026-10-12, roadmap #33): every claim is tagged at commit with
 `metadata.stance` — `observed` (the default), `provisional` (could / might / would / if we / plan to /
@@ -94,7 +106,9 @@ current read) leaves it out. To see it, use `midmem claims <q> --all-stances` (o
 MCP `claims` with `allStances: true` / `stances`); `claims <q> --all` returns every status and stance.
 `lint` reports the live mix as `stances`, `brief` as `claims.byStance`. A research claim of the form "the
 paper reports X" stays `observed` — the source speaking is not a quotation. `MIDMEM_CLAIM_STANCE=0` turns
-tagging off and every read behaves as before; claims written earlier keep their tag.
+tagging off and every read behaves as before; claims written earlier keep their tag. Claims written before
+stance tagging existed carry none and read as `observed`: on an upgraded store the first `lint` shows every
+live claim as observed and the current read returns them as before; new ingests and re-extractions are tagged.
 
 ## Health signals worth watching
 
@@ -126,8 +140,12 @@ tagging off and every read behaves as before; claims written earlier keep their 
   once. Measured before it: one agent process wrote 37 placeholders in a day after single timeouts
   while CLI ingests in the same hours embedded normally. An `ingest` / `remember` log row carries
   `embedAttempts` when the embed needed more than one. Each attempt gets the full
-  `MIDMEM_LLM_TIMEOUT_MS`, so against a hung box (not a refusing one) every embed — query embeds
-  included — waits up to (retries + 1) timeouts; lower the retries where that latency matters.
+  `MIDMEM_LLM_TIMEOUT_MS`, so against a hung box (not a refusing one) every write's embed (ingest,
+  remember, reextract, the re-embed batch) waits up to (retries + 1) timeouts; retrieval and the concept
+  refresh make one attempt. Lower the retries where that latency matters: a capture system that bounds
+  its MidMem children (say 120 s) and runs them with the model ON sees a hung endpoint cost one ingest
+  the extraction timeout plus (retries + 1) embed timeouts. Children that run with the model OFF
+  (`MIDMEM_LLM_ENABLED=0`) call no endpoint, so the retries change nothing for them.
 
 ## Backup & restore
 
@@ -190,6 +208,9 @@ see the privilege note below.
 - `midmem-maintain`: `ExecStart=/usr/local/bin/midmem maintain --force`, `Nice=10`, idle IO,
   `MemoryMax=1G`, `OnCalendar=*-*-* 04:15:00`, `Persistent`, `RandomizedDelaySec=10m`. It is the
   **only** forced-maintain owner (see Scheduled jobs above); the capture system never forces one.
+  It also runs the nightly repair batches (The two maintenance modes, above): when the endpoint answers,
+  up to 200 embeddings and 20 extractions; as `midmem` its reextract half re-extracts only sources that
+  user can read.
 - `midmem-backup` (03:45): a `node:sqlite` `backup()` of `state.db`, `PRAGMA integrity_check` on the
   copy, the export snapshot, and a 14-day prune.
 
@@ -355,6 +376,35 @@ favorite gains nothing, and that question-form queries pull no starred unrelated
 prints the cost (measured 2026-10-21: 7 ms → 12 ms for a 60-word query over 800 entries with 600 favorites). A
 favorite does not pin an entry: lease expiry and distrust archival apply as to any entry, and a source whose
 entry has expired stays `unchanged` on re-ingest.
+
+### Main's review guards on the favorites line (2026-10-22)
+
+The release that merges main (review guards #56/#57, claim stance #33, the nightly repair batches) into the
+favorites line keeps **schema 6**: no migration runs, the first open adds no column, table or meta row, and the
+favorites release still reads the store afterwards, so a rollback needs no database change. Rehearsed on a
+production-shaped schema-6 store built by the favorites release (250 active web-article captures, 22 of them
+fallback-extracted; 12 superseded versions; 1,963 claims; 262 vectors, 18 of them hash placeholders; 27
+favorites), with the env of a host that has the model on (60 s timeout). The counts are that synthetic store's;
+the same dry runs on a copy of a real store give its own:
+
+- **The first forced maintain with the endpoint unreachable** (a closed port): exit 0 in about 2 s;
+  `reembedded: { reembedded: 0, reason: 'embedder-offline' }`, `reextracted: { skipped: true, reason:
+  'unreachable' }`, the concept refresh `stopped: 'embedder-offline'`. Every entry, vector and claim row was
+  byte-identical afterwards, and identical to the same pass with both batches off. The favorites release's pass
+  stored hash vectors into 60 concept nodes in the same situation.
+- **What the first nightly pass selects** once the endpoint answers: `midmem reembed --dryRun` lists the
+  candidates (every placeholder vector, archived rows included; the pass takes up to 200 — there all 18), and
+  `midmem reextract --dry-run --limit 20` the batch (fallback-extracted entries whose source is readable and
+  unchanged — there 20 of 22; the 228 model-extracted entries count `notSelected`). Run by a user that cannot
+  read the capture system's archive (the store user, on a host where the archive is the capture system's own),
+  those 22 count `skipped.unreadable` and no model call is made. Favorites, `favorite_helpful`, helpful counts and
+  trust stayed as they were in every case, the answering endpoint included (18 re-embedded, 20 re-extracted).
+- **`claims-sweep` is manual** (never part of maintain). On the rehearsal store `claims-sweep --dryRun` counted
+  187 fragments (headings, bold-lead bullets and table rows the favorites release kept as claims) and 55 orphans
+  (claims of superseded versions) among 1,463 live claims; `lint` shows the same queue as `fragmentClaims` /
+  `orphanClaims`. Read the sample, then run it without `--dryRun`.
+- **Stances**: existing claims carry none, so `lint.stances` reports them all as observed and the current read
+  returns them as before; claims written from the upgrade on are tagged.
 
 ## When things look wrong
 
