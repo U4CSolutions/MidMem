@@ -277,6 +277,9 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    `--dry-run` lists the would-be `entries` with `mode: null`, calls no model and writes nothing. CLI only (no MCP tool). It
    reads the source files, so it runs as the user that can read the archive (the capture system's own
    user, or through the capture system); run as any other user those sources come back `unreadable`.
+   Since 2026-10-19 the forced maintain also runs a bounded reextract batch (`MIDMEM_MAINTAIN_REEXTRACT`,
+   default 20, only when the model endpoint answers) that re-extracts only sources the store user can read,
+   so a capture system whose archive is its own keeps re-extraction in its own hands.
    None of these exceptions changes an entry's authority (`web`), tier, scope or project.
 7. **Reads.** Any consumer: `midmem query "<q>" --projects library` (MCP `query` with
    `projects: ["library"]`), or unfiltered when the caller has no project set. Rows carry

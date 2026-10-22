@@ -17,11 +17,12 @@ pass re-embeds at most `MIDMEM_MAINTAIN_REEMBED` (default 200) hash-placeholder 
 `reembed`'s own self-gating (its first embed is the probe; offline → nothing touched, `reason:
 embedder-offline`), then re-extracts at most `MIDMEM_MAINTAIN_REEXTRACT` (default 20) fallback-extracted
 entries through `reextract` — only when the endpoint answers a cheap `GET /models` probe (never a model
-call just to test); otherwise `reextracted: { skipped: true, reason }`. Capture children that run with
-`MIDMEM_LLM_ENABLED=0` by contract and entries ingested while the box was down are repaired without a
-hand run. Both summaries land in the `maintain` result and log row as `reembedded` / `reextracted`; an
-error is recorded there and never fails the pass; with the model off in the maintaining process both
-read `{ skipped: true, reason: 'disabled' }`. `0` disables either. Note `reextract`'s default selection
+call just to test); otherwise `reextracted: { skipped: true, reason }`. Placeholder vectors written by a
+process that ran with the model off (some capture children run with `MIDMEM_LLM_ENABLED=0`) and entries
+ingested while the box was down are repaired without a hand run. Both summaries land in the `maintain`
+result and log row as `reembedded` / `reextracted`; an error is recorded there and never fails the pass;
+with the model off in the maintaining process both read `{ skipped: true, reason: 'disabled' }`. `0`
+disables either. Note `reextract`'s default selection
 includes legacy entries that carry no extraction record, and what it rewrites is projected by the next pass.
 Both batches leave `favorite`, `favorite_helpful`, `helpful_count` and `trust_score` alone (schema 6, merged
 2026-10-22): the re-embed writes vectors only, archived rows included, and the reextract rewrites content,
@@ -29,10 +30,14 @@ concepts, provenance and `updated_at` in place, so a favorite keeps exactly its 
 passes. The reextract half reads the source files: run by the store user (the `midmem-maintain` timer below), the
 sources of a capture system whose archive only its own user can read count `skipped.unreadable` and cost no model
 call. Only the re-embed half, which needs no file, repairs such a store; re-extract its fallback entries as the
-capture system's user (Enabling an on-network model, step 4). With the endpoint unreachable both halves skip in
-about a second and write nothing; against a hung one the re-embed probe waits up to (`MIDMEM_EMBED_RETRIES` + 1)
-× `MIDMEM_LLM_TIMEOUT_MS` and the `/models` probe at most 5 s. A separately scheduled `midmem reembed` finds only
-what this pass left.
+capture system's user (Enabling an on-network model, step 4). With the endpoint unreachable (a refused
+connection) both halves skip in about a second and write nothing. Against a hung endpoint (it accepts and never
+answers) the whole forced pass waits T + (retries + 1)·T + min(T, 5 s), with T = `MIDMEM_LLM_TIMEOUT_MS` and
+retries = `MIDMEM_EMBED_RETRIES`: one full timeout in the concept refresh (one attempt, then it stops), the
+re-embed probe's attempts (plus 0.75 s of backoff) and the `/models` probe — about 4 min at 60 s with retries 2,
+about 2 min with retries 0. Measured with retries 2: 26.6 s at T = 5 s, 87 s at 20 s, 246.6 s at 60 s (and at
+T = 2 s, 10.9 s with retries 2, 6.1 s with 0). A separately scheduled `midmem reembed` finds only what this pass
+left.
 
 ## The review queues (judgment work, surfaced by `midmem lint` / MCP `audit`)
 
@@ -142,10 +147,16 @@ live claim as observed and the current read returns them as before; new ingests 
   `embedAttempts` when the embed needed more than one. Each attempt gets the full
   `MIDMEM_LLM_TIMEOUT_MS`, so against a hung box (not a refusing one) every write's embed (ingest,
   remember, reextract, the re-embed batch) waits up to (retries + 1) timeouts; retrieval and the concept
-  refresh make one attempt. Lower the retries where that latency matters: a capture system that bounds
-  its MidMem children (say 120 s) and runs them with the model ON sees a hung endpoint cost one ingest
-  the extraction timeout plus (retries + 1) embed timeouts. Children that run with the model OFF
-  (`MIDMEM_LLM_ENABLED=0`) call no endpoint, so the retries change nothing for them.
+  refresh make one attempt. Children that run with the model OFF (`MIDMEM_LLM_ENABLED=0`, as Knowledge
+  Capture's acceptances run them) call no endpoint, so the retries change nothing for them.
+  **A capture host whose children run with the model ON** — they inherit `midmem.env`, as on the
+  knowledge-capture host since Phase 1b — gets the retries on every capture ingest: set
+  `MIDMEM_EMBED_RETRIES=0` there (that host's release sets it in `/etc/midmem/midmem.env`). Against a
+  hung endpoint a model-ON ingest child waits the extraction timeout plus (retries + 1) embed timeouts:
+  measured at the 60 s timeout, 240.9 s with retries 2 and 120.2 s with 0 (at 2 s: 8.9 s and 4.1 s),
+  against Knowledge Capture's 120 s budget for one child; the placeholder vector a failed embed leaves is
+  repaired by the nightly re-embed batch anyway. `MIDMEM_LLM_TIMEOUT_MS` ≤ 55000 is the way to bring such an
+  ingest (one extraction + one embed) under 120 s — a later decision, not applied.
 
 ## Backup & restore
 
@@ -405,6 +416,8 @@ the same dry runs on a copy of a real store give its own:
   `orphanClaims`. Read the sample, then run it without `--dryRun`.
 - **Stances**: existing claims carry none, so `lint.stances` reports them all as observed and the current read
   returns them as before; claims written from the upgrade on are tagged.
+- **Embed retries on a capture host with the model ON**: set `MIDMEM_EMBED_RETRIES=0` in `midmem.env` with this
+  release (Health signals, Embed retries); the knowledge-capture host's release does.
 
 ## When things look wrong
 

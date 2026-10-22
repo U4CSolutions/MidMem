@@ -4157,6 +4157,7 @@ try {
       ok(down72.reembedded?.reembedded === 0 && down72.reembedded.reason === 'embedder-offline' && down72.reextracted?.skipped === true && down72.reextracted.reason === 'unreachable' && snap72() === s0_72,
         'endpoint unreachable → both batches skip (embedder-offline / unreachable) and every entry, vector and claim row is byte-identical — favorites and votes included');
       o72.cfg.llmEndpoint = fake72.url;
+      const rows0_72 = new Map(ids72.map((id) => [id, row72(id)]));
       const live72 = await o72.maintain({ force: true });
       ok(live72.reembedded?.reembedded === 5 && live72.reembedded.remaining === 0 && live72.reextracted?.reextracted === 4 && live72.reextracted.remaining === 0,
         `endpoint ok → the reembed batch swaps all 5 placeholders, the archived version's too (${live72.reembedded?.reembedded}); the reextract batch rewrites the 4 active fallback entries (${live72.reextracted?.reextracted})`);
@@ -4165,9 +4166,22 @@ try {
       ok([eA72, eB72, eC72, eD2_72].every((id) => mode72(id) === 'lmstudio' && /^Model summary:/.test(row72(id).content)) && ids72.every((id) => vmodel72(id) === 'stub-embed')
         && mode72(eD1_72) === 'fallback' && row72(eD1_72).status === 'archived',
         'the active entries are model-extracted in place (same ids) with real vectors; the archived version got a real vector and no re-extraction');
+      // The lease and lifecycle columns (2026-10-22 review): the re-embed writes vectors only and the reextract content,
+      // concepts, provenance and updated_at only — so expires_at, tier and status hold on every fixture row, the archived
+      // row (re-embed only) keeps its updated_at, and a re-extracted row's updated_at is its own extraction time.
+      const reex72 = new Set([eA72, eB72, eC72, eD2_72]);
+      const life72 = (r) => `${r.status}/${r.tier}/${r.expires_at}`;
+      ok(ids72.every((id) => life72(row72(id)) === life72(rows0_72.get(id))) && row72(eD1_72).updated_at === rows0_72.get(eD1_72).updated_at
+        && [...reex72].every((id) => row72(id).updated_at === JSON.parse(row72(id).provenance).extraction.at && row72(id).updated_at > rows0_72.get(id).updated_at),
+        'expires_at, tier and status hold on all 5 rows; updated_at moves only on the 4 re-extracted rows (to their extraction time) — the archived, re-embed-only row keeps its own');
+      const RX72 = new Set(['content', 'concepts', 'provenance', 'updated_at']);
+      const rest72 = (r, whole) => JSON.stringify(Object.entries(r).filter(([k]) => whole || !RX72.has(k)));
+      ok(ids72.every((id) => rest72(row72(id), !reex72.has(id)) === rest72(rows0_72.get(id), !reex72.has(id))),
+        'every other column of every fixture row is as it was (counters, last access, scope, project, type, source), and the archived row is byte-identical');
+      const rows1_72 = JSON.stringify(ids72.map(row72));
       const again72 = await o72.maintain({ force: true });
-      ok(again72.reembedded?.reembedded === 0 && again72.reextracted?.reextracted === 0 && ids72.every((id) => votes72(id) === before72.get(id)),
-        'a second nightly pass selects nothing and still moves no vote');
+      ok(again72.reembedded?.reembedded === 0 && again72.reextracted?.reextracted === 0 && ids72.every((id) => votes72(id) === before72.get(id)) && JSON.stringify(ids72.map(row72)) === rows1_72,
+        'a second nightly pass selects nothing and changes no fixture row (votes, lease, timestamps)');
       const uA72 = o72.feedbackIfActive(eA72, true, { favorite: false });
       const uB72 = o72.feedbackIfActive(eB72, true, { favorite: false });
       ok(uA72.changed === true && votes72(eA72) === '0/0/0/0.5' && uB72.changed === true && votes72(eB72) === '0/0/1/0.55',
@@ -4367,11 +4381,12 @@ try {
       'the strictness is feedback\'s alone: a plain feedback vote lands, and claims-sweep ignores a stray --unhelpful as main\'s verbs ignore unknown switches (still a dry run)');
   }
 
-  // 76. Embed retries (#57) and a capture system's CLI children (card mm-sync-main-2). The children run with the model
-  //     OFF by contract (INTEGRATION-MODES §6; KC's acceptances export MIDMEM_LLM_ENABLED=0): then no endpoint is ever
-  //     called, so MIDMEM_EMBED_RETRIES cannot add an attempt or a wait — ingest (KC's argv + --favorite), feedback,
-  //     entries and forget-source behave as before. With the model ON (a host env that enables it) the same ingest
-  //     child retries a refused embed (embedAttempts on its log row); MIDMEM_EMBED_RETRIES=0 restores one attempt.
+  // 76. Embed retries (#57) and a capture system's CLI children (card mm-sync-main-2). KC's acceptances run them with
+  //     the model OFF (they export MIDMEM_LLM_ENABLED=0): then no endpoint is ever called, so MIDMEM_EMBED_RETRIES cannot
+  //     add an attempt or a wait — ingest (KC's argv + --favorite), feedback, entries and forget-source behave as before.
+  //     KC's production children inherit the host env (/etc/midmem/midmem.env), which has the model ON on the
+  //     knowledge-capture host: there the same ingest child retries a refused (or hung) embed — embedAttempts on its
+  //     log row — and MIDMEM_EMBED_RETRIES=0, which that host sets, restores one attempt (OPERATIONS.md, Embed retries).
   {
     const { startFakeOpenAI: startFake76 } = await import('./helpers/fake-openai.mjs');
     const { DatabaseSync: DB76 } = await import('node:sqlite');
@@ -4401,7 +4416,7 @@ try {
       const r76 = cli76({}, 'forget-source', '--library', 'kb-article-library', '--doc-id', 'c0ffee76c0de', '--dryRun');
       ok(i76.code === 0 && e76 && i76.out.mode === 'fallback' && i76.out.favorite?.favorite === true && /^fallback-hash/.test(vmodel76(e76) || '') && !('embedAttempts' in lastIngest76())
         && [f76, g76, n76, r76].every((r) => r.code === 0) && n76.out?.entries?.[0]?.favorite === true && fake76.state.embedCalls === 0 && fake76.state.chatCalls === 0,
-        'model off (the capture contract): KC\'s ingest argv + --favorite, feedback, entries and forget-source children never call the endpoint (0 embed, 0 chat calls) though MIDMEM_EMBED_RETRIES=5 — a placeholder vector, no embedAttempts, nothing to retry');
+        'model off (as KC\'s acceptances run them): KC\'s ingest argv + --favorite, feedback, entries and forget-source children never call the endpoint (0 embed, 0 chat calls) though MIDMEM_EMBED_RETRIES=5 — a placeholder vector, no embedAttempts, nothing to retry');
       fs.writeFileSync(art76, 'The harbour76 authority published revised tide gauge readings for the estuary. Engineers logged the gauges every hour through the storm.\n');
       const on76 = cli76({ MIDMEM_LLM_ENABLED: '1', MIDMEM_LLM_ENDPOINT: dead76, MIDMEM_EMBED_RETRIES: '2', MIDMEM_EMBED_RETRY_MS: '1', MIDMEM_LLM_TIMEOUT_MS: '2000' }, ...kcArgv76());
       const onLog76 = lastIngest76();
@@ -4410,7 +4425,7 @@ try {
       const oneLog76 = lastIngest76();
       ok(on76.code === 0 && on76.out?.mode === 'fallback' && JSON.stringify(on76.out.superseded) === JSON.stringify([e76]) && on76.out.favorite?.favorite === true && onLog76.embedAttempts === 3
         && one76.code === 0 && one76.out?.favorite?.favorite === true && !('embedAttempts' in oneLog76) && /^fallback-hash/.test(vmodel76(one76.out.entry.id) || ''),
-        `model on (a host env that enables it), endpoint refusing: the ingest child retries the embed (embedAttempts ${onLog76.embedAttempts}) and still succeeds with the favorite carried; MIDMEM_EMBED_RETRIES=0 → one attempt (no embedAttempts)`);
+        `model on (as KC's production children run with the host env), endpoint refusing: the ingest child retries the embed (embedAttempts ${onLog76.embedAttempts}) and still succeeds with the favorite carried; MIDMEM_EMBED_RETRIES=0 → one attempt (no embedAttempts)`);
     } finally { await fake76.close(); }
   }
 
