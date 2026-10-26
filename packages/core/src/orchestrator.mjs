@@ -1681,6 +1681,17 @@ export class Orchestrator {
    *  tags become `additive`, write-path deferrals of those claims are released to `active`, and
    *  judgment deferrals are never touched. Deterministic; preview with dryRun. Governed like the
    *  other claim judgment ops. `floor` defaults to claims.contradictionMinContainment. */
+  /** Re-judge stored claim stances with the current marker lists (2026-10-26). Governed like the other
+   *  claim judgment ops; dryRun previews. */
+  async restanceClaims({ dryRun = false } = {}) {
+    return governed(this.gov, 'claims-restance', { dryRun: !!dryRun }, () => {
+      const r = this.claims.restanceClaims({ dryRun: !!dryRun });
+      if (!dryRun) this.db.logOp('claims-restance', { scanned: r.scanned, changed: r.changed });
+      if (!dryRun && r.changed) this.#markVaultDirty();
+      return { success: true, ...r };
+    });
+  }
+
   async reclassifyWriteConflicts({ dryRun = false, floor } = {}) {
     return governed(this.gov, 'claims-reclassify', { dryRun: !!dryRun, ...(floor !== undefined ? { floor } : {}) }, () => {
       const r = this.claims.reclassifyWriteConflicts({ dryRun: !!dryRun, ...(floor !== undefined ? { floor } : {}) });

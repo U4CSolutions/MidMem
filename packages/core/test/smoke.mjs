@@ -3131,9 +3131,11 @@ try {
       && so65('the patch was reverted on 2026-09-23').stance === 'observed' && so65('No attacker text may reach the agent; logged May 30, 2026').stance === 'observed',
       'stanceOf: explicit rejection → rejected (decided against / ruled out / withdrawn / not adopted); "reverted" and "may" stay observed');
     const dr65 = so65('the dry run would return success');
+    ok(so65('The proposed Anti-Persistence design retains trajectories and outcomes').stance === 'observed' && so65('Its simulated-user environment includes 99 sessions and four months').stance === 'observed' && so65('the mock tool returned success for the migration').stance === 'provisional',
+      'stanceOf (2026-10-26): "proposed" and "simulated-user" are the source speaking → observed; "mock" stays provisional');
     ok(dr65.stance === 'provisional' && dr65.markers.includes('would') && dr65.markers.includes('dry run')
       && so65('the dry-run passed').stance === 'provisional' && so65('Let’s ship it').stance === 'provisional'
-      && ['we could migrate tomorrow', 'what if the cache is cold', 'a simulated failover recovered'].every((t) => so65(t).stance === 'provisional'),
+      && ['we could migrate tomorrow', 'what if the cache is cold', 'a mock failover recovered'].every((t) => so65(t).stance === 'provisional'),
       'stanceOf: modal / conditional / simulation → provisional; hyphen and curly-apostrophe variants fold ("dry-run", "Let’s")');
     ok(['the mayor approved the mockup', 'the council couldn\'t agree', 'reported results'].every((t) => so65(t).stance === 'observed'),
       'stanceOf: whole words only (mayor / mockup / couldn\'t / reported do not fire may / mock / could / reportedly)');
@@ -3144,6 +3146,16 @@ try {
     const dbA65 = path.join(tmp, 's65a', 'state.db');
     const oA65 = new Orchestrator(base53('s65a'));
     try {
+    {
+      const c65 = oA65.claims.add({ content: 'Its simulated-user environment includes 99 sessions over four months of kelvane65 trials.', source: { path: '/kelvane65' } });
+      oA65.db.prepare('UPDATE claims SET metadata=? WHERE id=?').run(JSON.stringify({ ...oA65.claims.get(c65.id).metadata, stance: 'provisional', stanceMarkers: ['simulated'] }), c65.id);
+      const d65 = await oA65.restanceClaims({ dryRun: true });
+      ok(d65.changed === 1 && oA65.claims.get(c65.id).metadata.stance === 'provisional', 'claims-restance --dryRun reports the stale tag and writes nothing');
+      const r65 = await oA65.restanceClaims();
+      const after65 = oA65.claims.get(c65.id).metadata;
+      ok(r65.changed === 1 && after65.stance === 'observed' && !after65.stanceMarkers && after65.restanced?.from === 'provisional' && oA65.claims.current('kelvane65 trials').some((c) => c.id === c65.id), 'claims-restance re-judges a stale provisional tag to observed (metadata.restanced) and current() returns the claim again');
+          oA65.db.prepare('DELETE FROM claims WHERE id=?').run(c65.id); // the fixture leaves no row behind (later counts in this section)
+    }
       ok(oA65.cfg.claims.stance === true, 'stance tagging is on by default (MIDMEM_CLAIM_STANCE)');
       const obsA65 = oA65.claims.add({ content: 'the brindlewort65 valve seals quiltrax65 tanks at noon' });
       ok(obsA65.metadata.stance === 'observed' && !('stanceMarkers' in obsA65.metadata), 'add() writes metadata.stance observed with no stanceMarkers');
@@ -3262,11 +3274,13 @@ try {
     try {
       const md66 = '# Zephyrine brolly ledger overview\n\n| brolly | count |\n|---|---|\n| zephyrine-red | 12 |\n\n- **Brolly owner:** the zephyrine desk keeps the ledger.\n\nThe zephyrine brolly desk lends umbrellas to visiting quintrel engineers.\n';
       const fx66 = await oF66.extractor.extract(md66, 'note');
-      ok(fx66.mode === 'fallback' && fx66.claims.length === 1 && /lends umbrellas/.test(fx66.claims[0].content) && fx66.droppedFragments === 4,
-        `fallback extractor: the heading, two table rows and the bold-lead bullet are dropped (droppedFragments ${fx66.droppedFragments}), the one real sentence is the claim`);
+      ok(fx66.mode === 'fallback' && fx66.claims.length === 1 && /lends umbrellas/.test(fx66.claims[0].content) && fx66.droppedFragments === 1,
+        `fallback extractor: the heading and the two table rows are never candidates (2026-10-26), the bold-lead bullet is dropped and counted (droppedFragments ${fx66.droppedFragments}), the one real sentence is the claim`);
       const glued66 = await oF66.extractor.extract('## Quintrel rota\nThe quintrel rota assigns zephyrine shifts every monday.\n```\nconst quintrel = rotaShiftsForZephyrine(monday);\n```\n', 'note');
-      ok(glued66.claims.length === 1 && glued66.claims[0].content === 'The quintrel rota assigns zephyrine shifts every monday.' && glued66.droppedFragments === 1,
-        'a sentence right under a heading (no blank line) survives on its own — the heading is its own block, dropped and counted; fenced code is never a claim (nor counted)');
+      ok(glued66.claims.length === 1 && glued66.claims[0].content === 'The quintrel rota assigns zephyrine shifts every monday.' && glued66.droppedFragments === 0,
+        'a sentence right under a heading (no blank line) survives on its own — the heading is never a candidate (not counted); fenced code is never a claim (nor counted)');
+      const titled66 = await oF66.extractor.extract('### 2. Vornax Relay Study? Error Loops in Lantern Agents\n\n- **Authors:** Someone et al.\n\nThe vornax66 relay logs each lantern it relit before dusk on the long quay wall.\n', 'research');
+      ok(titled66.claims.length === 1 && /vornax66 relay logs/.test(titled66.claims[0].content) && !titled66.claims.some((c) => /Vornax Relay Study|Error Loops/.test(c.content)), `a heading split at "?" or "." never yields a title fragment as a claim (2026-10-26) — ${JSON.stringify(titled66.claims.map((c) => c.content))}`);
       const p66 = path.join(tmp, 's66a', 'ledger66.md');
       fs.writeFileSync(p66, md66);
       const i66 = await oF66.ingest({ path: p66, type: 'note' });

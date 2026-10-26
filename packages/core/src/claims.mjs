@@ -53,7 +53,11 @@ const STANCE_MARKERS = [
   // 'may' is NOT a marker: it is permissive in technical prose ("no attacker text may reach") and
   // the month name ("May 30, 2026"); 7 of 7 live claims carrying it were observations. 'consider'
   // is deliberation, not a possibility held as fact.
-  ['provisional', ['could', 'might', 'would', 'should we', 'if we', 'suppose', 'hypothetically', 'in theory', 'plan to', 'plans to', 'propose', 'proposed', 'proposal', "let's", 'simulated', 'mock', 'dry run', 'what if', 'tentatively']],
+  // 'proposed' / 'proposal' / 'simulated' are NOT markers (measured 2026-10-26 on the live store): in a
+  // research store "the proposed design" and "a simulated-user environment" are the source speaking
+  // about its own contribution and method, not a possibility held as fact. 'propose' (whole word,
+  // "I propose we …") and the simulated-outcome phrases 'mock' / 'dry run' stay.
+  ['provisional', ['could', 'might', 'would', 'should we', 'if we', 'suppose', 'hypothetically', 'in theory', 'plan to', 'plans to', 'propose', "let's", 'mock', 'dry run', 'what if', 'tentatively']],
 ];
 export const STANCES = ['observed', 'provisional', 'quoted', 'rejected'];
 const STANCE_RES = STANCE_MARKERS.map(([stance, words]) => [stance, words.map((w) => [w, new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+')}\\b`)])]);
@@ -295,6 +299,31 @@ export class ClaimStore {
    * verdicts are re-judged. `updated_at` is left alone: the knowledge did not change, so
    * current-claim ordering must not move. One transaction; dryRun computes the same report and writes nothing.
    */
+  /**
+   * Re-judge stored stances with the CURRENT marker lists (2026-10-26; the lists are narrowed as live
+   * data shows a marker tagging facts). Deterministic: every live claim's text is re-read with stanceOf;
+   * a row whose recorded stance differs is updated (stance + stanceMarkers; `judged` and everything
+   * else kept) and recorded in metadata.restanced { from, to, at }. updated_at is left alone.
+   */
+  restanceClaims({ dryRun = false } = {}) {
+    const rows = this.db.prepare("SELECT * FROM claims WHERE status IN ('active','verified','deferred')").all().map((r) => this.#h(r));
+    const at = nowISO(); const plan = [];
+    for (const c of rows) {
+      const now = stanceOf(c.content); const was = claimStance(c);
+      if (now.stance !== was) plan.push({ id: c.id, from: was, to: now.stance, markers: now.markers });
+    }
+    const out = { scanned: rows.length, changed: plan.length, dryRun: !!dryRun, sample: plan.slice(0, 10) };
+    if (dryRun || !plan.length) return out;
+    const upd = this.db.prepare('UPDATE claims SET metadata=? WHERE id=?');
+    this.db.tx(() => {
+      for (const p of plan) {
+        const c = this.get(p.id); const { stance: _s, stanceMarkers: _m, ...rest } = c.metadata;
+        upd.run(JSON.stringify({ ...rest, stance: p.to, ...(p.markers.length ? { stanceMarkers: p.markers } : {}), restanced: { from: p.from, to: p.to, at } }), p.id);
+      }
+    });
+    return out;
+  }
+
   reclassifyWriteConflicts({ floor = this.#containmentFloor(), dryRun = false } = {}) {
     const rows = this.db.prepare(`SELECT * FROM claims WHERE status IN ('deferred','active','verified')
       AND json_valid(metadata) AND json_extract(metadata, '$.writeRelation.relation') = 'contradictory'
