@@ -142,7 +142,10 @@ function claimCandidates(text) {
     if (FENCE_RE.test(line)) { flush(); fenced = !fenced; continue; }
     if (fenced) continue;
     if (!line.trim()) { flush(); continue; }
-    if (BLOCK_LINE_RE.test(line)) { flush(); cur.push(line.trim()); flush(); continue; }
+    // A heading or table row is never a claim candidate (2026-10-26): kept as its own block it was split
+    // at a '?' or '.' inside the title ("### 2. Title: …" → "Title: …"), and the piece without the '#'
+    // passed the shape check as a sentence — a paper's title became a live claim.
+    if (BLOCK_LINE_RE.test(line)) { flush(); continue; }
     if (BLOCK_OPEN_RE.test(line)) flush();
     cur.push(line.trim());
   }
