@@ -1,0 +1,211 @@
+{
+  "contract": "midmem-library-provider/1",
+  "frozen": "2026-09-24",
+  "description": "Frozen contract fixture shared by MidMem (roadmap #49 library lane) and every library system that serves it (first: U4CSolutions/kb-article-library). MidMem tests fuse these responses from a fake provider; a library tests that its real provider returns this SHAPE and these top documents for these queries. Chunk boundaries are the fake provider's data, not a chunking rule.",
+  "provider": {
+    "transports": [
+      "in-process ES module exporting { search, get }",
+      "HTTP: POST <base>/provider/search, POST <base>/provider/get, JSON bodies below"
+    ],
+    "search": {
+      "request": {
+        "query": "string",
+        "limit": "integer > 0",
+        "filters": {
+          "libraryId": "string?",
+          "site": "string?",
+          "capturedAfter": "ISO-8601?",
+          "capturedBefore": "ISO-8601?",
+          "captureMethod": "string?"
+        }
+      },
+      "response": [
+        {
+          "libraryId": "string",
+          "docId": "string",
+          "chunkId": "string",
+          "text": "string",
+          "score": "number in [0,1], descending",
+          "locator": {
+            "docId": "string",
+            "version": "integer",
+            "charStart": "integer",
+            "charEnd": "integer"
+          },
+          "sourceUri": "string",
+          "capturedAt": "ISO-8601"
+        }
+      ]
+    },
+    "get": {
+      "request": {
+        "docId": "string",
+        "locator": {
+          "docId": "string",
+          "version": "integer",
+          "charStart": "integer",
+          "charEnd": "integer"
+        }
+      },
+      "response": {
+        "text": "string",
+        "locator": "the same locator",
+        "sourceUri": "string"
+      }
+    },
+    "rules": [
+      "search never returns a chunk from a library other than filters.libraryId when that filter is set",
+      "results are ordered by score descending; ties broken by docId then chunkId ascending",
+      "get(docId, locator) returns exactly the text between charStart and charEnd of that document version",
+      "an unknown docId or a locator outside the document is an error, never empty text",
+      "the provider is read-only: no request mutates the library"
+    ]
+  },
+  "libraries": [
+    {
+      "libraryId": "kb-fixture",
+      "documents": [
+        {
+          "docId": "doc-osprey",
+          "version": 1,
+          "sourceUri": "https://example.test/osprey-relay",
+          "site": "example.test",
+          "captureMethod": "url_fetch",
+          "capturedAt": "2026-09-20T10:00:00Z",
+          "text": "The osprey relay batches outbound writes and flushes them every ninety seconds. When the relay loses its upstream link it keeps a bounded queue on disk and replays it in order once the link returns. Operators tune the flush interval with the relay.flush setting."
+        },
+        {
+          "docId": "doc-heron",
+          "version": 2,
+          "sourceUri": "https://docs.example.test/heron-scheduler",
+          "site": "docs.example.test",
+          "captureMethod": "browser_dom",
+          "capturedAt": "2026-09-22T08:30:00Z",
+          "text": "The heron scheduler pins worker processes to cores and rotates the pinning every hour. Version two added a drain mode so a pinned worker finishes its current job before rotation. Drain mode is enabled with heron --drain."
+        },
+        {
+          "docId": "doc-tern",
+          "version": 1,
+          "sourceUri": "https://blog.example.test/tern-cache",
+          "site": "blog.example.test",
+          "captureMethod": "url_fetch",
+          "capturedAt": "2026-09-23T15:45:00Z",
+          "text": "The tern cache keeps recently read pages in memory and evicts the least recently used page when the cache is full. A page that is read again within an hour is kept regardless of its age."
+        }
+      ],
+      "chunks": [
+        {
+          "docId": "doc-osprey",
+          "version": 1,
+          "chunkId": "osprey-1-0",
+          "charStart": 0,
+          "charEnd": 79,
+          "text": "The osprey relay batches outbound writes and flushes them every ninety seconds."
+        },
+        {
+          "docId": "doc-osprey",
+          "version": 1,
+          "chunkId": "osprey-1-1",
+          "charStart": 80,
+          "charEnd": 198,
+          "text": "When the relay loses its upstream link it keeps a bounded queue on disk and replays it in order once the link returns."
+        },
+        {
+          "docId": "doc-osprey",
+          "version": 1,
+          "chunkId": "osprey-1-2",
+          "charStart": 199,
+          "charEnd": 262,
+          "text": "Operators tune the flush interval with the relay.flush setting."
+        },
+        {
+          "docId": "doc-heron",
+          "version": 2,
+          "chunkId": "heron-2-0",
+          "charStart": 0,
+          "charEnd": 86,
+          "text": "The heron scheduler pins worker processes to cores and rotates the pinning every hour."
+        },
+        {
+          "docId": "doc-heron",
+          "version": 2,
+          "chunkId": "heron-2-1",
+          "charStart": 87,
+          "charEnd": 220,
+          "text": "Version two added a drain mode so a pinned worker finishes its current job before rotation. Drain mode is enabled with heron --drain."
+        },
+        {
+          "docId": "doc-tern",
+          "version": 1,
+          "chunkId": "tern-1-0",
+          "charStart": 0,
+          "charEnd": 186,
+          "text": "The tern cache keeps recently read pages in memory and evicts the least recently used page when the cache is full. A page that is read again within an hour is kept regardless of its age."
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "name": "direct match",
+      "query": "how often does the osprey relay flush writes",
+      "filters": {},
+      "topDocId": "doc-osprey",
+      "topChunkId": "osprey-1-0"
+    },
+    {
+      "name": "paraphrase with no shared title, domain or author words",
+      "query": "scheduler that finishes the running job before moving a worker to another core",
+      "filters": {},
+      "topDocId": "doc-heron",
+      "topChunkId": "heron-2-1"
+    },
+    {
+      "name": "site filter excludes the match",
+      "query": "how often does the osprey relay flush writes",
+      "filters": {
+        "site": "docs.example.test"
+      },
+      "topDocId": "doc-heron",
+      "mustNotContainDocId": "doc-osprey"
+    },
+    {
+      "name": "capturedAfter filter",
+      "query": "cache eviction of least recently used pages",
+      "filters": {
+        "capturedAfter": "2026-09-23T00:00:00Z"
+      },
+      "topDocId": "doc-tern"
+    },
+    {
+      "name": "wrong library returns nothing",
+      "query": "osprey relay flush",
+      "filters": {
+        "libraryId": "no-such-library"
+      },
+      "empty": true
+    }
+  ],
+  "getCases": [
+    {
+      "docId": "doc-heron",
+      "locator": {
+        "docId": "doc-heron",
+        "version": 2,
+        "charStart": 87,
+        "charEnd": 220
+      },
+      "expectText": "Version two added a drain mode so a pinned worker finishes its current job before rotation. Drain mode is enabled with heron --drain."
+    },
+    {
+      "docId": "doc-missing",
+      "locator": {
+        "docId": "doc-missing",
+        "version": 1,
+        "charStart": 0,
+        "charEnd": 10
+      },
+      "expectError": true
+    }
+  ]
+}

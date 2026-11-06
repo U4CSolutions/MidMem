@@ -11,6 +11,9 @@
  *   node bin/hook.mjs post  --kind correction --task "..." ...   → records a work-memory event
  *   node bin/hook.mjs tasks                                      → prints ongoing requests (JSON)
  *
+ * Project axis (#18): `--project <slug>` on pre (filter: project + global) and post (tag); the
+ * MIDMEM_PROJECT env is the per-caller default, so a harness sets it once and never passes it.
+ *
  * `pre` writes ONLY the inject text to stdout (empty when nothing clears the threshold), so a hook
  * can splice the result straight into the model's context. Diagnostics/JSON go to stderr.
  */
@@ -32,6 +35,7 @@ try {
       minScore: flags.minScore != null ? Number(flags.minScore) : undefined,
       maxTokens: flags.maxTokens != null ? Number(flags.maxTokens) : undefined,
       scopes: flags.scopes?.split(','), force: !!flags.force,
+      ...(flags['all-projects'] ? { projects: null } : typeof flags.projects === 'string' ? { projects: flags.projects.split(',') } : typeof flags.project === 'string' ? { project: flags.project } : {}),
     });
     if (r.inject) process.stdout.write(r.inject + '\n');
     process.stderr.write(`[midmem hook pre] injected=${r.used?.length || 0} topScore=${r.topScore}\n`);
@@ -40,12 +44,13 @@ try {
       kind: flags.kind, task: flags.task, content: flags.content || (pos.join(' ') || undefined),
       outcome: flags.outcome, status: flags.status, source: flags.source, artifact: flags.artifact,
       profile: flags.profile, related: flags.related, scope: flags.scope,
+      ...(typeof flags.project === 'string' ? { project: flags.project } : {}),
     });
     process.stderr.write(`[midmem hook post] ${JSON.stringify(r)}\n`);
   } else if (mode === 'tasks') {
     process.stdout.write(JSON.stringify(o.openTasks(), null, 2) + '\n');
   } else {
-    process.stderr.write('Usage: hook.mjs <pre "<msg>" | post --kind <type> --task "..." [--outcome --source --artifact --status] | tasks>\n');
+    process.stderr.write('Usage: hook.mjs <pre "<msg>" [--project <slug>|--projects a,b|--all-projects] | post --kind <type> --task "..." [--outcome --source --artifact --status --project <slug>] | tasks>\n');
     process.exitCode = 2;
   }
 } catch (e) { process.stderr.write(`[midmem hook] ERROR: ${e.message}\n`); process.exitCode = 1; }

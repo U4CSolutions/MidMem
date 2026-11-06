@@ -92,6 +92,7 @@ export function projectVault(db, memory, graph, cfg, { force = false } = {}) {
       id: e.id, tier: e.tier, type: e.type, status: e.status,
       created: e.created_at, updated: e.updated_at, owner: 'llm',
       source: e.source_id || undefined,
+      project: e.project || undefined,
     });
     const body = [
       fm, '', `# ${e.type}: ${e.id}`, '', e.content, '',

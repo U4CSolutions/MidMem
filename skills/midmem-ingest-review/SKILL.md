@@ -21,6 +21,15 @@ agreement**, never by asking a model "is this right?"
   `claimsKept/Quarantined`). Flags: low `summaryScore` (≲0.4) → the summary drifted from the source;
   heavy quarantine → the extractor confabulated. Investigate the source/extraction before trusting it.
 - Finish editing a source BEFORE ingesting (mid-edit saves mint duplicates). Re-ingest supersedes.
+- **A multi-paper digest (a weekly report, one `###` per paper) is ingested with `--sections`:** every
+  section that cites exactly one URL becomes its own grounded entry keyed by the canonical citation
+  (arXiv ids normalised, versions stripped), so a paper cited again next week supersedes its earlier
+  entry; the digest entry stays as the index. Without it a six-paper report yields one short summary
+  and about one claim, and a paper can be absent from the store by name (2026-10-05: MemAgent, at a
+  grounding score of 0.864).
+- **After the ingest, search the store for the named entities and key numbers the source carries**
+  (`midmem claims "<name>"`, a `query`): the grounding score measures the summary against the
+  source, not what the summary left out.
 
 ## Review / audit the store
 - **`midmem brief`** — tier distribution, vector health (dim, fallback count), recent ops.
@@ -32,9 +41,12 @@ agreement**, never by asking a model "is this right?"
 The store is shared but each stack reads **its own scope + `shared`**. To compare what each
 *understands* about a topic, run the same query under each lens and diff:
 ```
-midmem query "<topic>" --scopes openclaw,shared   # what OpenClaw can surface
-midmem query "<topic>" --scopes hermes,shared     # what Hermes can surface
+midmem query "<topic>" --scopes openclaw,shared --audit   # what OpenClaw can surface
+midmem query "<topic>" --scopes hermes,shared --audit     # what Hermes can surface
 ```
+`--audit` (2026-10-12) reads without renewing leases or counting retrievals: a review's own queries
+must not count as usage, or the audit keeps alive the content-free rows it keeps surfacing.
+
 Then assess:
 - **Divergence** — entries one stack has and the other doesn't (private-scope knowledge that should
   be `shared`? or stale to one side?).
@@ -51,7 +63,7 @@ topics; ungrounded/low-trust entries; and recommended actions. Distinguish **qua
 shared knowledge).
 
 ## Apply (safe vs flag)
-- **Safe, do with a note:** `midmem feedback <id> --helpful=false` to down-weight a bad entry;
+- **Safe, do with a note:** `midmem feedback <id> --unhelpful` to down-weight a bad entry;
   re-ingest a corrected source (supersede); `forget` (soft) a clearly-confabulated entry.
 - **Flag for the human:** contradictions needing a judgment call, scope re-classification of
   sensitive content, anything that changes canonical facts (MEMORY.md).

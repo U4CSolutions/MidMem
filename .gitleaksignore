@@ -1,0 +1,9 @@
+# gitleaks fingerprints (commit:file:rule:line) for test fixtures that only LOOK like secrets.
+# These five are the 2026-10-05/06 ingest-guard tests (secret-shaped titles / author values the guard
+# must refuse) as first committed; the live tree now uses zero-entropy fixture values, so later
+# commits need no entry here. Never add a fingerprint for a real credential — rotate it instead.
+03e431e895b5e9866de07a49196175a208a34b3f:packages/core/test/smoke.mjs:generic-api-key:2103
+03e431e895b5e9866de07a49196175a208a34b3f:packages/core/test/smoke.mjs:generic-api-key:2109
+03e431e895b5e9866de07a49196175a208a34b3f:packages/core/test/smoke.mjs:generic-api-key:2119
+03e431e895b5e9866de07a49196175a208a34b3f:packages/core/test/smoke.mjs:generic-api-key:2138
+92ac9e75fbc5fe6dcb5cd03d206c84aa668d9bd6:packages/core/test/smoke.mjs:generic-api-key:2297

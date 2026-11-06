@@ -4,6 +4,12 @@
  */
 import { genId, nowISO, json } from './util.mjs';
 import { functionForType, MEMORY_FUNCTIONS } from './workmemory.mjs';
+import { normalizeProject, projectClause } from './projectaxis.mjs';
+
+/** The trust nudges of one vote (FEEDBACK_TRUST_DELTAS in entrystatus.mjs reports them; the smoke test asserts
+ *  the two agree). A favorite counts as one helpful vote. */
+export const HELPFUL_TRUST_DELTA = 0.05;
+const UNHELPFUL_TRUST_DELTA = -0.10;
 
 export class TieredMemory {
   /** @param {import('./db.mjs').StateDB} db @param {object} cfg */
@@ -12,6 +18,16 @@ export class TieredMemory {
     this.cfg = cfg;
     this.vectorStore = vectorStore; // pluggable: sqlite (default) | qdrant
     this.tierNames = cfg.tiers.map((t) => t.name);
+    /** Lease resolver (#47 fix): `({ type, tier }) => ttlMs | null`. When set, an entry's lease
+     *  (first lease without an explicit ttlMs, and every retrieval renewal) comes from it before
+     *  the tier TTL. The orchestrator wires it to the capture packs' `ttlDays`. */
+    this.leaseResolver = null;
+  }
+
+  /** The resolver's lease for a row, or null (absent resolver, or a non-positive/NaN answer). */
+  #resolvedLease(type, tier) {
+    const v = this.leaseResolver?.({ type, tier });
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null;
   }
 
   tier(name) { return this.cfg.tiers.find((t) => t.name === name); }
@@ -20,21 +36,34 @@ export class TieredMemory {
    * Store an entry (single transactional write to entries; vector set separately).
    * @returns {{id:string, rowid:number, tier:string}}
    */
-  store({ content, type = 'note', tier = 'memory', scope = 'shared', sourceId = null, provenance = null, concepts = null, memFunction = null }) {
+  store({ content, type = 'note', tier = 'memory', scope = 'shared', sourceId = null, provenance = null, concepts = null, memFunction = null, project = null, ttlMs = null }) {
     const tc = this.tier(tier);
     if (!tc) throw new Error(`unknown tier: ${tier}`);
     const fn = memFunction || functionForType(type);
+    const proj = normalizeProject(project); // null = global
     if (!MEMORY_FUNCTIONS.includes(fn)) throw new Error(`unknown memory function: ${fn} (expected: ${MEMORY_FUNCTIONS.join('|')})`);
     const id = genId(tier, content.slice(0, 80) + type + Date.now());
     const ts = nowISO();
-    const expiresAt = tc.ttl ? new Date(Date.now() + tc.ttl).toISOString() : null;
+    let expiresAt = tc.ttl ? new Date(Date.now() + tc.ttl).toISOString() : null;
+    // Pack-declared lease (#47): an explicit ttlMs replaces the tier TTL for this entry's first
+    // lease; without one, the lease resolver (the pack's ttlDays for this type/tier) is asked
+    // before the tier TTL. Retrieval renewal asks the same resolver; promotion applies the
+    // destination tier's TTL.
+    const lease = typeof ttlMs === 'number' && Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : this.#resolvedLease(type, tier);
+    if (lease) expiresAt = new Date(Date.now() + lease).toISOString();
+    // Lifecycle class (#44): a `working` entry is context-assembly state — lease-bound to the
+    // working TTL whatever its tier, so a transient note can never outlive the task that wrote it.
+    if (fn === 'working') {
+      const cap = new Date(Date.now() + (this.cfg.lifecycle?.workingTtlMs ?? 24 * 3600e3)).toISOString();
+      expiresAt = expiresAt && expiresAt < cap ? expiresAt : cap;
+    }
     const info = this.db.prepare(`
-      INSERT INTO entries(id,tier,type,content,source_id,provenance,concepts,status,scope,created_at,updated_at,expires_at,mem_function)
-      VALUES(?,?,?,?,?,?,?, 'active', ?,?,?,?,?)
+      INSERT INTO entries(id,tier,type,content,source_id,provenance,concepts,status,scope,created_at,updated_at,expires_at,mem_function,project)
+      VALUES(?,?,?,?,?,?,?, 'active', ?,?,?,?,?,?)
     `).run(id, tier, type, content, sourceId,
       provenance ? JSON.stringify(provenance) : null,
-      concepts ? JSON.stringify(concepts) : null, scope, ts, ts, expiresAt, fn);
-    return { id, rowid: Number(info.lastInsertRowid), tier, scope, memFunction: fn };
+      concepts ? JSON.stringify(concepts) : null, scope, ts, ts, expiresAt, fn, proj);
+    return { id, rowid: Number(info.lastInsertRowid), tier, scope, memFunction: fn, project: proj };
   }
 
   async upsertVector(entryId, embedding, model, mode = 'unknown') {
@@ -52,23 +81,26 @@ export class TieredMemory {
 
   /** Bump retrieval_count + last_accessed_at for entries that were returned (usage signal).
    *  When maintenance.refreshOnAccess is on, retrieval also RENEWS the entry's lease
-   *  (expires_at = now + tier TTL): entries that keep getting used keep living;
-   *  entries nobody asks about expire on their tier's TTL (decay-by-disuse). */
+   *  (expires_at = now + lease): the lease resolver's answer for the row's type/tier (a pack's
+   *  ttlDays) when it has one, else the tier TTL. Entries that keep getting used keep living;
+   *  entries nobody asks about expire on their lease (decay-by-disuse). */
   recordRetrieval(ids) {
     if (!ids?.length) return;
     const ts = nowISO();
     const refresh = this.cfg.maintenance?.refreshOnAccess !== false;
-    // One tier lookup + one transaction for the whole batch (this runs on every query).
+    // One row lookup + one transaction for the whole batch (this runs on every query).
     const ph = ids.map(() => '?').join(',');
-    const tiers = new Map(this.db.prepare(`SELECT id, tier FROM entries WHERE id IN (${ph})`).all(...ids).map((r) => [r.id, r.tier]));
+    const rows = new Map(this.db.prepare(`SELECT id, tier, type FROM entries WHERE id IN (${ph})`).all(...ids).map((r) => [r.id, r]));
     const bump = this.db.prepare('UPDATE entries SET retrieval_count = retrieval_count + 1, last_accessed_at = ? WHERE id = ?');
     const renew = this.db.prepare('UPDATE entries SET expires_at = ? WHERE id = ?');
     this.db.tx(() => {
       for (const id of ids) {
         bump.run(ts, id);
         if (!refresh) continue;
-        const tier = this.tier(tiers.get(id));
-        if (tier?.ttl) renew.run(new Date(Date.now() + tier.ttl).toISOString(), id);
+        const row = rows.get(id);
+        if (!row) continue;
+        const ttl = this.#resolvedLease(row.type, row.tier) ?? this.tier(row.tier)?.ttl;
+        if (ttl > 0) renew.run(new Date(Date.now() + ttl).toISOString(), id);
       }
     });
   }
@@ -77,10 +109,35 @@ export class TieredMemory {
   recordFeedback(id, helpful = true) {
     const e = this.db.prepare('SELECT trust_score FROM entries WHERE id=?').get(id);
     if (!e) return { success: false, message: `not found: ${id}` };
-    const trust = Math.max(0, Math.min(1, (e.trust_score ?? 0.5) + (helpful ? 0.05 : -0.10)));
+    const trust = Math.max(0, Math.min(1, (e.trust_score ?? 0.5) + (helpful ? HELPFUL_TRUST_DELTA : UNHELPFUL_TRUST_DELTA)));
     this.db.prepare('UPDATE entries SET helpful_count = helpful_count + ?, trust_score = ?, updated_at = ? WHERE id = ?')
       .run(helpful ? 1 : 0, trust, nowISO(), id);
     return { success: true, id, trust_score: Number(trust.toFixed(3)), helpful };
+  }
+
+  /** Favorite (schema 6): a favorite counts as ONE helpful vote — helpful_count + 1, trust + the helpful delta
+   *  (clamped), recorded in favorite_helpful — and `on = false` takes back exactly that vote (helpful_count − 1,
+   *  never below 0; trust − the delta, clamped); explicit votes stay. Idempotent: each write is ONE conditional
+   *  UPDATE, so a repeat or a concurrent twin changes nothing and the vote lands once, and it is safe inside a
+   *  caller's transaction (ingest's carry-over). Metadata only — updated_at, the lease and the other counters are
+   *  untouched — so an unfavorite leaves the row as it was before the favorite (trust clamping aside).
+   *  `activeOnly` refuses a row that stopped being active before the UPDATE ran (the CLI's check-then-act).
+   *  → { success, id, favorite, helpful_count, trust_score, changed } | { success:false, reason, id[, status] } */
+  setFavorite(id, on = true, { activeOnly = false } = {}) {
+    const live = activeOnly ? " AND status = 'active'" : '';
+    const [row] = on
+      ? this.db.prepare(`UPDATE entries SET favorite = 1, favorite_helpful = 1,
+          helpful_count = CASE WHEN favorite_helpful = 1 THEN helpful_count ELSE helpful_count + 1 END,
+          trust_score = CASE WHEN favorite_helpful = 1 THEN trust_score ELSE MIN(1.0, MAX(0.0, trust_score + ?)) END
+          WHERE id = ? AND favorite = 0${live} RETURNING favorite, helpful_count, trust_score`).all(HELPFUL_TRUST_DELTA, id)
+      : this.db.prepare(`UPDATE entries SET favorite = 0, favorite_helpful = 0,
+          helpful_count = CASE WHEN favorite_helpful = 1 THEN MAX(0, helpful_count - 1) ELSE helpful_count END,
+          trust_score = CASE WHEN favorite_helpful = 1 THEN MIN(1.0, MAX(0.0, trust_score - ?)) ELSE trust_score END
+          WHERE id = ? AND (favorite = 1 OR favorite_helpful = 1)${live} RETURNING favorite, helpful_count, trust_score`).all(HELPFUL_TRUST_DELTA, id);
+    const r = row ?? this.db.prepare('SELECT favorite, helpful_count, trust_score, status FROM entries WHERE id = ?').get(id);
+    if (!r) return { success: false, reason: 'not-found', id };
+    if (!row && activeOnly && r.status !== 'active') return { success: false, reason: 'not-active', id, status: r.status };
+    return { success: true, id, favorite: r.favorite === 1, helpful_count: r.helpful_count, trust_score: Number((r.trust_score ?? 0.5).toFixed(3)), changed: !!row };
   }
 
   /** Vector store health: canonical dim (dim-guard) + backend-specific counts.
@@ -96,27 +153,37 @@ export class TieredMemory {
     return r ? this.#hydrate(r) : null;
   }
 
-  /** Active entries, optionally filtered by tier and scope. Expired-but-unswept
-   *  entries are excluded — an expired lease is dead even before maintenance runs. */
-  listActive({ tiers = this.tierNames, scopes = null } = {}) {
-    const conds = ["status='active'", '(expires_at IS NULL OR expires_at > ?)', `tier IN (${tiers.map(() => '?').join(',')})`];
-    const params = [nowISO(), ...tiers];
+  /** Entries filtered by tier, scope and project (project + global rule) and — roadmap #43 —
+   *  by status: default `['active']` (expired-but-unswept excluded — an expired lease is dead even
+   *  before maintenance runs); `statuses:['active','archived']` is the historical read, where the
+   *  lease rule applies to active rows only; `asOf` keeps rows that existed at that time. */
+  listActive({ tiers = this.tierNames, scopes = null, projects = null, statuses = null, asOf = null } = {}) {
+    const st = statuses && statuses.length ? statuses : ['active'];
+    const conds = [`status IN (${st.map(() => '?').join(',')})`, "(status != 'active' OR expires_at IS NULL OR expires_at > ?)", `tier IN (${tiers.map(() => '?').join(',')})`];
+    const params = [...st, nowISO(), ...tiers];
+    if (asOf) { conds.push('created_at <= ?'); params.push(asOf); }
     if (scopes && scopes.length) { conds.push(`scope IN (${scopes.map(() => '?').join(',')})`); params.push(...scopes); }
+    const pc = projectClause('project', projects);
+    if (pc) { conds.push(pc.sql); params.push(...pc.params); }
     return this.db.prepare(`SELECT * FROM entries WHERE ${conds.join(' AND ')}`).all(...params).map((r) => this.#hydrate(r));
   }
 
   /** Map of rowid → entry for a tier/scope set (used by retrieval to join FTS hits). */
-  rowidMap(tiers = this.tierNames, scopes = null) {
+  rowidMap(tiers = this.tierNames, scopes = null, projects = null, statuses = null, asOf = null) {
     const m = new Map();
-    for (const e of this.listActive({ tiers, scopes })) m.set(e.rowid, e);
+    for (const e of this.listActive({ tiers, scopes, projects, statuses, asOf })) m.set(e.rowid, e);
     return m;
   }
 
-  /** Vectors for active entries in the given tiers/scopes: [{id, tier, vector}]. */
-  activeVectors(tiers = this.tierNames, scopes = null) {
-    const conds = ["e.status='active'", '(e.expires_at IS NULL OR e.expires_at > ?)', `e.tier IN (${tiers.map(() => '?').join(',')})`];
-    const params = [nowISO(), ...tiers];
+  /** Vectors for entries in the given tiers/scopes/projects/statuses: [{id, tier, vector}]. */
+  activeVectors(tiers = this.tierNames, scopes = null, projects = null, statuses = null, asOf = null) {
+    const st = statuses && statuses.length ? statuses : ['active'];
+    const conds = [`e.status IN (${st.map(() => '?').join(',')})`, "(e.status != 'active' OR e.expires_at IS NULL OR e.expires_at > ?)", `e.tier IN (${tiers.map(() => '?').join(',')})`];
+    const params = [...st, nowISO(), ...tiers];
+    if (asOf) { conds.push('e.created_at <= ?'); params.push(asOf); }
     if (scopes && scopes.length) { conds.push(`e.scope IN (${scopes.map(() => '?').join(',')})`); params.push(...scopes); }
+    const pc = projectClause('e.project', projects);
+    if (pc) { conds.push(pc.sql); params.push(...pc.params); }
     return this.db.prepare(`
       SELECT v.entry_id id, e.tier tier, v.embedding emb
       FROM vectors v JOIN entries e ON e.id = v.entry_id
@@ -127,11 +194,21 @@ export class TieredMemory {
   promote(id, toTier) {
     const tc = this.tier(toTier);
     if (!tc) throw new Error(`unknown tier: ${toTier}`);
-    const r = this.db.prepare('SELECT id FROM entries WHERE id=?').get(id);
+    const r = this.db.prepare('SELECT id, project, provenance FROM entries WHERE id=?').get(id);
     if (!r) return { success: false, message: `not found: ${id}` };
     // Single write (one FTS trigger pass); expires_at follows the destination tier's TTL
     // so e.g. a fact promoted to wisdom doesn't carry its 7-day expiry along.
     const expiresAt = tc.ttl ? new Date(Date.now() + tc.ttl).toISOString() : null;
+    // Project lift (roadmap #18): a project-tagged entry earning a curated-only tier becomes
+    // GLOBAL — that tier is the cross-project lesson set. Lineage is kept (provenance.liftedFrom)
+    // so the source project is never lost. Deterministic; off via projectAxis.liftOnCurated=false.
+    const lift = this.cfg.projectAxis?.liftOnCurated !== false && tc.curatedOnly && r.project != null;
+    if (lift) {
+      const prov = { ...json(r.provenance, {}), liftedFrom: { project: r.project, tier: toTier, at: nowISO() } };
+      this.db.prepare("UPDATE entries SET tier=?, status='active', expires_at=?, updated_at=?, project=NULL, provenance=? WHERE id=?")
+        .run(toTier, expiresAt, nowISO(), JSON.stringify(prov), id);
+      return { success: true, message: `promoted ${id} → ${toTier} (lifted from project '${r.project}' to global)`, liftedFrom: r.project };
+    }
     this.db.prepare("UPDATE entries SET tier=?, status='active', expires_at=?, updated_at=? WHERE id=?")
       .run(toTier, expiresAt, nowISO(), id);
     return { success: true, message: `promoted ${id} → ${toTier}` };
@@ -180,7 +257,8 @@ export class TieredMemory {
       if (!tc.autoPromote || !next[tc.name]) continue;
       const target = this.tier(next[tc.name]);
       const rule = target.curatedOnly ? maint.wisdomPromote : maint.factPromote;
-      const conds = ["status='active'", 'tier = ?'];
+      // Lifecycle class (#44): working entries are never promotion candidates, whatever their counts.
+      const conds = ["status='active'", 'tier = ?', "(mem_function IS NULL OR mem_function != 'working')"];
       const params = [tc.name];
       if (target.curatedOnly) {
         conds.push('retrieval_count >= ?', 'trust_score >= ?', 'helpful_count >= ?');
@@ -213,6 +291,12 @@ export class TieredMemory {
     for (const t of this.tierNames) out[t] = 0;
     for (const r of rows) out[r.tier] = r.c;
     return out;
+  }
+
+  /** Active-entry counts per project (roadmap #18 open-project listing); `null` key = global. */
+  projectStats() {
+    const rows = this.db.prepare("SELECT project, COUNT(*) c FROM entries WHERE status='active' GROUP BY project ORDER BY c DESC").all();
+    return rows.map((r) => ({ project: r.project ?? null, entries: r.c }));
   }
 
   #hydrate(r) {

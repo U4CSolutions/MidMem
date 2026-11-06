@@ -56,6 +56,52 @@ export function defaultPolicies(cfg) {
       },
     },
     {
+      // Lifecycle class (roadmap #44): `working` is context-assembly state and never climbs tiers —
+      // the documented contract, now enforced on the manual path too (auto-promotion filters it out).
+      name: 'working-never-promotes',
+      applies: (op) => op === 'promote',
+      check: (_op, ctx) => (ctx.memFunction === 'working')
+        ? { allow: false, reason: "memory function 'working' is lease-bound context state; it cannot be promoted" }
+        : { allow: true },
+    },
+    {
+      // Governed reclassification (2026-09-23): a stack scope may reclassify only rows in its own
+      // scope or 'shared', and may only move them into its own scope or 'shared' — it can never pull
+      // another stack's private rows out, nor push rows into another stack's private scope.
+      // 'shared' (admin/bridge) may reclassify anything.
+      name: 'reclassify-scope-write',
+      applies: (op) => op === 'rescope' || op === 'authority-lower',
+      check: (op, ctx) => {
+        if (cfg.agentScope === 'shared') return { allow: true };
+        const ok = (s) => s === cfg.agentScope || s === 'shared';
+        const touched = [...(ctx.fromScopes || []), ...(op === 'rescope' && ctx.to ? [ctx.to] : [])];
+        const bad = [...new Set(touched.filter((s) => !ok(s)))];
+        return bad.length ? { allow: false, reason: `agent '${cfg.agentScope}' cannot reclassify rows in private scope(s): ${bad.join(', ')}` } : { allow: true };
+      },
+    },
+    {
+      // Archive by id (2026-10-05): the same boundary as reclassification — a stack scope may archive
+      // only rows in its own scope or 'shared'; 'shared' (admin/bridge) may archive anything.
+      // ctx.fromScopes = the scopes of every row the ids matched.
+      name: 'archive-scope-write',
+      applies: (op) => op === 'archive-entries',
+      check: (_op, ctx) => {
+        if (cfg.agentScope === 'shared') return { allow: true };
+        const bad = [...new Set((ctx.fromScopes || []).filter((s) => s !== cfg.agentScope && s !== 'shared'))];
+        return bad.length ? { allow: false, reason: `agent '${cfg.agentScope}' cannot archive rows in private scope(s): ${bad.join(', ')}` } : { allow: true };
+      },
+    },
+    {
+      // Authority is assigned at origin and can never be RAISED downstream (roadmap #10). This op is
+      // the governed way to correct an over-labelled origin DOWNWARD; raising stays impossible here —
+      // it requires a curated re-ingest, which the operator-authority policy already gates.
+      name: 'authority-lower-only',
+      applies: (op) => op === 'authority-lower',
+      check: (_op, ctx) => (ctx.raising > 0)
+        ? { allow: false, reason: `authority can only be lowered — ${ctx.raising} selected row(s) would be raised to '${ctx.to}'` }
+        : { allow: true },
+    },
+    {
       name: 'scope-write',
       applies: (op) => op === 'store' || op === 'ingest' || op === 'promote',
       check: (_op, ctx) => {
@@ -65,6 +111,15 @@ export function defaultPolicies(cfg) {
           ? { allow: true }
           : { allow: false, reason: `agent '${cfg.agentScope}' cannot write to private scope '${target}'` };
       },
+    },
+    {
+      // Provenance-laundering guard (roadmap #10): 'operator' is the one authority level that
+      // cannot be claimed by an ordinary write — it must arrive through explicit curation.
+      name: 'operator-authority-curated',
+      applies: (op) => op === 'store' || op === 'ingest',
+      check: (_op, ctx) => (ctx.authority === 'operator' && ctx.curated !== true)
+        ? { allow: false, reason: "authority 'operator' requires curated:true" }
+        : { allow: true },
     },
     {
       name: 'hard-delete-guard',

@@ -23,7 +23,7 @@ middleware memory layer for LLM agents.
 
 ```bash
 cd packages/core
-node test/smoke.mjs   # end-to-end self-test (offline) -> expect 90/90
+node test/smoke.mjs   # end-to-end self-test (offline) -> expect 163/163
 npm run verify        # smoke + Brain-style regression bench
 ```
 

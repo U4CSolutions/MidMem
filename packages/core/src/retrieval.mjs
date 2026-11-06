@@ -8,17 +8,134 @@
  *
  * (Ideas adapted from memory-os: trust scoring, two-pass ref-chain boost, token budget.)
  */
-import { ftsMatchExpr } from './util.mjs';
+import { ftsMatchExpr, tokenize } from './util.mjs';
 import { functionForType } from './workmemory.mjs';
 import { conceptSeedsFromVector } from './concepts.mjs';
+import { authorityRank, AUTHORITY_LEVELS } from './authority.mjs';
+import { projectClause, matchesProject } from './projectaxis.mjs';
+import { instructionLikeness, entryInstructionLikeness, fidelityClass, selectBounded } from './recallpolicy.mjs';
+import { contentWords } from './grounding.mjs';
+import { HELPFUL_TRUST_DELTA } from './memory.mjs';
 
-/** One FTS lane (token or trigram), scope/tier filtered. Returns ranked entry ids.
+/** Library-lane report per result array (roadmap #49): which providers were asked and how many rows
+ *  came back. Kept off the array itself so result shapes stay unchanged; read by progressiveSearch. */
+const LIBRARY_REPORT = new WeakMap();
+
+/** A configured ranking boost: a finite positive number, else 0 (off) — a typo in an env knob never scores NaN. */
+const boostWeight = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
+
+/** Script classes for coverage words: Latin, digits, scripts written without spaces between words (their letters
+ *  count one by one AND in pairs — Han, kana, Thai, Lao, Khmer, Myanmar, and Hangul, whose particles attach to the
+ *  word), and every other script. */
+const UNSPACED_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}\p{Script=Hangul}]/u;
+const LATIN_SCRIPT = /\p{Script=Latin}/u;
+const DIGIT = /\p{N}/u;
+const scriptClass = (ch) => (DIGIT.test(ch) ? 'N' : LATIN_SCRIPT.test(ch) ? 'L' : UNSPACED_SCRIPT.test(ch) ? 'U' : 'O');
+/** Question and reporting words that name no topic (on top of grounding's English stopwords): in "what did the
+ *  minister say about the tariffs" only minister / tariffs are words an entry can share with the question. */
+const QUESTION_WORDS = new Set(['what', 'when', 'where', 'which', 'who', 'whom', 'whose', 'why', 'how', 'say', 'says', 'said', 'tell', 'tells', 'told', 'they', 'them', 'there', 'here', 'also', 'just', 'very']);
+const latinWords = (seg, out) => {
+  if (/^[a-z0-9]+$/.test(seg)) { for (const w of contentWords(seg)) if (!QUESTION_WORDS.has(w)) out.push(w); }
+  else if ([...seg].length > 2) out.push(seg); // a Latin letter with no ASCII base (ß, ø, æ, ł)
+};
+
+/**
+ * The words a favorite's gate and relevance guard compare (2026-10-21 reviews). ASCII text takes the fast path:
+ * grounding.mjs contentWords (lowercase alphanumeric runs > 2 characters, English stopwords out) minus question
+ * words. Anything else is NFKC-folded and lowercased; Latin letters lose their diacritics (café = cafe, as FTS
+ * unicode61 folds them; Turkish İ → i) while other scripts keep their marks (kana voicing, Cyrillic й are letters
+ * there); \p{L}\p{N} runs are split at script boundaries (iphone手机 → iphone + 手机; digits stay with Latin). A
+ * Latin run follows the ASCII rules; a run of an unspaced script counts each character AND each adjacent pair (a
+ * one-character word matches, and so does 학교 inside 학교에서); any other script's run counts from 2 code points
+ * (its single letters are mostly prepositions and conjunctions). Deterministic; grounding keeps its own words.
+ */
+export function coverageWords(s) {
+  const text = String(s ?? '');
+  const out = [];
+  if (!/[^\x00-\x7f]/.test(text)) { for (const w of contentWords(text)) if (!QUESTION_WORDS.has(w)) out.push(w); return out; }
+  const folded = text.normalize('NFKC').toLowerCase().normalize('NFKD').replace(/(\p{Script=Latin})\p{M}+/gu, '$1').normalize('NFC');
+  for (const run of folded.match(/[\p{L}\p{N}]+/gu) || []) {
+    if (!/[^\x00-\x7f]/.test(run)) { latinWords(run, out); continue; } // most runs of a web page: no per-character work
+    let seg = '', cls = 'N';
+    const flush = () => {
+      if (!seg) return;
+      if (cls === 'L' || cls === 'N') latinWords(seg, out);
+      else if (cls === 'U') { const ch = [...seg]; for (let i = 0; i < ch.length; i++) { out.push(ch[i]); if (i + 1 < ch.length) out.push(ch[i] + ch[i + 1]); } }
+      else if ([...seg].length >= 2) out.push(seg);
+      seg = '';
+    };
+    for (const ch of run) {
+      const k = scriptClass(ch);
+      const joins = !seg || k === cls || (k === 'N' && cls === 'L') || (cls === 'N' && (k === 'L' || k === 'N'));
+      if (!joins) flush();
+      if (!seg) cls = k; else if (cls === 'N' && k === 'L') cls = 'L';
+      seg += ch;
+    }
+    flush();
+  }
+  return out;
+}
+
+/** The share of `words` (a query's distinct coverage words) an entry's content holds, memoized per candidate. */
+function coverageMeter(words) {
+  const memo = new Map();
+  return (c) => {
+    if (!memo.has(c)) {
+      if (!words.length) memo.set(c, 0);
+      else { const have = new Set(coverageWords(c.entry.content)); memo.set(c, words.filter((w) => have.has(w)).length / words.length); }
+    }
+    return memo.get(c);
+  };
+}
+
+/**
+ * The favorites' relevance guard (2026-10-21; see hybridSearch). `favs` = [{ c, lift }]: each favorite candidate
+ * and the part of its score that being a favorite added (its boosts and the trust of its own vote), so `score −
+ * lift` is its score as a non-favorite. A favorite whose lift carried it past a candidate holding a larger share
+ * of the query's coverage words is held below the lowest such candidate (its cap) — never below its score as a
+ * non-favorite, so starring never lowers an entry. Coverage levels run from the highest down, so a favorite that
+ * holds back a weaker one is final before it is compared; favorites held under one cap keep their unguarded order
+ * (favorite + helpful above a favorite, the more relevant above the less), packed in a band just under the cap.
+ */
+function holdFavoritesBelowBetterMatches(cand, favs, coverage) {
+  const levels = [...new Set(favs.map((f) => coverage(f.c)))].sort((a, b) => b - a);
+  for (const level of levels) {
+    const held = new Map(); // cap → [{ c, base, unguarded }]
+    for (const { c: f, lift } of favs) {
+      if (coverage(f) !== level) continue;
+      const base = f.score - lift;
+      let cap = Infinity;
+      for (const c of cand) if (c !== f && c.score > base && c.score <= f.score && c.score < cap && coverage(c) > level) cap = c.score;
+      if (cap === Infinity) continue;
+      if (!held.has(cap)) held.set(cap, []);
+      held.get(cap).push({ c: f, base, unguarded: f.score });
+    }
+    for (const [cap, group] of held) placeUnderCap(cap, group);
+  }
+}
+
+/** Held favorites under one cap, in their unguarded order: strictly decreasing scores below `cap`, none below its
+ *  own base. The step is 1e-6, smaller when the bases crowd the cap (then the band fits between them and the cap). */
+function placeUnderCap(cap, group) {
+  group.sort((a, b) => b.unguarded - a.unguarded);
+  const step = Math.min(1e-6, (cap - Math.max(...group.map((h) => h.base))) / (group.length + 1));
+  const floor = new Array(group.length);
+  for (let i = group.length - 1; i >= 0; i--) floor[i] = Math.max(group[i].base, i + 1 < group.length ? floor[i + 1] + step : -Infinity);
+  group.forEach((h, i) => { h.c.score = Math.max(floor[i], cap - step * (i + 1)); h.c.ranks.favoriteGuard = true; });
+}
+
+/** One FTS lane (token or trigram), scope/tier/project filtered. Returns ranked entry ids.
  *  Expired leases are filtered here too — decay holds even between maintenance sweeps. */
-function ftsLane(db, table, expr, tiers, scoped, limit = 200) {
+function ftsLane(db, table, expr, tiers, scoped, projects, statuses = ['active'], asOf = null, limit = 200) {
   if (!expr) return [];
-  const conds = ["e.status='active'", '(e.expires_at IS NULL OR e.expires_at > ?)', `e.tier IN (${tiers.map(() => '?').join(',')})`];
-  const params = [expr, new Date().toISOString(), ...tiers];
+  // Historical reads (#43): status set is a parameter; the lease rule applies to active rows only.
+  const st = statuses && statuses.length ? statuses : ['active'];
+  const conds = [`e.status IN (${st.map(() => '?').join(',')})`, "(e.status != 'active' OR e.expires_at IS NULL OR e.expires_at > ?)", `e.tier IN (${tiers.map(() => '?').join(',')})`];
+  const params = [expr, ...st, new Date().toISOString(), ...tiers];
+  if (asOf) { conds.push('e.created_at <= ?'); params.push(asOf); }
   if (scoped) { conds.push(`e.scope IN (${scoped.map(() => '?').join(',')})`); params.push(...scoped); }
+  const pc = projectClause('e.project', projects);
+  if (pc) { conds.push(pc.sql); params.push(...pc.params); }
   return db.prepare(`
     SELECT e.id id FROM ${table} JOIN entries e ON e.rowid = ${table}.rowid
     WHERE ${table} MATCH ? AND ${conds.join(' AND ')}
@@ -27,12 +144,58 @@ function ftsLane(db, table, expr, tiers, scoped, limit = 200) {
 }
 
 /** Filter vector-store candidate ids against live entries (state.db is the metadata authority). */
-function filterActiveIds(db, ids, tiers, scoped) {
+function filterActiveIds(db, ids, tiers, scoped, projects, statuses = ['active'], asOf = null) {
   if (!ids.length) return new Set();
-  const conds = [`id IN (${ids.map(() => '?').join(',')})`, "status='active'", '(expires_at IS NULL OR expires_at > ?)', `tier IN (${tiers.map(() => '?').join(',')})`];
-  const params = [...ids, new Date().toISOString(), ...tiers];
+  const st = statuses && statuses.length ? statuses : ['active'];
+  const conds = [`id IN (${ids.map(() => '?').join(',')})`, `status IN (${st.map(() => '?').join(',')})`, "(status != 'active' OR expires_at IS NULL OR expires_at > ?)", `tier IN (${tiers.map(() => '?').join(',')})`];
+  const params = [...ids, ...st, new Date().toISOString(), ...tiers];
+  if (asOf) { conds.push('created_at <= ?'); params.push(asOf); }
   if (scoped) { conds.push(`scope IN (${scoped.map(() => '?').join(',')})`); params.push(...scoped); }
+  const pc = projectClause('project', projects);
+  if (pc) { conds.push(pc.sql); params.push(...pc.params); }
   return new Set(db.prepare(`SELECT id FROM entries WHERE ${conds.join(' AND ')}`).all(...params).map((r) => r.id));
+}
+
+/**
+ * Metadata filters (roadmap #48): deterministic predicates over `provenance.source` (#46) and the
+ * entry type. Exact keys match the stored string (site/language lowercase-compared; author
+ * case-insensitive); the date keys compare parsed ISO times. A row with no `provenance.source`
+ * never matches any source filter. Unknown keys throw so a typo surfaces instead of silently
+ * returning everything.
+ */
+const FILTER_EXACT = ['libraryId', 'captureMethod', 'sourceUri', 'canonicalUri', 'docId'];
+const FILTER_LOWER = ['site', 'language', 'author'];
+const FILTER_DATES = { publishedAfter: ['publishedAt', 1], publishedBefore: ['publishedAt', -1], capturedAfter: ['capturedAt', 1], capturedBefore: ['capturedAt', -1] };
+const FILTER_KEYS = [...FILTER_EXACT, ...FILTER_LOWER, ...Object.keys(FILTER_DATES)];
+
+/** Validate opts.filters / opts.types once; returns a row predicate, or null when nothing filters. */
+function compileFilters(filters, types) {
+  const preds = [];
+  if (filters !== undefined && filters !== null) {
+    if (typeof filters !== 'object' || Array.isArray(filters)) throw new Error('query filters must be an object');
+    for (const k of Object.keys(filters)) if (!FILTER_KEYS.includes(k)) throw new Error(`unknown query filter: ${k}`);
+    for (const [k, v] of Object.entries(filters)) {
+      if (v === undefined || v === null) continue;
+      const want = String(v);
+      if (FILTER_EXACT.includes(k)) preds.push((src) => src?.[k] === want);
+      else if (FILTER_LOWER.includes(k)) { const lw = want.toLowerCase(); preds.push((src) => typeof src?.[k] === 'string' && src[k].toLowerCase() === lw); }
+      else {
+        const [field, dir] = FILTER_DATES[k];
+        const bound = Date.parse(want);
+        if (Number.isNaN(bound)) throw new Error(`query filter ${k} is not a parseable date: ${want}`);
+        preds.push((src) => { const t = Date.parse(src?.[field] ?? ''); return !Number.isNaN(t) && (dir > 0 ? t >= bound : t <= bound); });
+      }
+    }
+  }
+  const typeSet = Array.isArray(types) && types.length ? new Set(types.map(String)) : null;
+  if (!preds.length && !typeSet) return null;
+  return (entry) => {
+    if (typeSet && !typeSet.has(entry.type)) return false;
+    if (!preds.length) return true;
+    const src = entry.provenance?.source;
+    if (!src || typeof src !== 'object') return false;
+    return preds.every((p) => p(src));
+  };
 }
 
 /**
@@ -42,23 +205,49 @@ function filterActiveIds(db, ids, tiers, scoped) {
  */
 export async function hybridSearch(db, memory, embedder, query, opts = {}) {
   const { scopes = null, limit = 20, maxTokens = null, includeProvenance = true } = opts;
+  // Metadata filters (#48): validated before any lane runs, so an invalid filter costs nothing.
+  const metaFilter = compileFilters(opts.filters, opts.types);
   const tiers = (opts.tiers && opts.tiers.length) ? opts.tiers : memory.tierNames;
   const cfg = memory.cfg;
   const k = cfg.rrfK;
   const w = cfg.fusionWeights;
   const scoped = scopes && scopes.length ? scopes : null;
+  // Project axis (roadmap #18): a list means project + global; null means no partition filter.
+  const projects = Array.isArray(opts.projects) && opts.projects.length ? opts.projects : null;
+  // Historical reads (#43): current-only by default; historical:true = active + archived; an
+  // explicit statuses list wins. asOf keeps rows that existed at that time (created_at <= asOf).
+  const statuses = Array.isArray(opts.statuses) && opts.statuses.length ? opts.statuses : (opts.historical ? ['active', 'archived'] : ['active']);
+  const asOf = opts.asOf || null;
   const expr = ftsMatchExpr(query);
 
   // --- Lanes ---
+  // lexicalOnly (roadmap #11): the cheap first pass of progressive retrieval skips the embed
+  // call, the vector lane and concept routing entirely — FTS lanes + the deterministic boosts
+  // are all it pays for. Everything downstream (filters, boosts, budget) behaves identically.
+  const lexicalOnly = opts.lexicalOnly === true;
   const lanes = {
-    fts: ftsLane(db, 'entries_fts', expr, tiers, scoped),
-    trigram: ftsLane(db, 'entries_fts_trigram', expr, tiers, scoped),
+    fts: ftsLane(db, 'entries_fts', expr, tiers, scoped, projects, statuses, asOf),
+    trigram: ftsLane(db, 'entries_fts_trigram', expr, tiers, scoped, projects, statuses, asOf),
     vector: [],
   };
-  const { vector: qv } = await embedder.embed(query);
-  const vraw = await memory.vectorStore.search(qv, 400); // backend-ranked candidates (id+score)
-  const vAllowed = filterActiveIds(db, vraw.map((r) => r.id), tiers, scoped);
-  lanes.vector = vraw.filter((r) => vAllowed.has(r.id)).slice(0, 200).map((r) => r.id);
+  let qv = null;
+  if (!lexicalOnly) {
+    ({ vector: qv } = await embedder.embed(query, { retries: 0 })); // one attempt: a query never waits out the write-path retries
+    const vraw = await memory.vectorStore.search(qv, 400); // backend-ranked candidates (id+score)
+    const vAllowed = filterActiveIds(db, vraw.map((r) => r.id), tiers, scoped, projects, statuses, asOf);
+    lanes.vector = vraw.filter((r) => vAllowed.has(r.id)).slice(0, 200).map((r) => r.id);
+  }
+
+  // --- Library lane (roadmap #49): deep stage only. Registered external library systems are asked
+  //     for evidence here (never on the cheap lexical pass) and fused below as their own RRF lane.
+  //     Library rows are never stored, never tiered/trusted/promoted/decayed, never renewed. ---
+  let libRows = [];
+  let libQueried = [];
+  if (!lexicalOnly && opts.registry && cfg.library?.enabled !== false && opts.libraries !== false) {
+    const want = Array.isArray(opts.libraries) ? opts.libraries : null;
+    libQueried = opts.registry.list().map((l) => l.id).filter((id) => !want || want.includes(id));
+    libRows = await opts.registry.search(query, { limit: cfg.library?.limit ?? 8, filters: opts.filters || null, libraries: want });
+  }
 
   // --- Reciprocal Rank Fusion ---
   const fused = new Map();
@@ -74,13 +263,25 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
   //     communities into the candidate pool, so global/relational hits surface even without a direct
   //     lexical/vector match. Reuses the query vector qv (no extra embed, no per-query LLM). ---
   let conceptSeeds = new Set();
-  if (cfg.conceptRouting?.enabled !== false) {
+  if (cfg.conceptRouting?.enabled !== false && !lexicalOnly) {
     try { conceptSeeds = conceptSeedsFromVector(db, qv, cfg); } catch { conceptSeeds = new Set(); }
     for (const id of conceptSeeds) if (!fused.has(id)) fused.set(id, { score: 0, ranks: { concept: true } });
   }
 
   // Hydrate candidates once.
   let cand = [...fused.entries()].map(([id, m]) => ({ id, score: m.score, ranks: m.ranks, entry: memory.get(id) })).filter((c) => c.entry);
+  // Concept-routing seeds enter after the lane filters — re-apply the project rule (and the
+  // scope/tier filters the lanes already enforced) so a seed can never leak across a partition.
+  if (conceptSeeds.size) {
+    const tierSet = new Set(tiers);
+    cand = cand.filter((c) => !conceptSeeds.has(c.id) || c.ranks.fts || c.ranks.trigram || c.ranks.vector
+      || (matchesProject(c.entry, projects) && tierSet.has(c.entry.tier) && (!scoped || scoped.includes(c.entry.scope)) && statuses.includes(c.entry.status) && (!asOf || c.entry.created_at <= asOf)));
+  }
+  // Lifecycle class (#44): `working` is context-assembly state — excluded from reads unless the
+  // caller asks for that function explicitly (functions:['working']) or passes includeWorking.
+  if (!(opts.functions && opts.functions.includes('working')) && !opts.includeWorking) {
+    cand = cand.filter((c) => (c.entry.mem_function || functionForType(c.entry.type)) !== 'working');
+  }
 
   // --- Function-axis filter (survey 2607.25380): restrict to the requested memory ROLE(s).
   //     Legacy rows (null mem_function) resolve through the same deterministic type map, so
@@ -90,11 +291,37 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
     cand = cand.filter((c) => want.has(c.entry.mem_function || functionForType(c.entry.type)));
   }
 
+  // --- Metadata filters (roadmap #48): opts.types (entry type) + opts.filters (provenance.source
+  //     keys), AND-combined. Concept-routing seeds are already in `cand` after hydration, so the
+  //     same predicate covers them — a seed can never bypass a filter. ---
+  if (metaFilter) cand = cand.filter((c) => metaFilter(c.entry));
+
+  // --- Source-authority filter + boost (roadmap #10): an action-risky caller passes
+  //     minAuthority to exclude low-trust origins outright; otherwise authority nudges rank
+  //     around the 'doc' baseline (small, additive, same magnitude family as trust/graph).
+  //     Legacy entries without a label rank as 'doc'. ---
+  if (opts.minAuthority && AUTHORITY_LEVELS[opts.minAuthority]) {
+    const floor = AUTHORITY_LEVELS[opts.minAuthority];
+    cand = cand.filter((c) => authorityRank(c.entry.provenance?.authority) >= floor);
+  }
+  if (cfg.authority?.enabled !== false) {
+    const aw = cfg.authority?.boost ?? 0.002;
+    for (const c of cand) {
+      const rank = authorityRank(c.entry.provenance?.authority);
+      if (rank !== AUTHORITY_LEVELS.doc) { c.score += aw * (rank - AUTHORITY_LEVELS.doc); c.ranks.authority = c.entry.provenance?.authority; }
+    }
+  }
+
   // --- Trust boost (usage feedback) ---
   for (const c of cand) c.score += cfg.trustWeight * ((c.entry.trust_score ?? 0.5) - 0.5);
 
-  // --- Graph ref-chain boost: concepts of the current top hits lift entries that share them. ---
-  const prelim = [...cand].sort((a, b) => b.score - a.score);
+  // --- Graph ref-chain boost: concepts of the current top hits lift entries that share them. The top hits are
+  //     chosen without the trust nudge of a favorite's own vote (schema 6), so being a favorite never decides
+  //     whose concepts lift the others — or lifts the favorite itself through its own concepts. A favorite is a
+  //     LIVE flag: an archived or deleted row (a historical read) is no favorite; its votes are plain history. ---
+  const isFavorite = (e) => e.favorite === 1 && e.status === 'active';
+  const favVote = (c) => (isFavorite(c.entry) && c.entry.favorite_helpful === 1 ? (Number(cfg.trustWeight) || 0) * HELPFUL_TRUST_DELTA : 0);
+  const prelim = [...cand].sort((a, b) => (b.score - favVote(b)) - (a.score - favVote(a)));
   const topConcepts = new Set();
   for (const c of prelim.slice(0, 5)) for (const k2 of (c.entry.concepts || [])) topConcepts.add(String(k2.name || '').toLowerCase());
   topConcepts.delete('');
@@ -103,6 +330,42 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
       const shared = (c.entry.concepts || []).filter((k2) => topConcepts.has(String(k2.name || '').toLowerCase())).length;
       if (shared) { c.score += cfg.graphBoost * Math.min(shared, 3); c.ranks.graph = shared; }
     }
+  }
+
+  // --- Favorite boost (2026-10-21, schema 6): the operator's favorite gets favoriteWeight, and a favorite that
+  //     ALSO has an explicit helpful vote (helpful_count − favorite_helpful ≥ 1) favoriteHelpfulWeight on top —
+  //     after the ref-chain prelim, and only for a favorite the query MATCHES:
+  //       - lexically: a lexical lane returned it AND it holds one of the query's coverage words (any lexical hit
+  //         when the query has none) — 3+-letter stopwords (the, about) and trigram substrings give every entry a
+  //         lexical hit on a question;
+  //       - or semantically: the vector lane ranked it in its top favoriteVectorTopK (10), counted over the
+  //         candidates the filters above left (types, functions, metadata, authority). A dense embedder gives every
+  //         entry a positive cosine, so the vector lane alone returns up to 200 candidates for any query; past its
+  //         top 10 a favorite earns its place by relevance only (concept-routing seeds, which no lane ranked, too).
+  //     A favorite is never added to a result set. Its lift (the boosts + the trust nudge of its own vote) is what it
+  //     scores above the same entry as a non-favorite — votes it earned explicitly lift it as they lift any entry —
+  //     and the relevance guard below bounds that lift. ---
+  const favW = boostWeight(cfg.favoriteWeight);
+  const favHW = boostWeight(cfg.favoriteHelpfulWeight);
+  const vecTopK = Number.isInteger(cfg.favoriteVectorTopK) && cfg.favoriteVectorTopK >= 0 ? cfg.favoriteVectorTopK : 10;
+  const queryWords = [...new Set(coverageWords(query))];
+  const coverage = coverageMeter(queryWords);
+  let visibleVecRank = null; // built on the first favorite: vector ranks over the filtered candidates
+  const vecRank = (c) => {
+    if (!visibleVecRank) { visibleVecRank = new Map(); cand.filter((x) => x.ranks.vector).sort((a, b) => a.ranks.vector - b.ranks.vector).forEach((x, i) => visibleVecRank.set(x, i + 1)); }
+    return visibleVecRank.get(c) ?? Infinity;
+  };
+  const favs = [];
+  for (const c of cand) {
+    const e = c.entry;
+    if (!isFavorite(e)) continue;
+    let lift = favVote(c);
+    const lexicalMatch = (c.ranks.fts || c.ranks.trigram) && (!queryWords.length || coverage(c) > 0);
+    if (lexicalMatch || vecRank(c) <= vecTopK) {
+      if (favW) { c.score += favW; lift += favW; c.ranks.favorite = favW; }
+      if (favHW && (e.helpful_count ?? 0) - (e.favorite_helpful ?? 0) >= 1) { c.score += favHW; lift += favHW; c.ranks.favoriteHelpful = favHW; }
+    }
+    favs.push({ c, lift });
   }
 
   // --- P4 temporal/workflow boosts: recency + proven usefulness + work-event semantics.
@@ -124,40 +387,187 @@ export async function hybridSearch(db, memory, embedder, query, opts = {}) {
     }
   }
 
+  // --- Instruction-likeness (#40): flag injection-shaped rows and demote them by a fixed penalty.
+  //     The flag and its matched pattern names travel in rank so a consumer can drop by name;
+  //     nothing is removed here. A row flags when its content flags OR its ingest stored a
+  //     full-source verdict (provenance.instructionLike, 2026-10-04: an injection past the summary
+  //     window was recalled unflagged); matched = the union, the penalty applies once. ---
+  const il = cfg.recall?.instructionLike || {};
+  const ilOn = il.enabled !== false;
+  const ilPenalty = il.penalty ?? 0.01;
+  if (ilOn) {
+    for (const c of cand) {
+      const v = entryInstructionLikeness(c.entry);
+      if (v.flag) { c.score -= ilPenalty; c.ranks.instructionLike = true; c.ranks.instructionMatched = v.matched; }
+    }
+  }
+
   // --- P5 concept boost: lift entries surfaced by concept routing (small, like graph boost). ---
   if (conceptSeeds.size) {
     const cb = cfg.conceptRouting?.boost ?? 0.005;
     for (const c of cand) if (conceptSeeds.has(c.id)) { c.score += cb; c.ranks.concept = true; }
   }
 
+  // --- Relevance guard for favorites (2026-10-21): RRF keeps ranks, not margins — a weak match one rank under a
+  //     strong one scores a hair below it — so a favorite's lift may reorder comparable matches but never carries
+  //     it past a candidate that holds MORE of the query's words (coverageWords: Unicode letters and digits, over
+  //     the entry content the lanes index). Such favorites are held just below the lowest of those candidates, in
+  //     their unguarded order, and never below their score as a non-favorite (rank.favoriteGuard). ---
+  if (favs.length) holdFavoritesBelowBetterMatches(cand, favs, coverage);
+
   cand.sort((a, b) => b.score - a.score);
 
-  const preview = (e) => e.content.slice(0, 600) + (e.content.length > 600 ? '…' : '');
+  // --- Fidelity class (#42): verbatim rows (operator authority / curated tier) return their full
+  //     content up to a safety ceiling; the rest keep the preview cut. The class travels on the
+  //     result so a brief can budget verbatim lines first. ---
+  const fcfg = cfg.recall?.fidelity || {};
+  const fidelityOf = (e) => (fcfg.enabled === false ? 'compressible' : fidelityClass(e, cfg.tiers || []));
+  const render = (e) => {
+    if (fidelityOf(e) === 'verbatim') {
+      const max = fcfg.verbatimMaxChars ?? 4000;
+      return e.content.length > max ? { text: e.content.slice(0, max) + '…', truncated: true } : { text: e.content, truncated: false };
+    }
+    return { text: e.content.slice(0, 600) + (e.content.length > 600 ? '…' : ''), truncated: e.content.length > 600 };
+  };
 
-  // --- Token budget (surgical injection) or top-k ---
+  // --- Token budget (surgical injection) or top-k. A budgeted (or `bounded:true`) selection runs
+  //     the occupancy policy (#39): per-authority caps that bind only against a waiting competitor,
+  //     protected operator slots, and a minimum of independent source lineages. ---
   let selected;
-  if (maxTokens) {
-    selected = [];
-    let budget = maxTokens;
-    for (const c of cand) {
-      const cost = Math.ceil(preview(c.entry).length / 4);
-      if (cost > budget) continue; // skip oversized, keep filling from the rest
-      budget -= cost;
-      selected.push(c);
-      if (limit && selected.length >= limit) break;
+  const occ = cfg.recall?.occupancy || {};
+  if (maxTokens || opts.bounded) {
+    const costOf = (c) => Math.ceil(render(c.entry).text.length / 4);
+    if (occ.enabled !== false) {
+      selected = selectBounded(cand, { limit: limit || 20, budget: maxTokens || null, costOf, occupancy: occ });
+    } else {
+      selected = [];
+      let budget = maxTokens || Infinity;
+      for (const c of cand) {
+        const cost = costOf(c);
+        if (cost > budget) continue; // skip oversized, keep filling from the rest
+        budget -= cost;
+        selected.push(c);
+        if (limit && selected.length >= limit) break;
+      }
     }
   } else {
     selected = cand.slice(0, limit);
   }
 
-  return selected.map((c) => ({
-    id: c.id,
-    tier: c.entry.tier,
-    type: c.entry.type,
-    content: preview(c.entry),
-    score: Number(c.score.toFixed(6)),
-    trust: c.entry.trust_score,
-    rank: c.ranks,
-    provenance: includeProvenance ? c.entry.provenance ?? null : undefined,
-  }));
+  const memoryRows = selected.map((c) => {
+    const r = render(c.entry);
+    return {
+      kind: 'memory',
+      id: c.id,
+      tier: c.entry.tier,
+      type: c.entry.type,
+      status: c.entry.status,
+      memFunction: c.entry.mem_function || functionForType(c.entry.type),
+      project: c.entry.project ?? null,
+      fidelity: fidelityOf(c.entry),
+      truncated: r.truncated,
+      content: r.text,
+      score: Number(c.score.toFixed(6)),
+      trust: c.entry.trust_score,
+      favorite: isFavorite(c.entry), // schema 6: the operator's favorite, on live rows only (its boosts are in `rank`)
+      authority: c.entry.provenance?.authority ?? null,
+      rank: c.ranks,
+      provenance: includeProvenance ? c.entry.provenance ?? null : undefined,
+    };
+  });
+  if (!libRows.length) {
+    LIBRARY_REPORT.set(memoryRows, { queried: libQueried, returned: 0 });
+    return memoryRows;
+  }
+
+  // --- Library rows: ordered among memory rows by their lane score, but NOT counted against
+  //     `limit`, not part of the occupancy/budget selection, and never part of evidenceSufficient
+  //     (which runs on the lexical pass). linkedEntry points back at the active MidMem entry that
+  //     summarizes the same source (by docId or URI), one prepared lookup per distinct source. ---
+  const lw = cfg.library?.weight ?? 0.8;
+  const linkStmt = db.prepare(`
+    SELECT id FROM entries
+    WHERE status = 'active'
+      AND (json_extract(iif(json_valid(provenance), provenance, NULL), '$.source.docId') = ?
+        OR json_extract(iif(json_valid(provenance), provenance, NULL), '$.source.canonicalUri') = ?
+        OR json_extract(iif(json_valid(provenance), provenance, NULL), '$.source.sourceUri') = ?)
+    ORDER BY created_at DESC, id ASC LIMIT 1
+  `);
+  const links = new Map();
+  const linkFor = (docId, sourceUri) => {
+    const key = JSON.stringify([docId, sourceUri]);
+    if (!links.has(key)) links.set(key, linkStmt.get(docId, sourceUri, sourceUri)?.id ?? null);
+    return links.get(key);
+  };
+  // Library rows carry FULL document evidence and are screened like memory rows (#40, 2026-10-04):
+  // the verdict runs on the provider's whole row text (not the 600-char cut), sets the same rank
+  // fields and the same one-time penalty — flag + demote, never drop.
+  const libraryRows = libRows.map((row, i) => {
+    const v = ilOn ? instructionLikeness(row.text) : { flag: false, matched: [] };
+    const base = lw * (1 / (k + i));
+    return {
+      kind: 'library',
+      id: 'lib:' + row.libraryId + ':' + row.chunkId,
+      library: row.libraryId,
+      docId: row.docId,
+      chunkId: row.chunkId,
+      locator: row.locator,
+      sourceUri: row.sourceUri,
+      capturedAt: row.capturedAt ?? null,
+      content: row.text.slice(0, 600) + (row.text.length > 600 ? '…' : ''),
+      score: Number((v.flag ? base - ilPenalty : base).toFixed(6)),
+      rank: { library: i + 1, providerScore: row.score, ...(v.flag ? { instructionLike: true, instructionMatched: v.matched } : {}) },
+      linkedEntry: linkFor(row.docId, row.sourceUri),
+      status: null,
+      tier: null,
+      type: 'library-chunk',
+      authority: null,
+      trust: null,
+      fidelity: 'compressible',
+      truncated: row.text.length > 600,
+      provenance: { source: { libraryId: row.libraryId, docId: row.docId, sourceUri: row.sourceUri } },
+    };
+  });
+  const out = [...memoryRows, ...libraryRows].sort((a, b) => b.score - a.score);
+  LIBRARY_REPORT.set(out, { queried: libQueried, returned: libraryRows.length });
+  return out;
+}
+
+/** Deterministic evidence-sufficiency check (roadmap #11): the top hits must cover enough of the
+ *  query's significant tokens. Coverage is measured over the best single result (a scattered
+ *  half-match across many results is NOT sufficiency). */
+export function evidenceSufficient(query, results, { minHits = 1, minCoverage = 0.6 } = {}) {
+  const toks = [...new Set(tokenize(query))];
+  if (!toks.length) return { sufficient: false, coverage: 0, hits: results.length, reason: 'no-significant-tokens' };
+  if (results.length < minHits) return { sufficient: false, coverage: 0, hits: results.length, reason: 'too-few-hits' };
+  let best = 0;
+  for (const r of results.slice(0, 3)) {
+    const hay = String(r.content || '').toLowerCase();
+    const covered = toks.filter((t) => hay.includes(t)).length / toks.length;
+    if (covered > best) best = covered;
+  }
+  const coverage = Number(best.toFixed(3));
+  return { sufficient: coverage >= minCoverage, coverage, hits: results.length };
+}
+
+/**
+ * Router-Mem progressive retrieval (roadmap #11, arXiv 2608.01285): a cheap lexical-only pass
+ * first; expand to the full hybrid pipeline (embed + vector + concept routing) ONLY when the
+ * deterministic sufficiency gate says the lexical evidence is not enough. opts.deep forces the
+ * full pipeline. Every result set carries a `sufficiency` descriptor so callers can see which
+ * stage answered and why.
+ */
+export async function progressiveSearch(db, memory, embedder, query, opts = {}) {
+  const pc = memory.cfg.progressive || {};
+  // The library lane (#49) runs on the deep pass only; its report rides the sufficiency descriptor.
+  const libraryOf = (results) => LIBRARY_REPORT.get(results) ?? { queried: [], returned: 0 };
+  if (pc.enabled === false || opts.deep) {
+    const results = await hybridSearch(db, memory, embedder, query, opts);
+    return { results, sufficiency: { stage: 'full', gated: false, reason: opts.deep ? 'deep-requested' : 'progressive-disabled', library: libraryOf(results) } };
+  }
+  const lexical = await hybridSearch(db, memory, embedder, query, { ...opts, lexicalOnly: true });
+  const verdict = evidenceSufficient(query, lexical, { minHits: pc.minHits ?? 1, minCoverage: pc.minCoverage ?? 0.6 });
+  if (verdict.sufficient) return { results: lexical, sufficiency: { stage: 'lexical', gated: true, ...verdict } };
+  const results = await hybridSearch(db, memory, embedder, query, opts);
+  return { results, sufficiency: { stage: 'full', gated: true, expandedBecause: verdict, library: libraryOf(results) } };
 }

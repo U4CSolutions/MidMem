@@ -8,6 +8,7 @@
 
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { normalizeProject } from './projectaxis.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..');
@@ -31,9 +32,15 @@ export const DEFAULT_TIERS = [
 export function loadConfig(overrides = {}) {
   // Env reads honor the new MIDMEM_ prefix, falling back to legacy OCMW_ (safe rename).
   const env = (k) => process.env['MIDMEM_' + k] ?? process.env['OCMW_' + k];
+  const dbPath = env('DB_PATH') || path.join(REPO, 'state.db');
+  const bridgeExclude = parseBridgeExclude(env('BRIDGE_EXCLUDE')); // comma-separated subfolders EVERY bridge source skips; default none
   const cfg = {
     /** Single SQLite source-of-truth. */
-    dbPath: env('DB_PATH') || path.join(REPO, 'state.db'),
+    dbPath,
+    /** Content ingest (roadmap #46): `ingestContent` materializes captured text (web pages, library
+     *  documents) here as <sha12(source key)>.md before the ordinary governed ingest. Defaults to a
+     *  sibling of the db; appended to sourceRoots below so the path policy admits it. */
+    contentIngestDir: env('CONTENT_INGEST_DIR') || path.join(path.dirname(dbPath), 'ingest-content'),
     /** Obsidian vault root (LLM-owned wiki projected into the `wikiPath` subfolder). */
     vaultPath: VAULT,
     /** Wiki subdir inside the vault — the projected, LLM-owned knowledge base. */
@@ -48,14 +55,26 @@ export function loadConfig(overrides = {}) {
     sourceRoots: (env('SOURCE_ROOTS') ||
       [REPO, `${HOME}/.openclaw/workspace`, `${HOME}/.hermes/memories`, `${HOME}/changelog`, path.join(VAULT, 'OpenClaw'), path.join(VAULT, 'Hermes')].join(';')
     ).split(';').filter(Boolean),
-    /** Native→middleware bridge: dirs scanned by `bridgeMemory`, each tagged with a scope.
-     *  Pulls each stack's flat memory into the shared, tiered, searchable store. */
-    bridgeSources: [
-      { dir: path.join(HOME, '.openclaw', 'workspace', 'memory'), scope: 'openclaw', type: 'session' },
-      { dir: path.join(HOME, '.hermes', 'memories'), scope: 'hermes', type: 'note' },
-      { dir: path.join(VAULT, 'OpenClaw'), scope: 'openclaw', type: 'note' },
-      { dir: path.join(VAULT, 'Hermes'), scope: 'hermes', type: 'note' },
-    ],
+    /** Native→middleware bridge: dirs scanned by `bridgeMemory`, each tagged with a scope (+ an
+     *  optional project). Pulls each stack's memory into the shared, tiered, searchable store.
+     *  Configurable (roadmap 2026-09 #38): MIDMEM_BRIDGE_SOURCES = `dir|scope|type|project;…`
+     *  (type/project optional; a sixth field lists subfolders to skip, comma-separated) REPLACES the default list, so a third harness's memory dir or a
+     *  console's report folders register without a core change. The two memory dirs skip the stacks'
+     *  self-generated reflection logs (GENERATED_LOG_DIRS). */
+    bridgeSources: withBridgeExclude(parseBridgeSources(env('BRIDGE_SOURCES')) || [
+      { dir: path.join(HOME, '.openclaw', 'workspace', 'memory'), scope: 'openclaw', type: 'session', exclude: [...GENERATED_LOG_DIRS] },
+      { dir: path.join(HOME, '.hermes', 'memories'), scope: 'hermes', type: 'note', exclude: [...GENERATED_LOG_DIRS] },
+      ...agentVaultSources(path.join(VAULT, 'OpenClaw'), 'openclaw'),
+      ...agentVaultSources(path.join(VAULT, 'Hermes'), 'hermes'),
+    ], bridgeExclude),
+    /** Operator-wide bridge excludes: MIDMEM_BRIDGE_EXCLUDE = comma-separated root-relative subfolder
+     *  names (default none), APPENDED to every bridge source's own exclude list above — the defaults
+     *  and MIDMEM_BRIDGE_SOURCES entries alike — so `scratch,drafts` can be skipped everywhere without
+     *  restating (and then maintaining a copy of) the default source list. Echoed here for reports. */
+    bridgeExclude,
+    /** Bridge walk recurses into subfolders (skipping dot-dirs + node_modules); a per-source
+     *  `recursive:false` opts out. MIDMEM_BRIDGE_RECURSIVE=0 restores the flat walk globally. */
+    bridgeRecursive: env('BRIDGE_RECURSIVE') !== '0',
     /** LM Studio OpenAI-compatible endpoint (embeddings + extraction). */
     llmEndpoint: env('LLM_ENDPOINT') || 'http://localhost:1234/v1',
     embedModel: env('EMBED_MODEL') || 'nomic-embed-text',
@@ -64,12 +83,24 @@ export function loadConfig(overrides = {}) {
     llmEnabled: env('LLM_ENABLED') !== '0',
     /** Per-call timeout for LLM (ms) — the local model can saturate; keep tight. */
     llmTimeoutMs: Number(env('LLM_TIMEOUT_MS') || 20000),
+    /** Embed retries (2026-10-19): a timeout, a refused connection or a 5xx / 429 is retried this many
+     *  times, waiting embedRetryMs × 2^attempt between tries, before the hash-placeholder fallback (one
+     *  busy moment used to cost a placeholder vector). Other 4xx never retry. 0 = one attempt only. */
+    embedRetries: Number(env('EMBED_RETRIES') ?? 2),
+    embedRetryMs: Number(env('EMBED_RETRY_MS') ?? 250),
     /** Hybrid fusion: RRF constant + per-lane weights (fts token, trigram substring, vector). */
     rrfK: 60,
     fusionWeights: { fts: 1.0, trigram: 0.5, vector: 1.0 },
     /** Additive ranking boosts, kept small vs a single RRF rank (≈ 1/60 ≈ 0.0167). */
     trustWeight: 0.01, // × (trust_score − 0.5) → ±0.005
     graphBoost: 0.004, // × shared-concept count (capped at 3)
+    /** Favorites (2026-10-21, schema 6): an operator's favorite gets favoriteWeight; a favorite that ALSO has an
+     *  explicit helpful vote (helpful_count − favorite_helpful ≥ 1) gets favoriteHelpfulWeight on top. Only for a
+     *  favorite a lexical lane returned or the vector lane ranked in its top favoriteVectorTopK, and never past a
+     *  candidate holding more of the query's words (retrieval.mjs). 0 turns a weight off (top-k 0: lexical only). */
+    favoriteWeight: Number(env('FAVORITE_WEIGHT') ?? 0.004),
+    favoriteHelpfulWeight: Number(env('FAVORITE_HELPFUL_WEIGHT') ?? 0.002),
+    favoriteVectorTopK: Number(env('FAVORITE_VECTOR_TOP_K') ?? 10),
     /** P4 temporal/workflow boosts — fused after RRF like trust/graph. Recency + proven usefulness
      *  lift entries; corrections/decisions (work-memory) are boosted because they reshape behavior;
      *  dead-ends are DEMOTED and flagged (rank.deadEndWarning) so they surface as warnings, not
@@ -85,8 +116,15 @@ export function loadConfig(overrides = {}) {
     /** Vector backend: 'sqlite' (in-DB JSON cosine, zero-dep, default) or 'qdrant' (external ANN). */
     vectorBackend: env('VECTOR_BACKEND') || 'sqlite',
     qdrantUrl: env('QDRANT_URL') || 'http://localhost:6333',
-    qdrantCollection: env('QDRANT_COLLECTION') || 'openduck_memory',
+    qdrantCollection: env('QDRANT_COLLECTION') || 'midmem_memory',
     qdrantApiKey: env('QDRANT_API_KEY') || '',
+    /** Tenant key (roadmap #51): this store writes it as payload `store_id` on every Qdrant point
+     *  and filters every Qdrant search on it (keyword index created `is_tenant: true`). One memory
+     *  collection may then hold several stores, each promoted to its own shard later without new
+     *  collections. Collections split only by embedding space, workload and access boundary. */
+    storeId: env('STORE_ID') || 'default',
+    /** Qdrant client knobs: per-request timeout (ms) and points per upsert batch (backfill). */
+    qdrant: { timeoutMs: Number(env('QDRANT_TIMEOUT_MS') ?? 5000), batch: Number(env('QDRANT_BATCH') ?? 100) },
     /** P5 concept routing: embed concept nodes + deterministic communities (built in forced/daily
      *  maintain), then the query vector seeds entries linked to its nearest concept communities into
      *  retrieval (+ a small boost). Fail-soft → flat hybrid when nothing is embedded. No per-query LLM. */
@@ -110,6 +148,13 @@ export function loadConfig(overrides = {}) {
       minScore: Number(env('RECALL_MIN_SCORE') || 0.02),
       maxTokens: Number(env('RECALL_MAX_TOKENS') || 600),
       maxItems: Number(env('RECALL_MAX_ITEMS') || 4),
+      /** Library lane (#49) in pre-turn recall: OFF by default — a pre-turn recall runs on every
+       *  message and would otherwise call every registered provider each time. Explicit `query` and
+       *  `handoff_brief` ask libraries by default; set MIDMEM_RECALL_LIBRARIES=1 (or pass
+       *  `libraries`) to include library evidence here too. Library rows are gated on the provider's
+       *  own score (libraryMinScore), not on the RRF score, which by construction sits below minScore. */
+      libraries: env('RECALL_LIBRARIES') === '1',
+      libraryMinScore: Number(env('RECALL_LIBRARY_MIN_SCORE') ?? 0.2),
     },
     /** Self-driving lifecycle (decay + promotion) — runs opportunistically on normal use
      *  (query/ingest/remember), throttled by intervalMs, plus an external daily timer.
@@ -127,6 +172,16 @@ export function loadConfig(overrides = {}) {
       /** Bounded history: forced/daily maintain prunes log/audit rows older than this and
        *  vectors orphaned by hard-deleted entries. 0 disables pruning. */
       retentionDays: Number(env('RETENTION_DAYS') || 90),
+      /** Nightly reextract batch (2026-10-19): the forced/daily maintain re-runs model extraction on at
+       *  most this many fallback-extracted entries (`reextract({ limit })`) when the model endpoint
+       *  answers a cheap probe — entries ingested while the box was down are repaired without a hand
+       *  run. MIDMEM_MAINTAIN_REEXTRACT=0 disables. Never on the opportunistic pass. */
+      reextractLimit: Number(env('MAINTAIN_REEXTRACT') ?? 20),
+      /** Nightly re-embed batch (2026-10-19): the same pass first swaps at most this many hash-placeholder
+       *  vectors for real ones (`reembedFallback({ limit })`, self-gating on the embedder). Capture
+       *  children that run with MIDMEM_LLM_ENABLED=0 by contract write placeholders for every event
+       *  until something re-embeds them. MIDMEM_MAINTAIN_REEMBED=0 disables. Never on the opportunistic pass. */
+      reembedLimit: Number(env('MAINTAIN_REEMBED') ?? 200),
     },
     /** Work-memory (Perplexity-Brain-style "memory about work"): record agent task attempts,
      *  sources used, dead ends, corrections, artifacts, decisions as first-class entries + graph
@@ -153,6 +208,10 @@ export function loadConfig(overrides = {}) {
       enabled: env('PROJECTION_QA') !== '0',
       sampleSize: Number(env('PROJECTION_QA_SAMPLE') ?? 20),
       minFidelity: Number(env('PROJECTION_QA_MIN_FIDELITY') ?? 0.9),
+      /** PMMC expected-query probes (roadmap #15): compiled + verified on forced/daily maintain. */
+      queryProbes: env('QUERY_PROBES') !== '0',
+      queryProbeSample: Number(env('QUERY_PROBE_SAMPLE') ?? 12),
+      queryProbeTopK: Number(env('QUERY_PROBE_TOPK') ?? 5),
     },
     /** Transition verifier (TRUSTMEM-style, arXiv 2606.25161): deterministic checks on memory
      *  TRANSITIONS — supersede stays on-subject + evidence-covered; promotion requires the
@@ -163,6 +222,58 @@ export function loadConfig(overrides = {}) {
       minSubjectOverlap: Number(env('TRANSITION_MIN_SUBJECT') ?? 0.15),
       minCoverage: Number(env('TRANSITION_MIN_COVERAGE') ?? 0.6),
       promoteMinGrounding: Number(env('PROMOTE_MIN_GROUNDING') ?? 0.3),
+    },
+    /** Global consistency pass (roadmap #13, arXiv 2608.03137): state-level verification on the
+     *  forced/daily maintain — cross-claim contradictions, dangling supersede chains, deferred
+     *  aging. Report-only; findings logged, never auto-fixed. */
+    consistency: { enabled: env('CONSISTENCY') !== '0' },
+    /** Progressive retrieval (roadmap #11, arXiv 2608.01285): cheap lexical-only pass first,
+     *  expand to full hybrid (embed + vector + concept routing) only when the deterministic
+     *  sufficiency gate fails. deep:true on a query always forces the full pipeline. */
+    progressive: {
+      enabled: env('PROGRESSIVE') !== '0',
+      minHits: Number(env('PROGRESSIVE_MIN_HITS') || 1),
+      minCoverage: Number(env('PROGRESSIVE_MIN_COVERAGE') ?? 0.6),
+    },
+    /** Library lane (roadmap #49): registered external library systems, asked for evidence at
+     *  the DEEP stage of retrieval only (never the cheap lexical pass). MIDMEM_LIBRARIES =
+     *  `id|module:<abs path to an ES module>;id2|http:<base url>`. Default empty: no provider is
+     *  loaded or called and retrieval is unchanged. A library is a separate system — MidMem never
+     *  stores its rows, never tiers, trusts, promotes, decays or renews them. */
+    libraries: parseLibraries(env('LIBRARIES')),
+    /** Library lane knobs: rows fused as their own RRF lane (weight × 1/(rrfK + rank)), at most
+     *  `limit` per query across providers, each provider call bounded by `timeoutMs`; never stored. */
+    library: {
+      enabled: env('LIBRARY_LANE') !== '0',
+      limit: Number(env('LIBRARY_LIMIT') ?? 8),
+      timeoutMs: Number(env('LIBRARY_TIMEOUT_MS') ?? 4000),
+      weight: Number(env('LIBRARY_WEIGHT') ?? 0.8),
+    },
+    /** Source authority (roadmap #10, arXiv 2607.29167): origin-assigned trust level
+     *  (operator|stack|doc|web) that propagates through derived entries/claims and can never be
+     *  raised by consolidation ('operator' requires curated:true — governance-gated). Retrieval
+     *  gets a small post-RRF nudge (±rank·boost around 'doc') and a minAuthority filter. */
+    authority: {
+      enabled: env('AUTHORITY') !== '0',
+      boost: Number(env('AUTHORITY_BOOST') ?? 0.002), // × (rank − doc) → operator +0.004 … web −0.002
+    },
+    /** TARL deferred ledger (roadmap #9, arXiv 2608.03699): a claim arriving with a write-path
+     *  contradiction lands status 'deferred' (pending judgment) instead of 'active' — the third
+     *  ledger state between kept and quarantined. Resolution (accept|reject) is always explicit. */
+    claims: {
+      deferContradictory: env('DEFER_CONTRADICTORY') !== '0',
+      /** Containment floor for the write-path `contradictory` verdict (and the audit-time finder):
+       *  a differing-polarity pair counts as a contradiction only when shared significant tokens /
+       *  the smaller side's token count reaches this. Long prose fragments that merely share a
+       *  locality and one negation word fall below it; a claim and its negation sit near 1.
+       *  0 restores the pre-floor rule. `claims-reclassify` re-judges tags written before. */
+      contradictionMinContainment: Number(env('CLAIM_CONTRADICTION_MIN_CONTAINMENT') ?? 0.6),
+      /** Consistency pass (roadmap #13) flags deferred claims older than this. */
+      deferAgeDays: Number(env('DEFER_AGE_DAYS') || 14),
+      /** Claim stance at commit (roadmap #33, CASK arXiv 2610.09008): every claim is tagged observed |
+       *  provisional | quoted | rejected by fixed word lists (claims.mjs stanceOf); only observed claims
+       *  defer, neighbour, contradict or read as current. 0 = no tagging, reads as before. */
+      stance: env('CLAIM_STANCE') !== '0',
     },
     workMemory: {
       enabled: env('WORK_MEMORY') !== '0',
@@ -178,14 +289,147 @@ export function loadConfig(overrides = {}) {
       enabled: env('AUTO_INGEST') !== '0',
       onMaintain: env('AUTO_INGEST_ON_MAINTAIN') !== '0',
     },
+    /** Recall policy (roadmap 2026-09 #39/#40/#42): what a budgeted recall may return. */
+    recall: {
+      /** #39 bounded occupancy — applies when a query carries maxTokens (briefs, proactive recall)
+       *  or `bounded:true`. Caps are fractions of the row limit per authority class and bind only
+       *  while a competitor from another class is waiting; operator lines get protected slots;
+       *  selection keeps at least minLineages distinct root sources when candidates allow. */
+      occupancy: {
+        enabled: env('OCCUPANCY') !== '0',
+        caps: { operator: 1, stack: Number(env('OCCUPANCY_CAP_STACK') ?? 0.6), doc: Number(env('OCCUPANCY_CAP_DOC') ?? 0.6), web: Number(env('OCCUPANCY_CAP_WEB') ?? 0.25) },
+        protectedOperatorSlots: Number(env('OCCUPANCY_OPERATOR_SLOTS') ?? 2),
+        minLineages: Number(env('OCCUPANCY_MIN_LINEAGES') ?? 2),
+      },
+      /** #40 instruction-likeness — deterministic injection-shape flag; flagged rows are demoted
+       *  by `penalty` (same magnitude family as the dead-end penalty) and labelled, never dropped. */
+      instructionLike: { enabled: env('INSTRUCTION_FLAG') !== '0', penalty: Number(env('INSTRUCTION_PENALTY') ?? 0.01) },
+      /** #42 fidelity class — verbatim rows (operator authority / curated tier) return full content
+       *  up to verbatimMaxChars (a safety ceiling, flagged `truncated` when hit). */
+      fidelity: { enabled: env('FIDELITY') !== '0', verbatimMaxChars: Number(env('VERBATIM_MAX_CHARS') ?? 4000) },
+    },
+    /** Lifecycle class (roadmap 2026-09 #44): `working` entries are context-assembly state —
+     *  lease-bound to workingTtlMs regardless of tier, never promoted, excluded from default reads. */
+    lifecycle: { workingTtlMs: Number(env('WORKING_TTL_MS') || 24 * 3600e3) },
+    /** Dependency-aware forget (roadmap 2026-09 #41): forgetting an entry archives the claims it
+     *  sourced and flags concept nodes it alone supported (report-only flags). */
+    forget: { cascade: env('FORGET_CASCADE') !== '0' },
+    /** Ingest boundary checks. secretTextGuard: refuse a `title` or `source.author` that carries a
+     *  secret-shaped value (a credential-bearing URL, `password=…`-style assignment, or a well-known
+     *  token shape) — both are stored and echoed on recall rows / the export forever. Narrow by
+     *  design: prose ABOUT tokens passes. MIDMEM_SECRET_TEXT_GUARD=0 disables. */
+    ingest: { secretTextGuard: env('SECRET_TEXT_GUARD') !== '0' },
     /** Default memory scope for this process: `openclaw` | `hermes` | `shared`.
      *  Set per MCP registration (OCMW_AGENT_SCOPE). Writes default here; reads = this + shared.
      *  `shared` = admin/bridge context (may write any scope). */
     agentScope: env('AGENT_SCOPE') || 'shared',
+    /** Project axis (roadmap 2026-09 #18), orthogonal to scope. MIDMEM_PROJECT = this process's
+     *  default project slug: writes (remember/ingest/record_work/…) tag it, reads default to
+     *  project + global. Unset = global writes, unfiltered reads (the admin/bridge analog). */
+    project: normalizeProject(env('PROJECT')),
+    projectAxis: {
+      /** Promotion into a curated-only tier (wisdom) lifts a project entry to global —
+       *  cross-project lessons emerge from use. MIDMEM_PROJECT_LIFT=0 keeps the tag on promotion. */
+      liftOnCurated: env('PROJECT_LIFT') !== '0',
+    },
     /** Governance: deny on policy-eval error (fail-closed). */
     failClosed: true,
   };
-  return { ...cfg, ...overrides };
+  const out = { ...cfg, ...overrides };
+  // An overridden dbPath (tests, embedded hosts) moves the default content dir with it.
+  if (overrides.dbPath && !overrides.contentIngestDir && !env('CONTENT_INGEST_DIR')) out.contentIngestDir = path.join(path.dirname(out.dbPath), 'ingest-content');
+  // Content ingest materializes to a governed root: appending the dir here (rather than bypassing
+  // the ingest-path-allowed policy for content) keeps the path policy fail-closed for every
+  // other path, whatever sourceRoots were configured or overridden.
+  if (out.contentIngestDir && !out.sourceRoots.includes(out.contentIngestDir)) out.sourceRoots = [...out.sourceRoots, out.contentIngestDir];
+  return out;
+}
+
+/**
+ * Deliverable subfolders of an agent's vault folder (2026-09-23). Documents an agent writes FOR the
+ * operator — research write-ups and reports — are shared knowledge: each stack must be able to read
+ * the other's. Everything else under the agent's folder (notes/, the root, any subfolder added later)
+ * stays private to that stack by default, because notes can be personal.
+ */
+export const DELIVERABLE_DIRS = Object.freeze(['research', 'reports']);
+
+/**
+ * Generated-log subfolders of a stack's memory dir (2026-10-12). A stack's self-generated reflection /
+ * consolidation logs (OpenClaw writes `memory/dreaming/{light,rem}/<date>.md`) are not knowledge: they
+ * restate what the store already holds, with scores. Measured 2026-10-12: the bridge had ingested 27 of
+ * them as doc-authority entries with 46 claims ("The theme 'huddle' appeared in five distinct REM sleep
+ * memories"); forgetting them is undone by the next pass unless the walk skips them. The name is generic
+ * on purpose — the core knows no stack; it is simply excluded on both default memory-dir sources.
+ */
+export const GENERATED_LOG_DIRS = Object.freeze(['dreaming']);
+
+/** MIDMEM_BRIDGE_EXCLUDE → a clean list of root-relative subfolder names ([] when unset). */
+export function parseBridgeExclude(spec) {
+  return String(spec || '').split(',').map((e) => e.trim()).filter(Boolean);
+}
+
+/** Append operator-wide excludes to every source's own list (deduped, own entries first). A source
+ *  that ends up with nothing to skip keeps no `exclude` field, so an unset knob changes nothing. */
+export function withBridgeExclude(sources, extra = []) {
+  if (!extra.length) return sources;
+  return sources.map((s) => ({ ...s, exclude: [...new Set([...(s.exclude || []), ...extra])] }));
+}
+
+/** Bridge sources for one agent vault folder: the folder itself (private scope, deliverable
+ *  subfolders excluded) plus each deliverable subfolder as its own `shared` source. */
+export function agentVaultSources(dir, scope, type = 'note') {
+  return [
+    { dir, scope, type, exclude: [...DELIVERABLE_DIRS] },
+    ...DELIVERABLE_DIRS.map((d) => ({ dir: path.join(dir, d), scope: 'shared', type })),
+  ];
+}
+
+/**
+ * Parse MIDMEM_BRIDGE_SOURCES: entries separated by `;`, fields by `|` — `dir|scope|type|project`.
+ * `~` expands to $HOME; type defaults to `note`; project omitted = global. Returns null when unset
+ * (so the built-in defaults apply); a malformed entry throws — misconfigured capture must be loud.
+ */
+export function parseBridgeSources(spec) {
+  if (!spec || !String(spec).trim()) return null;
+  const out = [];
+  for (const raw of String(spec).split(';')) {
+    const item = raw.trim();
+    if (!item) continue;
+    const [dir, scope, type, project, recursive, exclude] = item.split('|').map((f) => f.trim());
+    if (!dir || !scope) throw new Error(`bad MIDMEM_BRIDGE_SOURCES entry '${item}' (expected dir|scope[|type[|project[|recursive[|exclude,…]]]])`);
+    const src = { dir: dir.startsWith('~/') ? path.join(HOME, dir.slice(2)) : dir, scope, type: type || 'note' };
+    if (project) src.project = normalizeProject(project);
+    if (recursive === '0' || recursive === 'false') src.recursive = false;
+    if (exclude) src.exclude = exclude.split(',').map((e) => e.trim()).filter(Boolean);
+    out.push(src);
+  }
+  return out.length ? out : null;
+}
+
+/**
+ * Parse MIDMEM_LIBRARIES (roadmap #49): entries separated by `;`, fields by `|` —
+ * `id|module:<abs path to an ES module>` or `id|http:<base url>`. `~/` expands to $HOME for module
+ * paths. Returns [] when unset; a malformed entry throws — a misregistered library must be loud.
+ */
+export function parseLibraries(spec) {
+  if (!spec || !String(spec).trim()) return [];
+  const out = [];
+  for (const raw of String(spec).split(';')) {
+    const item = raw.trim();
+    if (!item) continue;
+    const bad = () => new Error(`bad MIDMEM_LIBRARIES entry '${item}' (expected id|module:<path> or id|http:<url>)`);
+    const fields = item.split('|').map((f) => f.trim());
+    if (fields.length !== 2) throw bad();
+    const [id, where] = fields;
+    const m = /^(module|http):(.+)$/.exec(where || '');
+    if (!id || !m) throw bad();
+    const transport = m[1];
+    let target = m[2].trim();
+    if (!target) throw bad();
+    if (transport === 'module' && target.startsWith('~/')) target = path.join(HOME, target.slice(2));
+    out.push({ id, transport, target });
+  }
+  return out;
 }
 
 export const REPO_ROOT = REPO;

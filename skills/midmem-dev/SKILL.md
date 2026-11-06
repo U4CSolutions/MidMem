@@ -51,7 +51,7 @@ Paths below are repo-relative; `<repo>` = the `midmem-kb-store` checkout root.
 ## Test → verify → commit → record
 ```bash
 cd <repo>
-node packages/core/test/smoke.mjs        # MUST stay green (90/90 as of this writing)
+node packages/core/test/smoke.mjs        # MUST stay green (999/999 as of 2026-10-22)
 node packages/core/test/bench.mjs        # Brain-style regression gate (recall/correction/dead-end/current/budget)
 # live sanity (real shared db), keep the heavy bridge off:
 printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' | \
@@ -61,6 +61,22 @@ git add -A && git commit -m "feat(core): …"   # end with the active model's Co
 Then **record** (see `midmem-record`): a one-line
 `midmem remember "<lesson>" --tier wisdom --curated --scope shared`, plus a changelog entry if your
 project keeps one.
+
+## If the store is exposed as a long-lived MCP server
+
+Deployments often register `bin/mcp-server.mjs` with an agent harness (e.g. Claude Code) as a
+long-lived stdio process. That wiring imposes discipline on core development:
+
+- **Dev sessions use the CLI, not the running MCP instance** — a long-lived server keeps executing
+  pre-edit code after you change the core. Verify via `bin/cli.mjs` / the smoke suite; reconnect or
+  restart the MCP consumer after landing changes.
+- **Wiring impact is part of every core change.** In the same commit/record: (1) tool
+  added/renamed/schema changed → consumers must reconnect to see it; update any recorded tool-count
+  facts. (2) new `MIDMEM_*` knob → decide its default for each registered instance, and keep env in
+  ONE shared file sourced by all wrappers — duplicated env blocks drift. (3) scope/governance
+  semantics changed → re-check each instance's scope and `MIDMEM_AUTO_INGEST` posture (the bridge
+  should have exactly one owner). (4) `mcp-server.mjs` startup/protocol changed → pipe-test:
+  `printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' | <your mcp wrapper>`.
 
 ## Gotchas
 - Build the work-event/categorize/community paths **deterministically** — the bench + smoke assume it.

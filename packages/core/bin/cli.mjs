@@ -1,53 +1,129 @@
 #!/usr/bin/env node
 /** ocmw — middleware CLI. Replaces the scaffold's disconnected scripts/. */
-import { Orchestrator } from '../src/index.mjs';
+import { Orchestrator, QdrantVectorStore } from '../src/index.mjs';
 
 const [cmd, ...rest] = process.argv.slice(2);
 const flags = {};
 const pos = [];
+// Feedback's votes are bare switches — `--unhelpful`, `--favorite`, `--unfavorite` never take a value, so they may
+// sit anywhere in an argv (before a positional too) and a stray token after one is a second id, i.e. a usage error.
+const SWITCHES = new Set(['unhelpful', 'favorite', 'unfavorite']);
 for (let i = 0; i < rest.length; i++) {
-  if (rest[i].startsWith('--')) { const k = rest[i].slice(2); const v = rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i]; flags[k] = v; }
+  if (rest[i].startsWith('--')) { const k = rest[i].slice(2); const v = SWITCHES.has(k) || rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i]; flags[k] = v; }
   else pos.push(rest[i]);
 }
 const out = (v) => console.log(typeof v === 'string' ? v : JSON.stringify(v, null, 2));
+// Project axis (#18): --project <slug> tags writes / filters reads (project + global);
+// --projects a,b filters reads on several; --all-projects lifts the env default on reads.
+const wproj = () => (typeof flags.project === 'string' ? { project: flags.project } : {});
+const rproj = () => (flags['all-projects'] ? { projects: null } : typeof flags.projects === 'string' ? { projects: flags.projects.split(',') } : wproj());
+// Source provenance (#46): --source-uri … --language map onto ingest's `source` object (string flags only).
+const SOURCE_FLAGS = { 'source-uri': 'sourceUri', 'canonical-uri': 'canonicalUri', library: 'libraryId', 'doc-id': 'docId', 'capture-method': 'captureMethod', 'captured-at': 'capturedAt', site: 'site', author: 'author', 'published-at': 'publishedAt', language: 'language' };
+const srcFlags = () => { const src = {}; for (const [f, k] of Object.entries(SOURCE_FLAGS)) if (typeof flags[f] === 'string') src[k] = flags[f]; return Object.keys(src).length ? { source: src } : {}; };
+// Metadata filters (#48): the same source flags (+ date bounds) narrow reads via `filters`; --types a,b → `types`.
+const FILTER_FLAGS = { site: 'site', author: 'author', library: 'libraryId', 'doc-id': 'docId', 'capture-method': 'captureMethod', 'source-uri': 'sourceUri', 'canonical-uri': 'canonicalUri', language: 'language', 'published-after': 'publishedAfter', 'published-before': 'publishedBefore', 'captured-after': 'capturedAfter', 'captured-before': 'capturedBefore' };
+const readFilters = () => {
+  const f = {}; for (const [fl, k] of Object.entries(FILTER_FLAGS)) if (typeof flags[fl] === 'string') f[k] = flags[fl];
+  return { ...(Object.keys(f).length ? { filters: f } : {}), ...(typeof flags.types === 'string' ? { types: flags.types.split(',') } : {}) };
+};
+// Library lane (#49): --libraries a,b asks only those libraries; --no-libraries skips the lane.
+const rlib = () => (flags['no-libraries'] ? { libraries: false } : typeof flags.libraries === 'string' ? { libraries: flags.libraries.split(',') } : {});
+// Capture-system verbs (§6 6b/6c/7): a value flag given bare (`--limit` with nothing after it) is an
+// error, never `true` silently coerced; integers are plain decimal digits.
+const strFlag = (k, v) => { if (v === undefined) return null; if (typeof v !== 'string') throw new Error(`--${k} needs a value`); return v; };
+const intFlag = (k, raw, d) => { const v = strFlag(k, raw); if (v === null) return d; if (!/^[0-9]{1,16}$/.test(v)) throw new Error(`--${k} must be a non-negative integer`); return Number(v); };
+// reextract: --only-fallback is the default selection; --all forces model-extracted entries too.
+const reextractAll = (all) => { if (all && flags['only-fallback']) throw new Error('--all and --only-fallback are exclusive'); return !!all; };
+// feedback casts ONE vote on ONE entry: --unhelpful, --favorite or --unfavorite. Two together, any other switch (a
+// misspelt '--favourite' would otherwise count as a plain helpful vote) or a second id is a usage error, never a guess.
+const FEEDBACK_SWITCHES = new Set(['unhelpful', 'favorite', 'unfavorite']);
+const feedbackVote = (unhelpful, favorite, unfavorite) => {
+  const unknown = Object.keys(flags).filter((k) => !FEEDBACK_SWITCHES.has(k));
+  if (unknown.length) throw new Error(`feedback takes only --unhelpful, --favorite or --unfavorite (got ${unknown.map((k) => `--${k}`).join(' ')})`);
+  if (pos.length > 1) throw new Error('feedback takes one <entryId>');
+  const given = [['--unhelpful', unhelpful], ['--favorite', favorite], ['--unfavorite', unfavorite]].filter(([, v]) => v).map(([f]) => f);
+  if (given.length > 1) throw new Error(`feedback takes one of --unhelpful, --favorite, --unfavorite (got ${given.join(' ')})`);
+  return favorite ? { favorite: true } : unfavorite ? { favorite: false } : {};
+};
+// ingest only ever sets a favorite; clearing one is `feedback <entryId> --unfavorite`.
+const ingestFavorite = (favorite) => { if (flags['unfavorite']) throw new Error('ingest takes --favorite only; clear a favorite with feedback <entryId> --unfavorite'); return !!favorite; };
+const readStdin = async () => { let t = ''; process.stdin.setEncoding('utf8'); for await (const c of process.stdin) t += c; return t; };
 
 const o = new Orchestrator();
 try {
   switch (cmd) {
     case 'init': out({ db: o.cfg.dbPath, vault: o.cfg.vaultPath, tiers: o.memory.tierNames }); break;
-    case 'ingest': out(await o.ingest({ path: pos[0], type: flags.type || 'note', title: flags.title, scope: flags.scope, curated: !!flags.curated })); break;
-    case 'remember': out(await o.storeMemory({ content: pos.join(' '), tier: flags.tier || 'memory', type: flags.type || 'insight', scope: flags.scope, curated: !!flags.curated, memFunction: typeof flags.function === 'string' ? flags.function : null })); break;
-    case 'query': out(await o.query(pos.join(' '), { tiers: flags.tiers?.split(','), scopes: flags.scopes?.split(','), functions: typeof flags.functions === 'string' ? flags.functions.split(',') : undefined, limit: Number(flags.limit) || 20, includeGraphContext: !!flags.graph })); break;
+    // ingest --sections: a multi-paper digest is ingested whole AND once per single-citation section
+    // (ingestSections); the type then defaults to research, not note. One line: gen-docs reads the flags here.
+    case 'ingest': out(flags.sections ? await o.ingestSections({ path: pos[0], type: typeof flags.type === 'string' ? flags.type : undefined, title: flags.title, scope: flags.scope, curated: !!flags.curated, authority: typeof flags.authority === 'string' ? flags.authority : undefined, minChars: intFlag('min-chars', flags['min-chars'], 200), minSections: intFlag('min-sections', flags['min-sections'], 2), favorite: ingestFavorite(flags.favorite), ...srcFlags(), ...wproj() }) : await o.ingest({ path: pos[0], type: flags.type || 'note', title: flags.title, scope: flags.scope, curated: !!flags.curated, authority: typeof flags.authority === 'string' ? flags.authority : undefined, favorite: ingestFavorite(flags.favorite), ...srcFlags(), ...wproj() })); break;
+    case 'ingest-content': out(await o.ingestContent({ content: flags.stdin ? await readStdin() : pos.join(' '), type: typeof flags.type === 'string' ? flags.type : 'note', title: typeof flags.title === 'string' ? flags.title : undefined, scope: typeof flags.scope === 'string' ? flags.scope : undefined, authority: typeof flags.authority === 'string' ? flags.authority : 'web', curated: !!flags.curated, favorite: ingestFavorite(flags.favorite), ...srcFlags(), ...wproj() })); break;
+    case 'remember': out(await o.storeMemory({ content: pos.join(' '), tier: flags.tier || 'memory', type: flags.type || 'insight', scope: flags.scope, curated: !!flags.curated, memFunction: typeof flags.function === 'string' ? flags.function : null, authority: typeof flags.authority === 'string' ? flags.authority : undefined, ...wproj() })); break;
+    case 'query': out(await o.query(pos.join(' '), { tiers: flags.tiers?.split(','), scopes: flags.scopes?.split(','), functions: typeof flags.functions === 'string' ? flags.functions.split(',') : undefined, limit: Number(flags.limit) || 20, includeGraphContext: !!flags.graph, minAuthority: typeof flags.minAuthority === 'string' ? flags.minAuthority : undefined, deep: !!flags.deep, historical: !!flags.historical, statuses: typeof flags.statuses === 'string' ? flags.statuses.split(',') : undefined, asOf: typeof flags.asOf === 'string' ? flags.asOf : undefined, bounded: !!flags.bounded, includeWorking: !!flags.includeWorking, audit: !!flags.audit, ...readFilters(), ...rlib(), ...rproj() })); break;
     case 'bridge': { const { bridgeMemory } = await import('../src/bridge.mjs'); out(await bridgeMemory(o)); break; }
-    case 'handoff': out(await o.handoffBrief({ task: pos.join(' '), profile: flags.profile || 'local', scopes: flags.scopes?.split(','), tiers: flags.tiers?.split(',') })); break;
+    case 'handoff': out(await o.handoffBrief({ task: pos.join(' '), profile: flags.profile || 'local', scopes: flags.scopes?.split(','), tiers: flags.tiers?.split(','), ...readFilters(), ...rlib(), ...rproj() })); break;
     case 'recall': out(o.recall(pos[0])); break;
+    case 'feedback': out(o.feedbackIfActive(pos[0], !flags.unhelpful, feedbackVote(flags.unhelpful, flags.favorite, flags.unfavorite))); break;
+    case 'entries': out(o.entryStatus({ ids: pos, libraryId: strFlag('library', flags.library), docIds: strFlag('doc-ids', flags['doc-ids'])?.split(',') ?? [], claims: !!flags.claims, limit: intFlag('limit', flags.limit, 500), offset: intFlag('offset', flags.offset, 0) })); break;
+    case 'reextract': out(await o.reextract({ libraryId: strFlag('library', flags.library), docIds: strFlag('doc-ids', flags['doc-ids'])?.split(',') ?? [], all: reextractAll(flags.all), limit: intFlag('limit', flags.limit, 100), dryRun: !!(flags['dry-run'] || flags.dryRun), retryFailed: !!flags['retry-failed'] })); break;
+    case 'forget-source': out(await o.forgetSource({ libraryId: strFlag('library', flags.library), docId: strFlag('doc-id', flags['doc-id']), dryRun: !!flags.dryRun })); break;
     case 'brief': out(await o.brief()); break;
     case 'lint': out(o.lint()); break;
     case 'project': out(o.project({ force: !!flags.force })); break;
     case 'promote': out(await o.promote(pos[0], pos[1], { curated: !!flags.curated })); break;
     case 'maintain': out(await o.maintain({ force: !!flags.force })); break;
-    case 'recall-check': out(await o.proactiveRecall(pos.join(' '), { minScore: flags.minScore != null ? Number(flags.minScore) : undefined, maxTokens: flags.maxTokens != null ? Number(flags.maxTokens) : undefined, scopes: flags.scopes?.split(','), force: !!flags.force })); break;
-    case 'work': out(await o.recordWork({ kind: flags.kind || pos[0], task: flags.task, content: pos.slice(flags.kind ? 0 : 1).join(' ') || undefined, outcome: flags.outcome, status: flags.status, source: flags.source, artifact: flags.artifact, profile: flags.profile, related: flags.related, scope: flags.scope })); break;
+    case 'recall-check': out(await o.proactiveRecall(pos.join(' '), { minScore: flags.minScore != null ? Number(flags.minScore) : undefined, maxTokens: flags.maxTokens != null ? Number(flags.maxTokens) : undefined, scopes: flags.scopes?.split(','), force: !!flags.force, ...readFilters(), ...rlib(), ...rproj() })); break;
+    case 'work': out(await o.recordWork({ kind: flags.kind || pos[0], task: flags.task, content: pos.slice(flags.kind ? 0 : 1).join(' ') || undefined, outcome: flags.outcome, status: flags.status, source: flags.source, artifact: flags.artifact, profile: flags.profile, related: flags.related, scope: flags.scope, ...wproj() })); break;
     case 'tasks': out(o.openTasks()); break;
     case 'close-tasks': out(o.closeTasks({ tasks: flags.task ? [flags.task] : pos, match: typeof flags.match === 'string' ? flags.match : null, opaque: !!flags.opaque, olderThanDays: flags.olderThanDays != null ? Number(flags.olderThanDays) : null, dryRun: !!flags.dryRun })); break;
-    case 'forget-entries': out(await o.forgetEntries({ ids: pos, match: typeof flags.match === 'string' ? flags.match : null, opaque: !!flags.opaque, scope: typeof flags.scope === 'string' ? flags.scope : null, types: typeof flags.types === 'string' ? flags.types.split(',') : [], olderThanDays: flags.olderThanDays != null ? Number(flags.olderThanDays) : null, dryRun: !!flags.dryRun })); break;
-    case 'claims': out(flags.all ? o.searchClaims(pos.join(' '), { limit: Number(flags.limit) || 50 }) : o.currentClaims(pos.join(' '), { limit: Number(flags.limit) || 50 })); break;
+    case 'forget-entries': out(await o.forgetEntries({ ids: pos, match: typeof flags.match === 'string' ? flags.match : null, opaque: !!flags.opaque, scope: typeof flags.scope === 'string' ? flags.scope : null, project: typeof flags.project === 'string' ? flags.project : null, types: typeof flags.types === 'string' ? flags.types.split(',') : [], olderThanDays: flags.olderThanDays != null ? Number(flags.olderThanDays) : null, dryRun: !!flags.dryRun })); break;
+    case 'forget-nodes': out(await o.forgetNodes({ ids: pos, match: typeof flags.match === 'string' ? flags.match : null, opaque: !!flags.opaque, types: typeof flags.types === 'string' ? flags.types.split(',') : [], dryRun: !!flags.dryRun })); break;
+    // Stance (#33): current claims are observed-only by default; --stances a,b picks stances (on --all it narrows), --all-stances lifts current's filter.
+    case 'claims': { const st = { limit: Number(flags.limit) || 50, ...(typeof flags.stances === 'string' ? { stances: flags.stances.split(',') } : {}) }; out(flags.all ? o.searchClaims(pos.join(' '), st) : o.currentClaims(pos.join(' '), { ...st, allStances: !!flags['all-stances'] })); break; }
     case 'contradictions': out(o.claimContradictions({ minShared: flags.minShared != null ? Number(flags.minShared) : 3 })); break;
+    case 'claims-deferred': out(o.deferredClaims()); break;
+    case 'claim-defer': out(await o.deferClaim(pos[0], typeof flags.reason === 'string' ? flags.reason : 'manual')); break;
+    case 'claim-resolve': out(await o.resolveDeferredClaim(pos[0], flags.reject ? 'reject' : 'accept')); break;
+    case 'claims-reclassify': out(await o.reclassifyWriteConflicts({ dryRun: !!flags.dryRun })); break;
+    case 'claims-sweep': out(await o.claimsSweep({ fragments: !flags['no-fragments'], orphans: !flags['no-orphans'], dryRun: !!flags.dryRun })); break;
+    case 'stale-clear': out(await o.clearStaleFlags({ ids: pos })); break;
+    case 'claim-validity': out(o.claimValidity(pos[0])); break;
+    case 'query-probes': out(await o.probeExpectedQueries({ sampleSize: flags.sample != null ? Number(flags.sample) : undefined, topK: flags.topK != null ? Number(flags.topK) : undefined })); break;
+    case 'consistency': out(o.checkConsistency({ minShared: flags.minShared != null ? Number(flags.minShared) : undefined, deferAgeDays: flags.deferAgeDays != null ? Number(flags.deferAgeDays) : undefined })); break;
     case 'merge-concepts': out(await o.mergeConcepts(pos[0], pos[1], { type: flags.type || 'concept' })); break;
     case 'refresh-concepts': out(await o.refreshConcepts({ maxEmbedPerPass: flags.max != null ? Number(flags.max) : undefined })); break;
     case 'packs': out(o.listPacks()); break;
+    case 'libraries': out(o.listLibraries()); break;
+    case 'library-get': out(await o.libraryGet(pos[0], pos[1], JSON.parse(flags.locator))); break;
     case 'export': out(o.exportKnowledge()); break;
+    case 'rescope':
+    case 'lower-authority': {
+      const sel = { to: flags.to, ids: pos, pathPrefix: typeof flags.pathPrefix === 'string' ? flags.pathPrefix : null, match: typeof flags.match === 'string' ? flags.match : null, fromScopes: typeof flags.from === 'string' ? flags.from.split(',') : null, statuses: typeof flags.statuses === 'string' ? flags.statuses.split(',') : null, dryRun: !!flags.dryRun };
+      out(cmd === 'rescope' ? await o.rescope(sel) : await o.lowerAuthority({ ...sel, reason: typeof flags.reason === 'string' ? flags.reason : null }));
+      break;
+    }
+    // Archive by id: ids are required — an empty list is a usage error, never an age sweep.
+    case 'archive': if (!pos.length) throw new Error('archive needs entry ids — usage: archive <entry ids…> [--reason <text>] [--dryRun]'); out(await o.archiveEntries({ ids: pos, reason: strFlag('reason', flags.reason), dryRun: !!flags.dryRun })); break;
+    case 'reembed': out(await o.reembedFallback({ limit: Number(flags.limit) || 200, since: typeof flags.since === 'string' ? flags.since : null, dryRun: !!flags.dryRun })); break;
+    case 'vectors': {
+      // Qdrant migration path (#50): backfill (copy real SQLite vectors, no re-embed) → parity → flip the backend by config.
+      const sub = pos[0];
+      if (sub === 'backfill') out(await o.backfillVectors({ limit: Number(flags.limit) || 100000, dryRun: !!flags.dryRun }));
+      else if (sub === 'parity') out(await o.vectorParity({ queries: typeof flags.queries === 'string' ? flags.queries.split(';') : pos.slice(1), k: flags.k != null ? Number(flags.k) : 10 }));
+      else if (sub === 'health') out({ vectors: await o.memory.vectorHealth(), ...(o.cfg.vectorBackend === 'qdrant' ? { qdrant: await new QdrantVectorStore(o.cfg).health() } : {}) });
+      else out('Usage: vectors <backfill [--limit <n>] [--dryRun] | parity --queries "q1;q2" [--k <n>] | health>');
+      break;
+    }
     case 'prospective': {
       const sub = pos[0];
-      if (sub === 'add') out(await o.recordProspective({ intent: flags.intent || pos.slice(1).join(' '), trigger: { type: flags.on ? 'date' : 'event', value: flags.on || flags.event }, context: flags.context, scope: flags.scope }));
+      if (sub === 'add') out(await o.recordProspective({ intent: flags.intent || pos.slice(1).join(' '), trigger: { type: flags.on ? 'date' : 'event', value: flags.on || flags.event }, context: flags.context, scope: flags.scope, ...wproj() }));
       else if (sub === 'due') out(o.dueProspective({ now: flags.now || undefined, event: typeof flags.event === 'string' ? flags.event : null }));
       else if (sub === 'complete' || sub === 'cancel') out(o.resolveProspective(pos[1], sub === 'complete' ? 'completed' : 'cancelled'));
       else out('Usage: prospective <add --intent "…" (--on <ISO date> | --event <name>) [--context …] | due [--now <ISO>] [--event <name>] | complete <id> | cancel <id>>');
       break;
     }
-    case 'pattern': out(await o.recordPattern({ type: flags.type || pos[0], title: flags.title || pos.slice(flags.type ? 0 : 1).join(' '), context: flags.context, problem: flags.problem, solution: flags.solution, outcome: flags.outcome, evidence: typeof flags.evidence === 'string' ? flags.evidence.split(';').filter(Boolean) : [], scope: flags.scope })); break;
+    case 'pattern': out(await o.recordPattern({ type: flags.type || pos[0], title: flags.title || pos.slice(flags.type ? 0 : 1).join(' '), context: flags.context, problem: flags.problem, solution: flags.solution, outcome: flags.outcome, evidence: typeof flags.evidence === 'string' ? flags.evidence.split(';').filter(Boolean) : [], scope: flags.scope, ...wproj() })); break;
     default:
-      out('Usage: ocmw <init|ingest <path>|remember <text>|query <text>|recall <id>|recall-check <message>|work --kind <type>|tasks|close-tasks [labels…]|brief|lint|project|promote <id> <tier>|maintain|bridge|handoff <task>> [--kind task_attempt|source_used|dead_end|correction|artifact|decision --task --outcome --status --source --artifact --related --type --title --tier --tiers --scope --scopes --limit --minScore --maxTokens --graph --curated --force --profile local|frontier]\n  close-tasks selectors (at least one required): [labels…] | --task <label> | --match <regex> | --opaque | --olderThanDays <n>; preview with --dryRun');
+      out('Usage: ocmw <init|ingest <path>|ingest-content <text>|remember <text>|query <text>|recall <id>|recall-check <message>|work --kind <type>|tasks|close-tasks [labels…]|brief|lint|project|promote <id> <tier>|maintain|bridge|reembed [--since <ISO> --limit <n> --dryRun]|vectors <backfill [--limit --dryRun]|parity --queries "q1;q2" [--k]|health>|rescope --to <scope>|lower-authority --to <authority>|archive <entry ids…>|claims-reclassify|claims-sweep|handoff <task>> [--kind task_attempt|source_used|dead_end|correction|artifact|decision --task --outcome --status --source --artifact --related --type --title --tier --tiers --scope --scopes --limit --minScore --maxTokens --graph --curated --force --profile local|frontier --project <slug> --projects a,b --all-projects]\n  project axis: --project tags writes (default MIDMEM_PROJECT) and filters reads to project + global; --projects a,b filters on several; --all-projects lifts the default\n  rescope / lower-authority selectors (at least one required): [entry ids…] | --pathPrefix <source dir> | --match <content regex>; --from a,b and --statuses a,b narrow; --reason (lower-authority); preview with --dryRun\n  archive <entry ids…> [--reason <text>] [--dryRun]: governed archive by id (ids required — no age sweep here); the row leaves the default read, stays in --historical, and the claims its ingest produced are archived (reason source-archived)\n  claims <query> [--stances a,b | --all-stances] [--limit <n>]: the CURRENT claims — observed stance only by default (stance at commit, roadmap #33: observed|provisional|quoted|rejected; MIDMEM_CLAIM_STANCE=0 turns tagging off); --stances picks the stances to return, --all-stances returns every stance; claims <query> --all [--stances a,b]: every status and stance, each row carrying metadata.stance (--stances narrows)\n  claims-reclassify [--dryRun]: re-judge write-time contradictory claim tags against the containment floor (MIDMEM_CLAIM_CONTRADICTION_MIN_CONTAINMENT, default 0.6); below-floor tags become additive and their write-path deferrals are released; explicit deferrals are never touched\n  claims-sweep [--no-fragments] [--no-orphans] [--dryRun]: archive live claims that are fragments (not claim-shaped: a heading, table row, bold-lead bullet, session label; reason not-a-claim) or orphans (the source entry was superseded, archived or forgotten; reason source-gone), with metadata.archivedBy; they leave every contradictedBy list; lint shows the queue as fragmentClaims / orphanClaims\n  query history/policy: --historical (active + archived, labelled) | --statuses a,b | --asOf <ISO> | --bounded (occupancy policy without a token budget) | --includeWorking | --audit (same results, nothing renewed: no retrieval count, last-accessed or lease change, no maintain — for reviews)\n  close-tasks selectors (at least one required): [labels…] | --task <label> | --match <regex> | --opaque | --olderThanDays <n>; preview with --dryRun\n  forget-nodes (HARD delete, edges cascade) selectors: [node ids…] | --match <label regex> | --opaque; --types narrows; preview with --dryRun\n  ingest source provenance: --source-uri --canonical-uri --library --doc-id --capture-method --captured-at --site --author --published-at --language\n  ingest <path> --sections [--min-chars <n, default 200>] [--min-sections <n, default 2>]: a multi-paper digest — the file is ingested whole, then every heading section citing exactly ONE URL (body ≥ min-chars) is ingested on its own, keyed by that citation (arXiv/DOI canonicalized; captureMethod digest-section), so a later digest citing the same paper supersedes it; fewer than min-sections distinct citations → the file alone (reason not-a-digest); --type defaults to research\n  query / handoff / recall-check metadata filters (AND): --site --author --library --doc-id --capture-method --source-uri --canonical-uri --language --published-after --published-before --captured-after --captured-before <ISO> | --types a,b\n  library lane (#49): libraries (list registered, MIDMEM_LIBRARIES) | library-get <libraryId> <docId> --locator <JSON {docId,version,charStart,charEnd}>; query / handoff / recall-check take --libraries a,b (ask only those) | --no-libraries (skip the lane)\n  ingest-content <text> | --stdin: same source flags (one of --canonical-uri/--source-uri/--doc-id required) + --type --title --scope --authority (default web) --curated\n  favorites (schema 6): feedback <entryId> --favorite | --unfavorite (idempotent; a favorite is ONE helpful vote and the unfavorite takes back only that vote; active entries only; {success, id, favorite, helpful_count, trust_score, changed}; feedback refuses any other switch and a second id) | ingest <path> … --favorite (also ingest-content; the entry the ingest stands for becomes a favorite; a re-ingest that supersedes a favorite carries it and its vote, once)\n  capture systems (INTEGRATION-MODES §6): feedback <entryId> [--unhelpful | --favorite | --unfavorite] (active entries only; else {success:false, reason}) | entries <entry ids…> | entries --library <id> [--doc-ids a,b] [--limit <n ≤ 5000, default 500>] [--offset <n>] [--claims] (lifecycle read; never a recall) | forget-source --library <id> --doc-id <docId> [--dryRun] (soft-forgets every entry from that source, unlinks it from alsoSources) | reextract [--library <id> [--doc-ids a,b]] [--only-fallback (default) | --all] [--limit <n ≤ 5000, default 100>] [--retry-failed] [--dry-run] (re-runs model extraction on active entries whose source file is unchanged, in place: id, tier, lease and counters kept; writes only when the model answers; never curated entries; an entry whose answer failed is retried after 24 h, or now with --retry-failed)');
   }
 } catch (e) { console.error('ERROR:', e.message); process.exitCode = 1; }
 finally { o.close(); }

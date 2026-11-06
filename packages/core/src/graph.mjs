@@ -11,6 +11,8 @@ const EDGE_TYPES = new Set([
   'attempted', 'used_source', 'avoided', 'corrected_by', 'produced', 'decided', 'about',
   // concept canonicalization: a merged-away variant points at its canonical node
   'alias_of',
+  // HiGram hierarchy (roadmap #12): concept → its community parent node
+  'member_of',
 ]);
 
 /** Node types whose labels are concepts (canonicalized identity). Identifier-like types
@@ -56,6 +58,23 @@ export class GraphStore {
     return id;
   }
 
+  /** Delete a node AND every edge touching it. The tables have no FK constraints, so a bare
+   *  row delete strands its edges (the July-2026 out-of-band task cleanup left 2,006 dangling)
+   *  — this is the only sanctioned delete path; bulk selection lives in forgetNodes. */
+  deleteNode(id) {
+    const edges = this.db.prepare('DELETE FROM edges WHERE from_id=? OR to_id=?').run(id, id).changes;
+    const node = this.db.prepare('DELETE FROM nodes WHERE id=?').run(id).changes;
+    return { node, edges };
+  }
+
+  /** Integrity sweep: drop edges with a missing endpoint — self-healing against node deletes
+   *  that bypassed deleteNode. Idempotent; runs on the forced/daily maintain pass. */
+  sweepOrphanEdges() {
+    return this.db.prepare(
+      'DELETE FROM edges WHERE from_id NOT IN (SELECT id FROM nodes) OR to_id NOT IN (SELECT id FROM nodes)',
+    ).run().changes;
+  }
+
   node(id) { const r = this.db.prepare('SELECT * FROM nodes WHERE id=?').get(id); return r ? this.#n(r) : null; }
   byType(type) { return this.db.prepare('SELECT * FROM nodes WHERE type=?').all(type).map((r) => this.#n(r)); }
   allNodes() { return this.db.prepare('SELECT * FROM nodes').all().map((r) => this.#n(r)); }
@@ -73,7 +92,9 @@ export class GraphStore {
     };
   }
 
-  /** Nodes whose label matches a query token (graph-context for retrieval). */
+  /** Nodes whose label matches a query token (graph-context for retrieval). Substring match on any
+   *  ≥ 3-char token — fine for a context sample, too loose for flagging: supersede's stale-path rule
+   *  no longer uses it (2026-10-12; see Orchestrator.supersedeClaim). */
   findByText(query) {
     const toks = (query.toLowerCase().match(/[a-z0-9]+/g) || []).filter((w) => w.length >= 3);
     if (!toks.length) return [];

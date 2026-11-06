@@ -3,22 +3,131 @@
  * Round-trips losslessly (the scaffold serialized the chain to prose then
  * regex-parsed it back). Provenance + chain stored as JSON.
  */
+import { randomUUID } from 'node:crypto';
 import { genId, nowISO, json, tokenize } from './util.mjs';
 
-const STATUSES = new Set(['active', 'verified', 'contradicted', 'superseded', 'archived']);
+const STATUSES = new Set(['active', 'verified', 'contradicted', 'superseded', 'archived', 'deferred']);
+
+/** Negation markers: the polarity signal shared by the write-path relate(), the audit-time
+ *  findContradictions() and reclassifyWriteConflicts() — one set, so the three stay one rule. */
+const NEGATION_WORDS = new Set(['not', 'no', 'never', 'none', 'cannot', 'cant', 'isnt', 'arent', 'wont', 'dont', 'false', 'incorrect', 'deprecated', 'removed', 'without', 'disabled', 'fails', 'failed']);
+
+/** Default containment floor for the `contradictory` verdict (MIDMEM_CLAIM_CONTRADICTION_MIN_CONTAINMENT).
+ *  Measured 2026-10-05: every one of the 68 live-store claims tagged contradictory was a false
+ *  positive — long prose fragments that shared ≥ 3 tokens and happened to carry one negation word,
+ *  token containment ≤ 0.636 — while every intended contradiction fixture sits at ≥ 0.667. */
+const CONTRADICTION_MIN_CONTAINMENT = 0.6;
+
+/** Polarity split of a claim's tokens: whether it carries a negation marker, and its significant
+ *  (non-negation) token set. Same tokenisation everywhere a pair's polarity is judged. */
+function polarity(content) {
+  const toks = new Set(tokenize(content || ''));
+  return { neg: [...toks].some((t) => NEGATION_WORDS.has(t)), sig: new Set([...toks].filter((t) => !NEGATION_WORDS.has(t))) };
+}
+
+/** A text's significant tokens: the claim store's tokenisation minus its negation markers — the set
+ *  every polarity/containment judgment here compares. Exported so the supersede stale-path rule
+ *  (Orchestrator.supersedeClaim) matches node labels by the same words, not a copied word list. */
+export function significantTokens(text) { return polarity(text).sig; }
+
+/** Claim stance at commit (roadmap #33, CASK arXiv 2610.09008). A store that keeps only resulting
+ *  sentences lets a hypothetical ("we could migrate tomorrow"), a simulated outcome ("the dry run
+ *  would return success"), a quoted belief ("according to the vendor the fix shipped") or an explicit
+ *  rejection ("we decided against the rewrite") come back later as a current fact. These lists are
+ *  the ONLY source of stance — no model, no config of the lists (MIDMEM_CLAIM_STANCE=0 turns the
+ *  whole feature off, nothing else tunes it). Checked in this order so the strongest wins:
+ *   - rejected: the claim records a decision NOT to do / a withdrawal — asserting it as the thing
+ *     itself would invert it.
+ *   - quoted: explicit third-party attribution only. NOT "reports", "finds", "shows", "measures": a
+ *     paper or document reporting its own result is the source speaking, not a quotation, and the
+ *     store is full of "X reports Y" research claims that must stay observed.
+ *   - provisional: modal / conditional / proposal / simulation markers — not (yet) an observation.
+ *   - observed: everything else (the default; legacy claims without a stance read as observed).
+ *  Matching: lower-cased, hyphens folded to spaces (so "dry-run" is "dry run"), curly apostrophes
+ *  straightened, whole words/phrases only (\b…\b). */
+const STANCE_MARKERS = [
+  // 'reverted' is NOT a rejection marker: "the patch was reverted" is an observed state change that
+  // is current truth, not a proposition the speaker set aside (measured on the live store 2026-10-12).
+  ['rejected', ['rejected', 'decided against', 'not adopted', 'abandoned', 'ruled out', 'withdrawn']],
+  ['quoted', ['according to', 'said that', 'says that', 'told', 'claimed that', 'claims that', 'believes that', 'alleged', 'reportedly', 'as reported by']],
+  // 'may' is NOT a marker: it is permissive in technical prose ("no attacker text may reach") and
+  // the month name ("May 30, 2026"); 7 of 7 live claims carrying it were observations. 'consider'
+  // is deliberation, not a possibility held as fact.
+  ['provisional', ['could', 'might', 'would', 'should we', 'if we', 'suppose', 'hypothetically', 'in theory', 'plan to', 'plans to', 'propose', 'proposed', 'proposal', "let's", 'simulated', 'mock', 'dry run', 'what if', 'tentatively']],
+];
+export const STANCES = ['observed', 'provisional', 'quoted', 'rejected'];
+const STANCE_RES = STANCE_MARKERS.map(([stance, words]) => [stance, words.map((w) => [w, new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+')}\\b`)])]);
+
+/** Deterministic stance of a claim's text: { stance, markers } — markers are the winning list's
+ *  phrases that fired (empty for observed). Same input, same verdict, always. */
+export function stanceOf(content) {
+  const text = String(content || '').toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[-\u2010-\u2014]+/g, ' ');
+  for (const [stance, res] of STANCE_RES) {
+    const markers = res.filter(([, re]) => re.test(text)).map(([w]) => w);
+    if (markers.length) return { stance, markers };
+  }
+  return { stance: 'observed', markers: [] };
+}
+
+/** A stored claim's stance: its recorded metadata.stance, or observed (legacy rows, tagging off). */
+export function claimStance(c) { const s = c?.metadata?.stance; return STANCES.includes(s) ? s : 'observed'; }
+
+/** Live-scan SQL guard: only observed (or unstanced legacy) rows are neighbours. CASE, not OR: SQLite
+ *  does not promise short-circuit evaluation, and json_extract on a malformed row would throw. */
+const OBSERVED_SQL = " AND (CASE WHEN json_valid(metadata) THEN COALESCE(json_extract(metadata, '$.stance'), 'observed') ELSE 'observed' END) = 'observed'";
+
+/** Token containment of a pair: shared significant tokens / the SMALLER side's significant token
+ *  count. Unlike Jaccard it is not diluted when one side is a short claim inside a long paragraph,
+ *  and it separates a claim-and-its-negation (≈ 1) from two prose fragments that merely touch the
+ *  same locality (low). */
+function containmentOf(aSig, bSig) {
+  let shared = 0; for (const t of aSig) if (bSig.has(t)) shared++;
+  const denom = Math.min(aSig.size, bSig.size);
+  return { shared, containment: denom ? shared / denom : 0 };
+}
 
 export class ClaimStore {
-  constructor(db) { this.db = db; }
+  constructor(db, cfg = {}) { this.db = db; this.cfg = cfg; }
 
-  add({ content, type = 'fact', source = {}, provenance = {}, metadata = {} }) {
-    const id = genId('claim', content.slice(0, 50) + (source.path || ''));
+  /** The configured containment floor for `contradictory` (claims.contradictionMinContainment);
+   *  a missing or non-numeric value falls back to the default rather than disabling the floor. */
+  #containmentFloor() {
+    const f = this.cfg?.claims?.contradictionMinContainment;
+    return typeof f === 'number' && Number.isFinite(f) ? f : CONTRADICTION_MIN_CONTAINMENT;
+  }
+  /** The same floor, for callers outside the store (the supersede stale-path rule): one value, one fallback. */
+  containmentFloor() { return this.#containmentFloor(); }
+
+  /** Stance tagging (roadmap #33) is on unless claims.stance === false (MIDMEM_CLAIM_STANCE=0). Off,
+   *  nothing is tagged and every read/scan below behaves exactly as before the feature. */
+  stanceEnabled() { return this.cfg?.claims?.stance !== false; }
+
+  add({ content, type = 'fact', source = {}, provenance = {}, metadata = {}, defer = false }) {
+    // The id's hash part must not repeat within one millisecond: two claims that share their first
+    // 50 characters (common in news text: "The company said that ...") used to get the SAME id when
+    // written in one clock tick, and the INSERT then failed the ingest with
+    // 'UNIQUE constraint failed: claims.id'. The full content plus a random nonce keeps the id's
+    // format (claim-<base36 ms>-<12 hex>) and makes a collision negligible. Ids were never stable
+    // across runs (they carry the clock), so nothing depends on the old seed.
+    const id = genId('claim', `${content}\u0000${source.path || ''}\u0000${randomUUID()}`);
     const ts = nowISO();
     const prov = {
       extractedAt: provenance.extractedAt || ts,
       extractor: provenance.extractor || 'unknown',
       confidence: provenance.confidence ?? 0.5,
+      // Origin authority survives extraction (roadmap #10) — dropping it here would BE the
+      // provenance-laundering the field exists to prevent.
+      ...(provenance.authority ? { authority: provenance.authority } : {}),
+      ...(provenance.grounding != null ? { grounding: provenance.grounding } : {}),
       chain: provenance.chain || [{ step: 'ingest', source: source.path || 'unknown', timestamp: ts }],
     };
+    // Stance at commit (roadmap #33): a non-observed claim (provisional / quoted / rejected) is not
+    // asserting a fact, so it never defers and leaves no evidence edge on its neighbour — but its
+    // write relation is still recorded for the ledger. The computed stance replaces any caller-given
+    // one: the word lists are the only source.
+    const stance = this.stanceEnabled() ? stanceOf(content) : null;
+    const asserted = !stance || stance.stance === 'observed';
+    if (stance) { const { stance: _s, stanceMarkers: _m, ...rest } = metadata; metadata = { ...rest, stance: stance.stance, ...(stance.markers.length ? { stanceMarkers: stance.markers } : {}) }; }
     // MOSAIC-style write-path relation (arXiv 2607.16211): compare the incoming claim against
     // live neighbors BEFORE it lands, so conflicts are visible at write time instead of being
     // discovered by a later audit or a contradictory query answer. Tag only — never mutate the
@@ -26,55 +135,212 @@ export class ClaimStore {
     // what queues them for one. The relation rides in metadata.writeRelation.
     const relation = this.relate(content);
     const meta = relation.relation === 'novel' ? metadata : { ...metadata, writeRelation: relation };
+    // TARL deferred ledger (arXiv 2608.03699): a claim that contradicts a live neighbor is not
+    // forced into keep-or-quarantine — it lands `deferred` (pending judgment) instead of `active`.
+    // Deferred claims are invisible to current()/relate() neighbors until resolved, so uncertain
+    // evidence is preserved without being promoted into durable truth. Judgment resolves via
+    // resolveDeferred; nothing here auto-resolves.
+    const deferIt = defer || (asserted && relation.relation === 'contradictory' && this.cfg?.claims?.deferContradictory !== false);
+    const status = deferIt ? 'deferred' : 'active';
+    // PGMem validity window (roadmap #14): every claim records when it was first observed;
+    // corroboration/contradiction updates the window below.
+    const meta2 = { ...(deferIt ? { ...meta, deferredAt: ts, deferReason: defer ? 'explicit' : 'write-contradiction' } : meta), firstObserved: ts, lastObserved: ts };
     this.db.prepare(`
       INSERT INTO claims(id,content,type,source,provenance,status,metadata,created_at,updated_at)
-      VALUES(?,?,?,?,?, 'active', ?,?,?)
-    `).run(id, content, type, JSON.stringify(source), JSON.stringify(prov), JSON.stringify(meta), ts, ts);
-    if (relation.relation === 'contradictory') this.db.logOp?.('claim-write-conflict', { id, neighbor: relation.neighborId, shared: relation.shared });
+      VALUES(?,?,?,?,?, ?, ?,?,?)
+    `).run(id, content, type, JSON.stringify(source), JSON.stringify(prov), status, JSON.stringify(meta2), ts, ts);
+    if (relation.relation === 'contradictory') this.db.logOp?.('claim-write-conflict', { id, neighbor: relation.neighborId, shared: relation.shared, deferred: deferIt, ...(asserted ? {} : { stance: stance.stance }) });
+    // PGMem evidence edges on the NEIGHBOR — pure observation bookkeeping, never a judgment:
+    // corroboration extends the neighbor's validity window (lastObserved + supportCount);
+    // contradiction records the challenger's id (bounded). Status is never touched here —
+    // the "never mutate the neighbor" rule applies to relations/status, not to counters.
+    // Observation bookkeeping needs an observation: a non-observed claim (a hypothetical, a quote, a
+    // rejection) neither extends the neighbour's window nor challenges it.
+    if (relation.neighborId && asserted) {
+      const nb = this.get(relation.neighborId);
+      if (nb) {
+        if (relation.relation === 'corroborating') {
+          this.db.prepare('UPDATE claims SET metadata=? WHERE id=?').run(JSON.stringify({
+            ...nb.metadata, lastObserved: ts, supportCount: (nb.metadata.supportCount || 0) + 1,
+          }), nb.id);
+        } else if (relation.relation === 'contradictory') {
+          const refs = [...new Set([...(nb.metadata.contradictedBy || []), id])].slice(-5);
+          this.db.prepare('UPDATE claims SET metadata=? WHERE id=?').run(JSON.stringify({
+            ...nb.metadata, contradictedBy: refs,
+          }), nb.id);
+        }
+      }
+    }
     return this.get(id);
+  }
+
+  /** PGMem (roadmap #14): a claim's validity window, derived from its own metadata. */
+  validity(id) {
+    const c = this.get(id);
+    if (!c) return null;
+    return {
+      id: c.id,
+      status: c.status,
+      firstObserved: c.metadata.firstObserved || c.created_at,
+      lastObserved: c.metadata.lastObserved || c.updated_at,
+      supportCount: c.metadata.supportCount || 0,
+      contradictedBy: c.metadata.contradictedBy || [],
+      currentlyValid: (c.status === 'active' || c.status === 'verified') && !(c.metadata.contradictedBy || []).length,
+    };
+  }
+
+  /** TARL: park a live claim pending judgment (status → deferred). */
+  defer(id, reason = 'manual') {
+    const c = this.get(id);
+    if (!c) return { success: false, message: `not found: ${id}` };
+    if (c.status !== 'active' && c.status !== 'verified') return { success: false, message: `cannot defer from status '${c.status}'` };
+    this.db.prepare('UPDATE claims SET status=?, metadata=?, updated_at=? WHERE id=?')
+      .run('deferred', JSON.stringify({ ...c.metadata, deferredAt: nowISO(), deferReason: reason }), nowISO(), id);
+    return { success: true, id, status: 'deferred' };
+  }
+
+  /** TARL: resolve a deferred claim by judgment — accept (→ active) or reject (→ archived).
+   *  The resolution is recorded in metadata; the claim row is never deleted (ledger history).
+   *  Accepting a claim the write path tagged `contradictory` IS the judgment that tag queued: the
+   *  tag becomes `additive` (+ `metadata.judged`) and the claim leaves the neighbour's
+   *  `contradictedBy` — the same bookkeeping reclassifyWriteConflicts does — so lint stops
+   *  reporting a decided pair as a pending write conflict (2026-10-06). Reject keeps the tag: the
+   *  row is archived and the tag is its history. */
+  resolveDeferred(id, action) {
+    if (action !== 'accept' && action !== 'reject') return { success: false, message: `action must be accept|reject, got '${action}'` };
+    const c = this.get(id);
+    if (!c) return { success: false, message: `not found: ${id}` };
+    if (c.status !== 'deferred') return { success: false, message: `not deferred: '${c.status}'` };
+    const status = action === 'accept' ? 'active' : 'archived';
+    const at = nowISO();
+    const wr = c.metadata.writeRelation;
+    const judged = action === 'accept' && wr?.relation === 'contradictory';
+    const meta = {
+      ...c.metadata, deferredResolution: { action, at },
+      ...(judged ? { writeRelation: { ...wr, relation: 'additive' }, judged: { action: 'accept', at, from: 'contradictory' } } : {}),
+    };
+    this.db.tx(() => {
+      this.db.prepare('UPDATE claims SET status=?, metadata=?, updated_at=? WHERE id=?').run(status, JSON.stringify(meta), at, id);
+      const nb = judged && wr.neighborId ? this.get(wr.neighborId) : null;
+      if (nb && Array.isArray(nb.metadata.contradictedBy) && nb.metadata.contradictedBy.includes(id)) {
+        const { contradictedBy, ...rest } = nb.metadata;
+        const left = contradictedBy.filter((x) => x !== id);
+        this.db.prepare('UPDATE claims SET metadata=? WHERE id=?').run(JSON.stringify(left.length ? { ...rest, contradictedBy: left } : rest), nb.id);
+      }
+    });
+    return { success: true, id, status, ...(judged ? { judged: true } : {}) };
+  }
+
+  /** The pending ledger: deferred claims, oldest first (review queue order). */
+  deferred() {
+    return this.db.prepare("SELECT * FROM claims WHERE status='deferred' ORDER BY updated_at ASC, id ASC")
+      .all().map((r) => this.#h(r));
   }
 
   /**
    * Deterministic write-path relation of a candidate claim to its live neighbors.
    * Neighbor = live claim sharing ≥ minShared significant tokens (the same locality rule
    * findContradictions uses). Verdicts, checked in order:
-   *  - contradictory: exactly one side negated (same rule as the audit-time finder)
+   *  - contradictory: exactly one side negated AND token containment ≥ the floor
+   *    (claims.contradictionMinContainment, default 0.6) — same rule as the audit-time finder.
+   *    A differing-polarity pair below the floor is two fragments that touch the same locality,
+   *    not a claim and its negation; it falls through to the same-polarity ladder below.
    *  - corroborating: near-identical token sets (high Jaccard) with same polarity
    *  - superseding-candidate: strong overlap, same polarity, but materially different content
    *  - additive: shares locality but low similarity — likely a new fact about known things
    *  - novel: no neighbor at all
-   * Returns { relation, neighborId?, shared?, similarity? } for the strongest neighbor.
+   * Returns { relation, neighborId?, shared?, similarity?, containment? } for the strongest neighbor.
    */
   relate(content, { minShared = 3, scanLimit = 500 } = {}) {
-    const NEGW = new Set(['not', 'no', 'never', 'none', 'cannot', 'cant', 'isnt', 'arent', 'wont', 'dont', 'false', 'incorrect', 'deprecated', 'removed', 'without', 'disabled', 'fails', 'failed']);
-    const cand = new Set(tokenize(content));
-    const candNeg = [...cand].some((t) => NEGW.has(t));
-    const candSig = new Set([...cand].filter((t) => !NEGW.has(t)));
+    const floor = this.#containmentFloor();
+    const { neg: candNeg, sig: candSig } = polarity(content);
     let best = null;
     // Bounded, deterministic neighbor scan: the most recent `scanLimit` live claims (stable
     // created_at DESC, id DESC order — same-millisecond bulk inserts must not flip the winner).
     // Unbounded getAll() made every claims.add O(N) and bulk ingest O(N^2) (~11ms/1k claims).
+    // Non-observed claims (roadmap #33) are never neighbours: an observation contradicting a
+    // hypothetical is not a write conflict, and must not be deferred because of it.
     const neighbors = this.db.prepare(
-      "SELECT * FROM claims WHERE status IN ('active','verified') ORDER BY created_at DESC, id DESC LIMIT ?",
+      `SELECT * FROM claims WHERE status IN ('active','verified')${this.stanceEnabled() ? OBSERVED_SQL : ''} ORDER BY created_at DESC, id DESC LIMIT ?`,
     ).all(scanLimit).map((r) => this.#h(r));
     for (const c of neighbors) {
-      const nb = new Set(tokenize(c.content));
-      const nbSig = new Set([...nb].filter((t) => !NEGW.has(t)));
-      let shared = 0; for (const t of candSig) if (nbSig.has(t)) shared++;
+      const { neg: nbNeg, sig: nbSig } = polarity(c.content);
+      const { shared, containment } = containmentOf(candSig, nbSig);
       if (shared < minShared) continue;
       const union = new Set([...candSig, ...nbSig]).size;
       const sim = union ? shared / union : 0;
       if (!best || shared > best.shared) {
-        const nbNeg = [...nb].some((t) => NEGW.has(t));
         let relation;
-        if (candNeg !== nbNeg) relation = 'contradictory';
+        // The floor compares the unrounded value; the stored figure is rounded like similarity.
+        if (candNeg !== nbNeg && containment >= floor) relation = 'contradictory';
         else if (sim >= 0.8) relation = 'corroborating';
         else if (sim >= 0.4) relation = 'superseding-candidate';
         else relation = 'additive';
-        best = { relation, neighborId: c.id, shared, similarity: Number(sim.toFixed(3)) };
+        best = { relation, neighborId: c.id, shared, similarity: Number(sim.toFixed(3)), containment: Number(containment.toFixed(3)) };
       }
     }
     return best || { relation: 'novel' };
+  }
+
+  /**
+   * Re-judge the write-time `contradictory` tags against the containment floor (deterministic;
+   * the repair for tags written before the floor existed, or under a lower one). For every
+   * deferred/active/verified claim tagged contradictory, containment is recomputed against the
+   * RECORDED neighbor with relate()'s tokenisation and negation set. Below the floor — or the
+   * neighbor row is gone — the tag becomes `additive` (+ `metadata.reclassified`), a claim the
+   * write path itself deferred (`deferReason: 'write-contradiction'`) is released to `active`
+   * (`releasedAt`; `deferredAt` stays as history), and its id leaves the neighbor's
+   * `contradictedBy`. At or above the floor nothing changes. A claim deferred by judgment (explicit
+   * add({defer}), or defer() with any reason) is never touched — only the write path's own
+   * verdicts are re-judged. `updated_at` is left alone: the knowledge did not change, so
+   * current-claim ordering must not move. One transaction; dryRun computes the same report and writes nothing.
+   */
+  reclassifyWriteConflicts({ floor = this.#containmentFloor(), dryRun = false } = {}) {
+    const rows = this.db.prepare(`SELECT * FROM claims WHERE status IN ('deferred','active','verified')
+      AND json_valid(metadata) AND json_extract(metadata, '$.writeRelation.relation') = 'contradictory'
+      ORDER BY created_at ASC, id ASC`).all().map((r) => this.#h(r));
+    const at = nowISO();
+    const out = { scanned: rows.length, reclassified: 0, released: 0, kept: 0, judgmentDeferred: 0, floor, dryRun: !!dryRun, sample: [] };
+    const plan = [];
+    for (const c of rows) {
+      if (c.status === 'deferred' && c.metadata.deferReason !== 'write-contradiction') { out.judgmentDeferred++; continue; }
+      const wr = c.metadata.writeRelation || {};
+      const nb = wr.neighborId ? this.get(wr.neighborId) : null;
+      const containment = nb ? containmentOf(polarity(c.content).sig, polarity(nb.content).sig).containment : null;
+      if (nb && containment >= floor) { out.kept++; continue; }
+      const reason = nb ? 'below-containment-floor' : 'neighbor-missing';
+      const rounded = containment === null ? null : Number(containment.toFixed(3));
+      const release = c.status === 'deferred'; // judgment-deferred rows were skipped above
+      plan.push({ c, neighborId: wr.neighborId || null, rounded, reason, release });
+      out.reclassified++;
+      if (release) out.released++;
+      if (out.sample.length < 10) out.sample.push({ id: c.id, neighborId: wr.neighborId || null, containment: rounded, reason, status: release ? 'deferred→active' : c.status });
+    }
+    if (dryRun || !plan.length) return out;
+    const upd = this.db.prepare('UPDATE claims SET status=?, metadata=? WHERE id=?');
+    const updMeta = this.db.prepare('UPDATE claims SET metadata=? WHERE id=?');
+    this.db.tx(() => {
+      for (const { c: planned, neighborId, rounded, reason, release } of plan) {
+        // Fresh read inside the tx: a claim can itself be the neighbor of an earlier plan item, whose
+        // contradictedBy edit must not be overwritten by this row's pre-transaction snapshot.
+        const c = this.get(planned.id);
+        const meta = {
+          ...c.metadata,
+          writeRelation: { ...c.metadata.writeRelation, relation: 'additive', containment: rounded },
+          reclassified: { from: 'contradictory', at, floor, containment: rounded, reason },
+          ...(release ? { releasedAt: at } : {}),
+        };
+        upd.run(release ? 'active' : c.status, JSON.stringify(meta), c.id);
+        // Re-read the neighbor each time: several reclassified claims may share one neighbor.
+        const nb = neighborId ? this.get(neighborId) : null;
+        if (nb && Array.isArray(nb.metadata.contradictedBy) && nb.metadata.contradictedBy.includes(c.id)) {
+          const { contradictedBy, ...rest } = nb.metadata;
+          const left = contradictedBy.filter((id) => id !== c.id);
+          updMeta.run(JSON.stringify(left.length ? { ...rest, contradictedBy: left } : rest), nb.id);
+        }
+      }
+    });
+    return out;
   }
 
   get(id) { const r = this.db.prepare('SELECT * FROM claims WHERE id=?').get(id); return r ? this.#h(r) : null; }
@@ -85,10 +351,13 @@ export class ClaimStore {
     this.db.prepare('UPDATE claims SET status=?, updated_at=? WHERE id=?').run(status, nowISO(), id);
   }
 
-  search(query, { types = [], statuses = [], limit = 50 } = {}) {
+  /** `stances` (roadmap #33) narrows to those stances; empty (the default) keeps every stance, so the
+   *  plain search — the `--all` read — is unchanged and each row still carries its metadata.stance. */
+  search(query, { types = [], statuses = [], stances = [], limit = 50 } = {}) {
     const qt = tokenize(query);
+    for (const s of stances) if (!STANCES.includes(s)) throw new Error(`unknown stance '${s}' (${STANCES.join('|')})`);
     return this.getAll()
-      .filter((c) => (!types.length || types.includes(c.type)) && (!statuses.length || statuses.includes(c.status)))
+      .filter((c) => (!types.length || types.includes(c.type)) && (!statuses.length || statuses.includes(c.status)) && (!stances.length || stances.includes(claimStance(c))))
       .map((c) => ({ c, score: this.#score(c, qt) }))
       .filter((x) => x.score > 0)
       .sort((a, b) => b.score - a.score)
@@ -98,9 +367,9 @@ export class ClaimStore {
 
   stats() {
     const all = this.getAll();
-    const byType = {}, byStatus = {};
-    for (const c of all) { byType[c.type] = (byType[c.type] || 0) + 1; byStatus[c.status] = (byStatus[c.status] || 0) + 1; }
-    return { total: all.length, byType, byStatus };
+    const byType = {}, byStatus = {}, byStance = {};
+    for (const c of all) { byType[c.type] = (byType[c.type] || 0) + 1; byStatus[c.status] = (byStatus[c.status] || 0) + 1; byStance[claimStance(c)] = (byStance[claimStance(c)] || 0) + 1; }
+    return { total: all.length, byType, byStatus, byStance };
   }
 
   /** P6: supersede an old claim with a new one (knowledge-point update). The old claim is marked
@@ -121,26 +390,34 @@ export class ClaimStore {
   }
 
   /** P6: deterministic contradiction finder (no LLM). Two live claims contradict when they share
-   *  ≥ minShared significant tokens but exactly ONE carries a negation marker. Heuristic but stable —
-   *  flags candidates for review; does not auto-mutate status. */
+   *  ≥ minShared significant tokens, exactly ONE carries a negation marker, and their token
+   *  containment reaches the same floor relate() applies at write time (one rule, two call sites).
+   *  Heuristic but stable — flags candidates for review; does not auto-mutate status.
+   *  Non-observed claims (roadmap #33) are not assertions, so they are never a side of a pair. */
   findContradictions({ minShared = 3 } = {}) {
-    const NEG = new Set(['not', 'no', 'never', 'none', 'cannot', 'cant', 'isnt', 'arent', 'wont', 'dont', 'false', 'incorrect', 'deprecated', 'removed', 'without', 'disabled', 'fails', 'failed']);
-    const live = this.getAll().filter((c) => c.status === 'active' || c.status === 'verified')
-      .map((c) => ({ c, set: new Set(tokenize(c.content)) }));
+    const floor = this.#containmentFloor();
+    const stanceOn = this.stanceEnabled();
+    const live = this.getAll().filter((c) => (c.status === 'active' || c.status === 'verified') && (!stanceOn || claimStance(c) === 'observed'))
+      .map((c) => ({ c, ...polarity(c.content) }));
     const pairs = [];
     for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) {
       const a = live[i], b = live[j];
-      if ([...a.set].some((t) => NEG.has(t)) === [...b.set].some((t) => NEG.has(t))) continue; // need exactly one negated
-      let shared = 0; for (const t of a.set) if (!NEG.has(t) && b.set.has(t)) shared++;
-      if (shared >= minShared) pairs.push({ a: a.c.id, b: b.c.id, shared, contentA: a.c.content, contentB: b.c.content });
+      if (a.neg === b.neg) continue; // need exactly one negated
+      const { shared, containment } = containmentOf(a.sig, b.sig);
+      if (shared >= minShared && containment >= floor) pairs.push({ a: a.c.id, b: b.c.id, shared, containment: Number(containment.toFixed(3)), contentA: a.c.content, contentB: b.c.content });
     }
     return pairs;
   }
 
   /** P6: the current (freshest, non-superseded/contradicted/archived) claim(s) matching a query —
-   *  "retrieve the right current claim after updates". */
+   *  "retrieve the right current claim after updates". Roadmap #33: only OBSERVED claims are current
+   *  by default — a hypothetical, a quote or a rejection is not the current fact. `stances: [...]`
+   *  widens (or narrows) the set, `allStances: true` lifts the filter; with tagging off
+   *  (claims.stance === false) there is no default filter, exactly as before. */
   current(query, opts = {}) {
-    return this.search(query, { ...opts, statuses: [] })
+    const { stances, allStances, ...rest } = opts;
+    const want = allStances === true ? [] : Array.isArray(stances) && stances.length ? stances : this.stanceEnabled() ? ['observed'] : [];
+    return this.search(query, { ...rest, statuses: [], stances: want })
       .filter((c) => c.status === 'active' || c.status === 'verified')
       .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
   }

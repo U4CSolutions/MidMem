@@ -5,13 +5,17 @@ A self-contained **LLM Wiki middleware layer**: a single source-of-truth knowled
 provenance, **fail-closed governance**, and an Obsidian projection — exposed to LLM agents over
 the **Model Context Protocol (MCP)**, a CLI, and a programmatic API.
 
+> **New here?** [Getting started](docs/GETTING-STARTED.md) (5 minutes, offline-capable) ·
+> [Concepts](docs/CONCEPTS.md) · [Wire your agent](docs/INTEGRATION-MODES.md) ·
+> [Operations](docs/OPERATIONS.md) · generated [tool/CLI/config reference](docs/README.md#reference-generated--node-scriptsgen-docsmjs-drift-checked-in-ci)
+
 It is the broker between AI agents and their knowledge: agents `ingest`, `query`, and `remember`
 through the router; the knowledge store sits *behind* it. Built for the OpenClaw + Hermes
 dual-stack, but pure-core and modular — it runs in **4 modes** (standalone curation · OpenClaw
 add-on · Hermes add-on · bridge) via exactly three surfaces: CLI, MCP, and the `bin/hook.mjs`
 pre/post-turn seam. See [Integration](#integration) + `docs/INTEGRATION-MODES.md`.
 
-> **Status (2026-07-02):** foundation + cross-agent scope + native→middleware bridge + retrieval
+> **Status (2026-07-02; 2026-08 wave appended 2026-08-06):** foundation + cross-agent scope + native→middleware bridge + retrieval
 > upgrades (trust, trigram, token-budget, graph-boost, dim-guard) + selectable Qdrant vector backend +
 > hand-off memory gate + self-driving lifecycle (decay / usage-earned promotion / auto-projection) +
 > trigger-less `proactiveRecall` + DELEGATE-52 extraction grounding + **work-memory events with
@@ -20,7 +24,16 @@ pre/post-turn seam. See [Integration](#integration) + `docs/INTEGRATION-MODES.md
 > contradiction / current()** + **P7 offline Brain-style benchmark** + **concept canonicalization
 > (case/plural dedupe, curated `merge-concepts`, alias-aware retrieval)** + **vault projection
 > pruning (stale pages removed; case-insensitive-share-safe slugs)** + **realpath ingest guard** +
-> **log/audit/vector retention**. Tested: smoke **90/90** + bench green (`npm run verify`).
+> **log/audit/vector retention**.
+>
+> **2026-08 wave:** **transition verifier** (TRUSTMEM supersede/promote gates) + **write-path claim
+> conflict tagging** (MOSAIC) + **projection QA probes** (WiCER) + **memory-function axis**
+> (episodic/semantic/procedural/prospective) + **capture packs** (domain extensibility as data) +
+> **prospective memory** (intent + trigger; cron fires, MidMem informs) + **revision export**
+> (stable-byte JSONL snapshot) + **bulk hygiene family** (`close-tasks` · `forget-entries` ·
+> `forget-nodes` with cascading edge delete) + **orphan-edge integrity sweep** in retention.
+> Tested: smoke **163/163** + bench green (`npm run verify`); claims-vs-code audit:
+> [`docs/ARCHITECTURE-BASIS.md`](docs/ARCHITECTURE-BASIS.md).
 > Runnable Node ESM, **zero external dependencies** (Node ≥ 22.13 built-ins only: `node:sqlite`,
 > `crypto`, `fetch`). `packages/core/` is the sole package — the active, self-contained foundation
 > (the superseded interim scaffold was removed; it remains in git history if ever needed).
@@ -43,7 +56,7 @@ flowchart TB
     DB -->|"project (LLM-owned)"| vault[["Obsidian vault (projection)"]]
     verify["verify (deterministic, one graph)"] -->|"consistency check"| DB
 
-    DB <-->|"query: FTS5 ⊕ trigram ⊕ vector (RRF) + trust / graph boosts"| mcp{{"MCP server (21 tools) · CLI · hook seam"}}
+    DB <-->|"query: FTS5 ⊕ trigram ⊕ vector (RRF) + trust / graph boosts"| mcp{{"MCP server (37 tools) · CLI · hook seam"}}
 
     mcp <--> oc["OpenClaw<br/>(daily driver)"]
     mcp <--> hz["Hermes Agent<br/>(build workhorse)"]
@@ -89,7 +102,7 @@ an LLM Wiki middleware; **recommended** layers add capability and are safe to de
 | **Projection** | `src/project.mjs` | Recommended | Render `state.db` → Obsidian markdown. | `OBSIDIAN_VAULT_PATH`, `WIKI_PATH` |
 | **Scope** | (in store/retrieval/governance) | Required *for dual*, else optional | Multi-agent private + shared partitioning. | `MIDMEM_AGENT_SCOPE` |
 | **Bridge** | `src/bridge.mjs` (`midmem bridge`) | Recommended | Pull each stack's flat native memory into the store. | `bridgeSources` |
-| **Trust / feedback** | (memory + retrieval) | Recommended | `trust_score` + usage/`feedback` loop; boosts ranking. | `trustWeight`, `feedback` tool |
+| **Trust / feedback** | (memory + retrieval) | Recommended | `trust_score` + usage/`feedback` loop; boosts ranking. Operator favorites (`feedback <id> --favorite`, schema 6) count as one helpful vote that `--unfavorite` takes back, survive a re-capture, and add a small ranking boost (more with a helpful vote). | `trustWeight`, `favoriteWeight` / `favoriteHelpfulWeight`, `feedback` tool |
 | **Hand-off gate** | `src/handoff.mjs` (`handoff_brief`) | Recommended | Push a scoped memory brief into an agent hand-off (firstware). | profiles `local` / `frontier` |
 
 \* The embedding layer is required for semantic recall, but the system **runs without a live model**
@@ -107,6 +120,16 @@ The middleware speaks MCP, so any MCP-capable agent can use it. Three supported 
 > code + honest deployment status is in **[`integrations/`](integrations/)** (Hermes core capture is
 > LIVE; the OpenClaw plugin is retired/reference). Engineering + grounding rules:
 > **[`docs/DEVELOPMENT-GUIDELINES.md`](docs/DEVELOPMENT-GUIDELINES.md)**.
+
+### Claude Code (composes with any option below)
+Two files and you're wired — a project-root `.mcp.json` pointing at a thin `midmem-mcp` wrapper,
+approved once via `"enabledMcpjsonServers": ["midmem"]` in `~/.claude/settings.json`. The wrapper
+sources the same shared env file as your `midmem` CLI wrapper (single source of truth — never
+duplicate env), sets `MIDMEM_AUTO_INGEST=0` (auto-ingest keeps exactly one owner), and execs
+`bin/mcp-server.mjs`. All 37 tools then load natively in every session. Full recipe + the three
+guardrails (env drift, ingest ownership, long-lived-process vs core development):
+**[`docs/INTEGRATION-MODES.md` §5](docs/INTEGRATION-MODES.md)**. The in-repo
+[skills library](skills/) equips the sessions themselves.
 
 ### Option A — OpenClaw only (1:1)
 Register the MCP server in OpenClaw; it's the sole consumer. A single agent needs no scope
@@ -192,6 +215,7 @@ Two skills front the store; pick by how you're driving the stack:
 | **`midmem-orchestrator`** | **this repo** (`skills/`) | same loop, MidMem-specialized | bulk knowledge curation: batch ingest, re-ground, dedup, vault verify |
 | **`midmem-ingest-review`** | **this repo** (`skills/`) | a frontier model | ingest + audit knowledge quality and **cross-check OpenClaw vs Hermes understanding** (confabulation/drift/contradiction/scope) |
 | **`midmem-record`** | **this repo** (`skills/`) | a frontier model (Claude Code) | durable capture: distilled lesson → wisdom tier + commit + the `Stop`-hook harness-guaranteed recording pattern |
+| **`midmem-research-tracker`** | **this repo** (`skills/`) | a frontier model (Claude Code) | keep [`RESEARCH.md`](RESEARCH.md) current from weekly research ingestions: paper → finding → feasibility verdict (adopt now / backlog / validation / not adopting) tied to the roadmap |
 
 - **OpenClaw only (Option A):** use **`midmem-ops`** — the OpenClaw agent operates memory itself
   (recall/store/ingest); no Hermes needed.
@@ -216,7 +240,7 @@ Two skills front the store; pick by how you're driving the stack:
 ```bash
 # No install needed (Node ≥ 22.13 built-ins only — node:sqlite is flag-free from 22.13).
 cd packages/core
-node test/smoke.mjs                          # end-to-end self-test (offline) → 90/90
+node test/smoke.mjs                          # end-to-end self-test (offline) → 163/163
 npm run verify                               # smoke + Brain-style regression bench
 
 node bin/cli.mjs init                        # show resolved config
@@ -238,11 +262,16 @@ node bin/cli.mjs refresh-concepts             # rebuild concept embeddings + com
 node bin/cli.mjs maintain --force             # full lifecycle pass (decay/promote/retention/project)
 ```
 
-### MCP tools (21)
+### MCP tools (37)
 `ingest` · `query` · `remember` · `recall` · `brief` · `audit` · `forget` · `archive` ·
 `promote` · `project` · `feedback` (trust) · `handoff_brief` (memory gate) · `maintain` ·
-`proactive_recall` · `record_work` · `list_tasks` · `claims` · `claim_supersede` ·
-`claim_contradictions` · `refresh_concepts` · `concept_merge`
+`proactive_recall` · `record_work` · `list_tasks` · `close_tasks` · `forget_entries` ·
+`forget_nodes` (cascading) · `claims` · `claim_supersede` · `claim_contradictions` ·
+`refresh_concepts` · `concept_merge` · `prospective_add` · `prospective_due` ·
+`prospective_resolve` · `export_knowledge` · `list_packs` · `record_pattern` ·
+`claims_deferred` / `claim_defer` / `claim_resolve` (TARL pending ledger) ·
+`claim_validity` (PGMem windows) · `consistency_check` (state-level, report-only) ·
+`stale_paths_clear` (HiGram path review) · `query_probes` (PMMC evidence paths)
 
 **Hand-off memory gate ("firstware"):** `handoff_brief` builds a scoped, token-budgeted memory brief
 to inject into an agent hand-off (e.g. before an ACP spawn, which doesn't share context) so the
@@ -267,7 +296,7 @@ pull-depth). The gate *calls* the store; it doesn't replace it (firstware-on-mid
 | `MIDMEM_GROUNDING_MIN_OVERLAP` | `0.5` | DELEGATE-52 grounding threshold (quarantine below) |
 | `MIDMEM_AUTO_INGEST` | `1` | maintain() auto-bridges agent work/session dirs |
 | `MIDMEM_MAINTENANCE` | `1` | Self-driving lifecycle (decay/promotion/projection) |
-| `MIDMEM_RETENTION_DAYS` | `90` | Forced maintain prunes log/audit rows + orphan vectors older than this (0 = off) |
+| `MIDMEM_RETENTION_DAYS` | `90` | Forced maintain prunes log/audit rows older than this + orphan vectors + orphan edges (0 = off) |
 | `MIDMEM_WORK_MEMORY` | `1` | Work-memory events (`record_work`, task tracking) |
 | `MIDMEM_CONCEPT_ROUTING` | `1` | P5 concept-node routing + canonical dedupe in forced maintain |
 
@@ -299,11 +328,12 @@ packages/core/         # ← active foundation (this README describes it)
                        # verify, governance, project, bridge, handoff, workmemory, concepts,
                        # orchestrator, config
   bin/                 # cli.mjs, mcp-server.mjs, hook.mjs (pre/post-turn seam — the 4-modes caller)
-  test/                # smoke.mjs (90 checks) + bench.mjs (Brain-style regression gate)
+  test/                # smoke.mjs (163 checks) + bench.mjs (Brain-style regression gate)
 config/                # tier-config.json (tunables) + AGENTS.md (agent instructions)
 skills/                # MidMem Skills Library (Claude Code) — see skills/README.md
 integrations/          # packaged reusable per-turn capture code + status — see integrations/README.md
-docs/                  # design notes — INTEGRATION-MODES, STACK-CAPTURE, DEVELOPMENT-GUIDELINES
+docs/                  # design notes — ARCHITECTURE-BASIS (claims verified against code),
+                       #   INTEGRATION-MODES, STACK-CAPTURE, DEVELOPMENT-GUIDELINES
 RESEARCH.md            # research → architecture-decision record (DELEGATE-52, …)
 ```
 
@@ -312,6 +342,9 @@ RESEARCH.md            # research → architecture-decision record (DELEGATE-52,
 - [`skills/README.md`](skills/README.md) — the MidMem Skills Library (`midmem-dev`,
   `midmem-orchestrator`, `midmem-ingest-review`, `midmem-record`) + install.
 - [`docs/README.md`](docs/README.md) — design notes index.
+- [`docs/ARCHITECTURE-BASIS.md`](docs/ARCHITECTURE-BASIS.md) — every architectural claim with its
+  basis in the code and a re-runnable verification (DELEGATE-52 discipline applied to this repo's
+  own documentation).
 - [`RESEARCH.md`](RESEARCH.md) — why the store is built the way it is, grounded in papers.
 
 ## License
