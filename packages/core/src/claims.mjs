@@ -48,7 +48,9 @@ export function significantTokens(text) { return polarity(text).sig; }
 const STANCE_MARKERS = [
   // 'reverted' is NOT a rejection marker: "the patch was reverted" is an observed state change that
   // is current truth, not a proposition the speaker set aside (measured on the live store 2026-10-12).
-  ['rejected', ['rejected', 'decided against', 'not adopted', 'abandoned', 'ruled out', 'withdrawn']],
+  // Rejection markers are the DECISION forms (measured 2026-11-09: "preserves abandoned experiments"
+  // was tagged rejected — the word described content, not a proposition set aside).
+  ['rejected', ['was rejected', 'were rejected', 'is rejected', 'decided against', 'not adopted', 'was abandoned', 'were abandoned', 'ruled out', 'was withdrawn', 'were withdrawn']],
   ['quoted', ['according to', 'said that', 'says that', 'told', 'claimed that', 'claims that', 'believes that', 'alleged', 'reportedly', 'as reported by']],
   // 'may' is NOT a marker: it is permissive in technical prose ("no attacker text may reach") and
   // the month name ("May 30, 2026"); 7 of 7 live claims carrying it were observations. 'consider'

@@ -3127,9 +3127,10 @@ try {
       && ['The operator said that the rack rebooted', 'reportedly the cache was warm', 'She told the crew it worked'].every((t) => so65(t).stance === 'quoted'),
       'stanceOf: explicit third-party attribution → quoted (according to / said that / reportedly / told)');
     ok(so65('we decided against the rewrite').stance === 'rejected' && JSON.stringify(so65('we decided against the rewrite').markers) === '["decided against"]'
-      && ['the migration was ruled out', 'the plan was withdrawn', 'the proposal was not adopted'].every((t) => so65(t).stance === 'rejected')
+      && ['the migration was ruled out', 'the plan was withdrawn', 'the proposal was not adopted', 'the rewrite was abandoned in March'].every((t) => so65(t).stance === 'rejected')
+      && so65('The template preserves abandoned experiments and walked-back claims').stance === 'observed'
       && so65('the patch was reverted on 2026-09-23').stance === 'observed' && so65('No attacker text may reach the agent; logged May 30, 2026').stance === 'observed',
-      'stanceOf: explicit rejection → rejected (decided against / ruled out / withdrawn / not adopted); "reverted" and "may" stay observed');
+      'stanceOf: explicit rejection → rejected (decided against / ruled out / was withdrawn / not adopted / was abandoned); "reverted", "may" and a bare "abandoned" adjective stay observed');
     const dr65 = so65('the dry run would return success');
     ok(so65('The proposed Anti-Persistence design retains trajectories and outcomes').stance === 'observed' && so65('Its simulated-user environment includes 99 sessions and four months').stance === 'observed' && so65('the mock tool returned success for the migration').stance === 'provisional',
       'stanceOf (2026-10-26): "proposed" and "simulated-user" are the source speaking → observed; "mock" stays provisional');
