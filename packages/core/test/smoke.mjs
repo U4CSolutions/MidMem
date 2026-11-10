@@ -5275,6 +5275,83 @@ try {
     } finally { o84.close(); }
   }
 
+  // 85. Round 3 (verification of d2311f0, finding W1 — test only): pin what the suite did not reach. R06/R08: another
+  //     connection commits an operator approval between memory.promote's row read and its UPDATE (the window only the
+  //     UPDATE guard closes) — the fresh record stays live, maintain counts nothing, nothing is logged. R05: a candidate
+  //     that moved before the call writes no governance row and no transition receipt. R11: a legacy path-mapped claim
+  //     of an expired entry is gone too. R13: a repeat answers changed:false only in the recorded end state.
+  {
+    const L85 = 'kb-85';
+    const o85 = new Orchestrator(base77('c85'));
+    const o85b = new Orchestrator(base77('c85')); // a second connection to the same store (another process's view)
+    try {
+      const claimOf85 = (entryId) => o85.db.prepare("SELECT id FROM claims WHERE json_extract(source,'$.sourceId') = ? ORDER BY rowid").get(o85.recall(entryId).source_id).id;
+      const pair85 = async (tag, yes, no) => { const a = (await ing77(o85, L85, `${tag}-n`, yes)).entry.id, b = (await ing77(o85, L85, `${tag}-d`, no)).entry.id; return { nEntry: a, dEntry: b, n: claimOf85(a), d: claimOf85(b) }; };
+      const claimsDigest85 = () => JSON.stringify(o85.db.prepare('SELECT id, status, metadata, updated_at FROM claims ORDER BY rowid').all());
+      const govPromote85 = () => o85.db.prepare("SELECT COUNT(*) c FROM audit WHERE kind='governance' AND json_extract(detail,'$.op')='promote'").get().c;
+      const plainReceipts85 = (id) => o85.db.prepare("SELECT COUNT(*) c FROM audit WHERE kind='transition:promote' AND json_extract(detail,'$.id')=? AND json_extract(detail,'$.by') IS NULL").get(id).c;
+      const plainPromoteRows85 = (id) => o85.db.prepare("SELECT COUNT(*) c FROM log WHERE operation='promote' AND json_extract(detail,'$.id')=? AND json_extract(detail,'$.by') IS NULL").get(id).c;
+
+      // R06 / R08 — the window between memory.promote's row read and its UPDATE, opened by a test-side wrapper around the
+      // instance's prepare(): it lets that exact row read run, then the second connection approves the candidate (a real
+      // approve-wisdom: its write completes synchronously, before the promise returns), then hands back the stale row.
+      const A85 = (await ing77(o85, L85, 'd-a', 'The guardwell85 lighthouse keeps a fog signal log for the northern strait. Keepers record every blast.')).entry.id;
+      o85.db.prepare('UPDATE entries SET retrieval_count=5, trust_score=0.7, helpful_count=2 WHERE id=?').run(A85);
+      const prep85 = o85.db.prepare.bind(o85.db);
+      let side85 = null, windowOpened85 = false;
+      o85.db.prepare = (sql) => {
+        const st = prep85(sql);
+        if (windowOpened85 || sql !== 'SELECT id, tier, status, project, provenance FROM entries WHERE id=?') return st;
+        return { get: (...a) => { const row = st.get(...a); if (a[0] === A85) { windowOpened85 = true; side85 = o85b.approveWisdom(A85, { via: 'knowledge-capture' }); } return row; } };
+      };
+      const m85 = await o85.maintain({ force: true });
+      delete o85.db.prepare;
+      const sideAns85 = await side85;
+      const rec85 = o85.recall(A85).provenance.approval, v85 = view77(o85, A85);
+      ok(windowOpened85 && sideAns85?.changed === true && !m85.promoted.some((p) => p.id === A85) && rec85?.by === 'operator-approval' && !rec85.endedAt
+        && v85.tier === 'wisdom' && v85.promotion.wisdomBy === 'operator-approved' && v85.approval.revocable === true,
+        "R06: an approval committed by another connection between maintain's row read and its UPDATE survives — the UPDATE's tier/status guard turns the stale promotion into a no-op: not counted, the fresh record live (wisdomBy operator-approved, revocable)");
+      ok(windowOpened85 && plainPromoteRows85(A85) === 0 && o85.db.prepare("SELECT COUNT(*) c FROM log WHERE operation='promote' AND json_extract(detail,'$.id')=?").get(A85).c === 1,
+        "R08: that moved no-op is not logged — the candidate's only promote row is the approval's own (with by), no plain promote row");
+
+      // R05 — a candidate that moved before the call (an approval landed after maintain computed its candidates): the
+      // orchestrator's pre-check answers before governance — no governance row, no transition receipt for it.
+      const B85 = (await ing77(o85, L85, 'd-b', 'The bellmoor85 tide office publishes harbour depth tables each month. Pilots plan their arrivals.')).entry.id;
+      o85.db.prepare('UPDATE entries SET retrieval_count=5, trust_score=0.7, helpful_count=2 WHERE id=?').run(B85);
+      const promote85 = o85.promote.bind(o85);
+      let apB85 = null, onceB85 = false;
+      o85.promote = async (id, to, opts) => { if (!onceB85 && id === B85) { onceB85 = true; apB85 = await o85.approveWisdom(B85, { via: 'knowledge-capture' }); } return promote85(id, to, opts); };
+      const gov0 = govPromote85();
+      const mB85 = await o85.maintain({ force: true });
+      delete o85.promote;
+      ok(apB85?.changed === true && onceB85 && !mB85.promoted.some((p) => p.id === B85) && govPromote85() === gov0 && plainReceipts85(B85) === 0 && plainPromoteRows85(B85) === 0,
+        "R05: a candidate approved before maintain's promote call is answered by the pre-check — no governance row for a promote, no transition receipt, no promote row");
+
+      // R11 — a LEGACY path-mapped claim (no source.sourceId) of an entry whose lease ran out: gone for the queue and replace.
+      const g85 = await pair85('d-g', 'The galecombe85 kiln fires pottery every Thursday night.', 'The galecombe85 kiln never fires pottery every Thursday night.');
+      o85.db.prepare("UPDATE claims SET source=json_remove(source,'$.sourceId') WHERE id=?").run(g85.d);
+      o85.db.prepare('UPDATE entries SET expires_at=? WHERE id=?').run(new Date(Date.now() - 1000).toISOString(), g85.dEntry);
+      const q85 = o85.deferredClaimsForLibrary({ libraryId: L85, limit: 200 });
+      const rg85 = await o85.resolveDeferredReplacingNeighbor(g85.d);
+      ok(!o85.claims.get(g85.d).source.sourceId && o85.recall(g85.dEntry).status === 'active' && !q85.claims.some((c) => c.id === g85.d) && q85.staleOmitted === 1
+        && rg85.denied === 'claim-source-gone' && o85.claims.get(g85.n).status === 'active',
+        'R11: a legacy path-mapped claim (no source.sourceId) of an expired, unswept entry is left out of the queue (staleOmitted 1) and --replace-neighbor answers claim-source-gone');
+
+      // R13 — changed:false only in the recorded END state: accept on an accepted-then-superseded claim, and reject on an
+      // accepted claim, are refusals; no claim row changes.
+      const s85 = await pair85('d-s', 'The tollgate85 bridge opens for barges at noon every day.', 'The tollgate85 bridge never opens for barges at noon every day.');
+      const r85 = await pair85('d-r', 'The rookmere85 bell rings over the harbour at dusk.', 'The rookmere85 bell never rings over the harbour at dusk.');
+      const a1 = await o85.resolveDeferredClaim(s85.d, 'accept'), a2 = await o85.resolveDeferredClaim(r85.d, 'accept');
+      const sup85 = o85.supersedeClaim(s85.d, { content: 'The tollgate85 bridge never opens for barges at noon on weekdays.' });
+      const before85 = claimsDigest85();
+      const again85 = await o85.resolveDeferredClaim(s85.d, 'accept'), rejA85 = await o85.resolveDeferredClaim(r85.d, 'reject');
+      ok(a1.success && a2.success && sup85.success === true && o85.claims.get(s85.d).status === 'superseded'
+        && again85.success === false && again85.denied === 'not-deferred' && again85.status === 'superseded' && again85.resolution === 'accept'
+        && rejA85.success === false && rejA85.denied === 'not-deferred' && rejA85.status === 'active' && rejA85.resolution === 'accept' && claimsDigest85() === before85,
+        'R13: accept on an accepted-then-superseded claim, and reject on an accepted claim, are refusals (not-deferred with status and resolution), not changed:false repeats; no claim row changes');
+    } finally { o85b.close(); o85.close(); }
+  }
+
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);
 } catch (e) {
   console.error('\nFATAL:', e.stack); fail++;
