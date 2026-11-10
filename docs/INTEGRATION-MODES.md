@@ -289,6 +289,9 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    write only as the direct result of ONE explicit operator action on ONE entry or claim in the capture system's UI:
    never batched, scheduled, automatic or initiated by a model.** A model may PREPARE a case for the operator to
    read; it never decides and never sends. Still no `promote`, never `--curated`, no `remember` / `record_work`.
+   **Who can run them:** MidMem does not identify its caller. Like `promote --curated` today, these writes can be run
+   by anything with shell access to the store (the launcher and the store's group), an agent session included;
+   "operator only" is enforced by the capture system's UI and by convention, not by MidMem.
 
    **(e) operator-approved wisdom**: `midmem approve-wisdom <entryId> [--note <text>] [--via <system>]` and
    `midmem revoke-wisdom <entryId> [--note <text>] [--via <system>]` (CLI only — no MCP tool).
@@ -296,70 +299,113 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
      earned rule (`retrieval_count`, `trust_score`, `helpful_count`) **and nothing else**: every other check the
      earned path applies holds. The checks run in this order and the first that applies is the answer
      (`{ success: false, denied, id, message }`, exit 0, nothing moved): `not-found`; `not-active` (not active, or
-     its lease has run out — `maintain` sweeps before it promotes); `already-wisdom`; `not-memory-tier` (only from
-     `memory`, never `fact` → `wisdom`); `lifecycle` (a `working` entry never promotes); `grounding-below-floor` (the
-     transition verifier's write-time grounding floor, `MIDMEM_PROMOTE_MIN_GROUNDING`, 0.3 — maintain's pre-filter);
+     its lease has run out — `maintain` sweeps before it promotes); then, if the entry is already wisdom by a live
+     approval, the answer is `{ success: true, changed: false, … }` (see Retries); `already-wisdom` (wisdom by another
+     road: earned or curated); `not-memory-tier` (only from `memory`, never `fact` → `wisdom`); `lifecycle` (a
+     `working` entry never promotes); `fallback-extraction` (an ingested entry that is not model-extracted —
+     `provenance.extraction.mode` is the fallback, or there is no record because it was ingested before 2026-10-07:
+     wisdom is never re-extracted, so frozen fallback text is never approved; `reextract` it first. A direct write such
+     as a `remember`ed note has no extraction and is not refused here); `grounding-below-floor` (the transition
+     verifier's write-time grounding floor, `MIDMEM_PROMOTE_MIN_GROUNDING`, 0.3 — maintain's pre-filter);
      `instruction-like` (the #40 screen flags the entry's text or its full source; it runs for an approval even with
      `MIDMEM_INSTRUCTION_FLAG=0`, which turns off only the read-time label); `governance` (the policy
      `operator-approved-wisdom`, and `working-never-promotes`, which covers this op too); `transition-verifier` (re-run
-     inside the governed write with its receipt, exactly as `promote()` runs it for the earned path — it answers only
-     when the entry changed between the checks). Success: `{ success: true, id, tier: "wisdom", approval: { at, via } }`.
-   - **What it never is.** Not curated: the `curated-tier-write` policy is unchanged (`promote <id> wisdom` without
-     `--curated` is denied exactly as before) and a separate policy admits this one op, only with
-     `operatorApproved: true` and `curated: false`. Authority stays what it was (`web`), so no protected recall slots
-     (#39) and none of what operator authority brings. The tier moves through the same `memory.promote` the earned path
-     uses, so the lease handling is identical (wisdom has none) and a project-tagged entry is lifted to global with
-     `provenance.liftedFrom` as an earned one is; what the wisdom tier itself does — no lease, immunity to distrust
-     archival, the `verbatim` fidelity class, `reextract`'s `skipped.denied` — applies to it exactly as to earned wisdom.
+     inside the write with its receipt, exactly as `promote()` runs it for the earned path — it answers only when the
+     entry changed between the checks). Success: `{ success: true, changed: true, id, tier: "wisdom", approval: { at,
+     via } }`.
+   - **What the approval gives: what the wisdom tier gives an earned entry, nothing more.** An approved entry is
+     earned-equivalent. (1) It has no lease: it never decays by disuse. (2) It is immune to distrust archival:
+     unhelpful votes can only put it on `lint`'s `lowTrustWisdom`. (3) Its fidelity class is `verbatim`: a recall
+     returns its whole text up to `MIDMEM_VERBATIM_MAX_CHARS` (4,000) instead of the 600-character preview. (4)
+     `reextract` skips it (`skipped.denied`), the nightly batch included — which is why a fallback-extracted entry is
+     refused. (5) A project-tagged entry is lifted to global (`project` null, `provenance.liftedFrom`), so it appears in
+     every project's reads, not only `--projects library`. The tier moves through the same `memory.promote` the earned
+     path uses, so (1) and (5) are exactly an earned promotion's. It is **not curation**: authority stays what it was
+     (`web` for a capture), so no protected recall slots (#39), no operator authority; the `curated-tier-write` policy is
+     unchanged (`promote <id> wisdom` without `--curated` is denied exactly as before) and a separate policy admits this
+     one op, only with `operatorApproved: true` and `curated: false`.
    - **The record.** `provenance.approval = { by: "operator-approval", from, to, at, via, note, liftedFrom }`, written
      in the same write as the tier move (`via` / `note` null when not sent; `liftedFrom` the project the lift moved, or
      null); the `promote` log row the earned path writes (`{ id, toTier }`) plus the reason `{ by, at, via, note }`;
      the `transition:promote` receipt plus `by`; a governance audit row for op `approve-wisdom` with
      `{ fromTier, toTier, operatorApproved: true, curated: false, memFunction }`. Denials are logged
-     (`approve-wisdom-denied`).
-   - **Revoke** takes back only wisdom that an approval put there. Checks in order: `not-found`, `not-active`,
-     `not-wisdom`, `not-operator-approved` (earned and curated wisdom are never revoked here), `governance`. The entry
-     returns to `memory` with a **fresh lease by the rule ingest applies to its type** (the capture pack's `ttlDays` —
+     (`approve-wisdom-denied`); a `changed: false` answer writes nothing.
+   - **An approval ends when another road moves the entry.** Any tier move that is not `approve-wisdom` /
+     `revoke-wisdom` — `maintain`'s earned promotion, an agent's `promote --curated`, `promote <id> memory` moving it
+     down — stamps the record `{ endedAt, endedBy: "promote", endedTier }` in the same write. An ended record is never
+     live again: the entry is not revocable, `approvedAt` is null, `wisdomBy` does not say `operator-approved`, and the
+     OPERATIONS listing leaves it out. A later `approve-wisdom` writes a fresh record (the old one moves to
+     `provenance.approvalHistory`).
+   - **Revoke** takes back only a live approval. Checks in order: `not-found`, `not-active`, then — if the latest
+     approval was revoked by `revoke-wisdom`, the entry is back in `memory` and nothing ended the record since —
+     `{ success: true, changed: false, … }`; `not-wisdom`; `not-operator-approved` (earned and curated wisdom, also when
+     an older approval of it was ended by that other road, is never moved down here); `governance`. The entry returns
+     to `memory` with a **fresh lease by the rule ingest applies to its type** (the capture pack's `ttlDays` —
      `web-article` 90 days, `news` 45 — else the memory tier's 30 days), the project the approval lifted comes back,
      counters, trust and favorite stay as they are, and the record stays as history with `revokedAt` (plus
-     `revokeNote` / `revokeVia` when sent). Success: `{ success: true, id, tier: "memory", expiresAt, project,
-     approval: { at, via, revokedAt } }`. Afterwards the entry can earn wisdom in `maintain` like any other entry — it
-     is promoted there if it meets the earned rule, and is then earned wisdom, not revocable — or be approved again (the
-     revoked record moves to `provenance.approvalHistory`). Logged (`revoke-wisdom`, denials `revoke-wisdom-denied`)
-     and governed (op `revoke-wisdom`).
-   - **Interplay** (smoke §80): `maintain` never demotes, sweeps or re-promotes an approved entry; `reextract` skips it
-     as it skips earned wisdom (`skipped.denied`) and, after a revoke, re-extracts it in place with the record kept; a
-     re-ingest of the same source with changed content archives it as it archives earned wisdom (the new version
-     enters `memory` unapproved); `forget-source`, `archive`, `feedback` and favorites treat it as any entry (the
-     record stays on an archived or forgotten row as history); `lint`'s `lowTrustWisdom` lists it by its own rule.
-     Linked duplicates (item 6(b)) are ONE entry, so one approval stands for every source that entry holds. The older
-     agent verb `promote <id> memory` can move any wisdom entry down without a revoke; the approval is then no longer
-     live (`approvedAt: null`, not revocable) and the next approval keeps it as history.
+     `revokeNote` / `revokeVia` when sent). Success: `{ success: true, changed: true, id, tier: "memory", expiresAt,
+     project, approval: { at, via, revokedAt } }` (a `changed: false` answer has the same keys, with the entry's current
+     lease and project). Afterwards the entry can earn wisdom in `maintain` like any other entry — it is then earned
+     wisdom, not revocable — or be approved again. Logged (`revoke-wisdom`, denials `revoke-wisdom-denied`) and governed
+     (op `revoke-wisdom`).
+   - **Interplay** (smoke §80, §83): `maintain` never demotes, sweeps or re-promotes an approved entry; `reextract`
+     skips it as it skips earned wisdom (`skipped.denied`) and, after a revoke, re-extracts it in place with the record
+     kept; a re-ingest of the same source with changed content archives it as it archives earned wisdom and the new
+     version enters `memory` unapproved — **a re-capture drops the approval (the operator approves the new version
+     again), while a favorite carries over**; `forget-source`, `archive`, `feedback` and favorites treat it as any entry
+     (the record stays on an archived or forgotten row as history); `lint`'s `lowTrustWisdom` lists it by its own rule.
+     Linked duplicates (item 6(b)) are ONE entry, so one approval stands for every source it holds.
    - **Usage errors** (exit 1, `ERROR:` on stderr, nothing written): no id or two; any flag but `--note` / `--via` (a
-     stray `--curated` included); a bare `--note`; a note over 500 characters, with a control character other than
-     newline and tab, or carrying a secret-shaped value (the ingest boundary's rule); a `--via` other than 1–40
-     letters, digits, `.`, `_`, `:` or `-`. A note never starts with `--` (the parser would read it as a flag).
+     stray `--curated` included), a `--flag=value` form, a flag given twice; a bare `--note`; a note over 500 UTF-16
+     code units (JavaScript string length: an emoji counts 2), or carrying a control character other than newline and
+     tab (CR included), a C1 control (U+0080–U+009F), a line or paragraph separator (U+2028, U+2029) or a
+     bidirectional override or isolate (U+202A–U+202E, U+2066–U+2069), or a secret-shaped value (the ingest boundary's
+     rule, plus for notes the `password: …` / `token: …` form); a `--via` other than 1–40 letters, digits, `.`, `_`,
+     `:` or `-`. A note never starts with `--` (the parser would read it as a flag).
    - **Capability check:** `entries` rows carry `approval` and `thresholds.operatorApproval: true` (item 7); it covers
      (e), (f)'s `--replace-neighbor` and item 7's `claims-deferred --library`. Never send any of them to an older
-     MidMem: it answers `approve-wisdom` / `revoke-wisdom` with its usage text (not JSON), and its CLI ignores switches
-     it does not know, so `claims-deferred --library` prints the whole ledger and `claim-resolve <id>
+     MidMem: it answers `approve-wisdom` / `revoke-wisdom` with its usage text (not JSON) **and exit 0**, and its CLI
+     ignores switches it does not know, so `claims-deferred --library` prints the whole ledger and `claim-resolve <id>
      --replace-neighbor` **accepts** the claim (both stand) instead of replacing the neighbour.
 
    **(f) claims review**: `midmem claim-resolve <claimId>` (accept: active, the pair re-tagged additive, both stand),
    `midmem claim-resolve <claimId> --reject` (archived) and `midmem claim-resolve <claimId> --replace-neighbor`
-   (2026-11-10, CLI only: the MCP `claim_resolve` tool keeps accept | reject). `--replace-neighbor` accepts this claim
-   AND supersedes its contradicting neighbour by it **in one transaction**, with the existing supersede chain fields —
-   the neighbour `superseded` with `metadata.superseded_by`, this claim `metadata.supersedes` — that `claim-validity`,
-   the current read (`claims`) and the consistency check read; this claim also records `deferredResolution` and
-   `judged: { action: "replace-neighbor", at, from }`, and the superseded neighbour's dependency path is flagged for
-   review as for any supersede. Success: `{ success: true, id, status: "active", neighbor: { id, status: "superseded" },
-   stalePath }`. Refused (`{ success: false, denied, id, message }`, exit 0; nothing written but the log row and the
-   receipts) in this order: `not-found`; `not-deferred`; `no-neighbor` (the claim records no write-time neighbour — an
-   explicit deferral, say); `neighbor-not-live` (the neighbour is not active or verified, e.g. another claim already
-   replaced it); `neighbor-authority` (the neighbour's authority is higher than this claim's: a web claim never
-   supersedes an operator-authored one; a claim stored without a label counts as `doc`); `transition-verifier` (the
-   supersede's transition receipt denies the pair as off-subject). Accept and reject are unchanged. There is no
-   "verified" mark. The read side is item 7's `claims-deferred --library`.
+   (2026-11-10, CLI only: the MCP `claim_resolve` tool keeps accept | reject). `claim-resolve` is strict: exactly one
+   id, at most one of `--reject` / `--replace-neighbor`, nothing else — a misspelling (`--replace-neighbour`), a
+   `=value` form, a repeated or second resolution flag is a usage error (exit 1, nothing written), never a plain
+   accept. Accept and reject answer a first call exactly as before (`{ success, id, status[, judged] }`).
+   `--replace-neighbor` accepts this claim AND supersedes its contradicting neighbour by it **in one transaction**,
+   with the existing supersede chain fields — the neighbour `superseded` with `metadata.superseded_by`, this claim
+   `metadata.supersedes` — that `claim-validity`, the current read (`claims`) and the consistency check read; this
+   claim also records `deferredResolution` and `judged: { action: "replace-neighbor", at, from }`. The checks, the
+   transition receipt, both claim writes, the `claim-resolve` log row and the stale-path flags land together or not at
+   all. Stale-path flagging for a replacement applies only rule (ii) of the supersede rule: concept labels the
+   contested claim itself names (≥ 2 of its significant words, covering the containment floor of the label) — not every
+   node the neighbour's capture created. Success: `{ success: true, changed: true, id, status: "active", neighbor: {
+   id, status: "superseded" }, stalePath }`. Refused (`{ success: false, denied, id, message }`, exit 0; nothing written
+   but the log row and the receipts) in this order: `not-found`; `not-deferred` (it also carries `status` and
+   `resolution`, see Retries); `claim-source-gone` (the claim's source entry is no longer active — a superseded capture
+   version, an archived or forgotten entry: such a claim would be swept as `source-gone` and take the live neighbour
+   with it); `claim-stance` (the claim is no observed fact — `provisional`, `quoted` or `rejected`, as
+   `claims-restance` can re-tag a deferred claim — and would drop an observed fact from current reads);
+   `no-neighbor` (the claim records no write-time neighbour — an explicit deferral, say); `neighbor-not-live` (the
+   neighbour is not active or verified, e.g. another claim already replaced it); `neighbor-authority` (the neighbour's
+   authority is higher than this claim's: a web claim never supersedes an operator-authored one; a claim stored
+   without a label counts as `doc`); `transition-verifier` (the supersede's transition receipt denies the pair as
+   off-subject). There is no "verified" mark. The read side is item 7's `claims-deferred --library`.
+
+   **Retries and unknown outcomes.** Each of the five forms — `approve-wisdom`, `revoke-wisdom`, `claim-resolve`,
+   `claim-resolve --reject`, `claim-resolve --replace-neighbor` — may be repeated with the same argv. `{ success: true,
+   changed: false, … }` means the requested state already holds by this road (approved by a live approval, the original
+   record returned; revoked; resolved the same way — a repeated accept or reject answers `{ success: true, changed:
+   false, id, status }`); nothing was written. Exit 0 with `success: false` is a final refusal with a fixed code; for a
+   claim that is no longer deferred by another resolution it is `{ success: false, denied: "not-deferred", id, status,
+   resolution, message }` (`resolution` what the record says, or null). Exit 1 with `ERROR: database is locked`, a killed
+   child or a timeout is an **unknown outcome**: re-read (`entries <id>`, `claims-deferred --library`) and retry.
+   `approve-wisdom`, `revoke-wisdom` and `--replace-neighbor` take the store's write lock before they re-check
+   (`BEGIN IMMEDIATE`), and every write waits up to `busy_timeout` (5 s) for the lock, so the message appears only when
+   another writer holds it longer than that; any verb, reads included, can then exit 1 that way (a store locked at open
+   answers `ERROR: database is locked` too). Usage errors (exit 1, `ERROR:` and the reason) are final.
 
    None of these exceptions changes an entry's authority (`web`) or scope. Only (e) changes a tier (`memory` ↔
    `wisdom`) and, through the project lift, the project (put back on revoke).
@@ -380,26 +426,36 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    Since 2026-11-10 each entry also carries `approval: { eligible, blockedBy, approvedAt, via, revocable }`:
    `blockedBy` lists every `approve-wisdom` code that applies now, in item 6(e)'s order (`governance` only when the
    tier and lifecycle checks pass), `eligible` is `blockedBy` empty, `approvedAt` / `via` are those of a live approval
-   (not revoked, the entry still in `wisdom`), and `revocable` is true for an active entry whose wisdom an approval put
-   there. Where the row
-   explains promotion, `promotion.wisdomBy` says why a wisdom entry is wisdom when the store can tell:
+   (not revoked, not ended by another road, the entry still in `wisdom`), and `revocable` is true for an active entry
+   whose wisdom a live approval put there. The row predicts `approve-wisdom` exactly: `revocable` → `{ success: true,
+   changed: false }` (approved already; `blockedBy` still says `already-wisdom` for a NEW approval); otherwise
+   `eligible` → approved (`changed: true`); otherwise the first `blockedBy` code (75 of 75 fuzzed rows agree, as for
+   `revocable` and `revoke-wisdom`). Where the row explains promotion, `promotion.wisdomBy` (appended after the
+   promotion object's other keys) says why a wisdom entry is wisdom when the store can tell:
    `operator-approved` (a live approval), `curated` (operator authority — only a curated write sets it) or `null` (an
    entry earned in `maintain` and one promoted by a caller with `--curated` leave no per-entry record that tells them
    apart). `thresholds.operatorApproval: true` is the capability key. The same keys reach MCP `entry_status`.
    **The claims review queue** (2026-11-10): `midmem claims-deferred --library <libraryId> [--limit <n>] [--offset <n>]`
-   (limit ≤ 200, default 50) → `{ total, claims: [{ id, content, status, stance, deferredAt, deferReason, libraryId,
-   docId, sourceTitle, entryId, authority, relation: { relation, shared, similarity, containment? } | null, neighbor:
-   { id, content, status, stance, libraryId, docId, sourceTitle, entryId, authority } | null }] }` — the deferred claims
-   whose source belongs to that library, oldest first, `total` before paging. A claim's `libraryId` / `docId` are the
-   ones its source was ingested with (`--library` / `--doc-id`, the ids `entries --library --doc-ids` reads): its
-   `source.sourceId` (written by ingest since #41, kept by `reextract` and `claim_supersede`) names the entry whose
-   ingest produced it — `entryId`, whatever that entry's status now (`entries <entryId>` says whether it is still the
-   live one) — and that entry's `provenance.source` (else the sources row's own) carries the ids; a legacy claim without
-   a `sourceId` maps through its source path (the newest sources row at that path, the active entry standing for it). A
-   claim from no library (an agent's, an operator note) maps to null ids. `sourceTitle` is the title sent at ingest;
-   `authority` the claim's origin authority (`doc` when it carries none); `relation` the write-time relation (null for
-   an explicit deferral); `neighbor` the claim it contradicts, mapped the same way (null without one). A pure read.
-   Without flags `claims-deferred` prints the whole ledger exactly as before (MCP `claims_deferred` too).
+   (limit ≤ 200, default 50) → `{ total, staleOmitted, claims: [{ id, content, status, stance, deferredAt, deferReason,
+   libraryId, docId, sourceTitle, entryId, authority, relation: { relation, shared, similarity, containment? } | null,
+   neighbor: { id, content, status, stance, libraryId, docId, sourceTitle, entryId, authority } | null }] }` — the
+   deferred claims whose source belongs to that library AND whose source entry is still active, oldest first; `total`
+   counts those (before paging). A deferred claim of a superseded capture version (or of an archived or forgotten entry)
+   is left out and counted in `staleOmitted`: it is not the operator's to judge (`--replace-neighbor` refuses it,
+   `claim-source-gone`), and `claims-sweep` archives it as `source-gone` — its orphan rule covers deferred claims.
+   **Offset paging shifts when a claim is resolved** (a resolved claim leaves the list): after each resolution re-read
+   from offset 0. Any flag but `--library` / `--limit` / `--offset`, or one given twice, is a usage error. A claim's
+   `libraryId` / `docId` are the ones its source was ingested with (`--library` / `--doc-id`, the ids `entries
+   --library --doc-ids` reads): its `source.sourceId` (written by ingest since #41, kept by `reextract` and
+   `claim_supersede`) names the entry whose ingest produced it — `entryId`, whatever that entry's status now (`entries
+   <entryId>` says whether it is still the live one) — and that entry's `provenance.source` (else the sources row's
+   own) carries the ids; a legacy claim without a `sourceId` maps through its source path (the newest sources row at
+   that path, the active entry standing for it). A claim from no library (an agent's, an operator note) maps to null
+   ids. `sourceTitle` is the title sent at ingest; `authority` the claim's origin authority (`doc` when it carries
+   none); `relation` the write-time relation (null for an explicit deferral); `neighbor` the claim it contradicts,
+   mapped the same way (null without one). A pure read.
+   Without flags `claims-deferred` prints the whole ledger exactly as before, stale claims included (MCP
+   `claims_deferred` too).
 8. **Call shape.** Shell out to the `midmem` CLI through a durable queue with a frozen argv allowlist
    and a provider switch (mock in every test: zero `execFile`); or import `Orchestrator` in-process
    for a Node caller on the same host. Both are governed identically.
@@ -412,8 +468,11 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    - `claim-resolve <claimId>` · `claim-resolve <claimId> --reject` · `claim-resolve <claimId> --replace-neighbor`
    - `claims-deferred --library <libraryId> [--limit <n>] [--offset <n>]`
 
+   Each may be repeated after an unknown outcome (item 6, "Retries and unknown outcomes").
+
    No MCP tool exists for the three writes, deliberately: an operator action comes from a capture system's UI through
-   the CLI, and the agent sessions on the host deny tools by MCP name.
+   the CLI, and the agent sessions on the host deny tools by MCP name. That keeps them out of the agents' tool lists; it
+   does not stop a shell (item 6, "Who can run them").
 
 **Coming for this mode:** metadata filters on query (#48) and MidMem's Qdrant spin-up with a vector
 backfill (#50, #51). None changes the contract above. The Qdrant adapter's code half has landed: search

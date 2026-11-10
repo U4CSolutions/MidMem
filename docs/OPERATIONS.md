@@ -122,44 +122,66 @@ operator's explicit approval; `midmem revoke-wisdom <entryId> [--note <text>] [-
 approval back. The approval stands in for the usage evidence of the earned rule and for nothing else — every other
 check of the earned path holds, authority is unchanged, nothing becomes curated — and a capture system sends either
 verb only on one operator action in its UI ([INTEGRATION-MODES.md §6](INTEGRATION-MODES.md) item 6(e) has the checks,
-the denial codes and the JSON). CLI only; there is no MCP tool, and an operator never uses `promote --curated` for this.
+the denial codes, the JSON and the retry contract). CLI only; there is no MCP tool, and an operator never uses
+`promote --curated` for this. **Reach:** MidMem does not identify its caller — like `promote --curated`, these writes
+can be run by anything with shell access to the store, an agent session included. "Operator only" is enforced by
+the capture system's UI and by convention, not by MidMem.
+
+**What an approval does** — what the wisdom tier gives an earned entry, nothing more: (1) no lease (it never decays
+by disuse); (2) no distrust archival (unhelpful votes only put it on `lowTrustWisdom`); (3) the `verbatim` fidelity
+class (a recall returns its whole text up to `MIDMEM_VERBATIM_MAX_CHARS`, 4,000, instead of the 600-character
+preview); (4) `reextract` skips it, the nightly batch included; (5) a project-tagged entry is lifted to global and
+appears in every project's reads. Because of (4) an entry that is not model-extracted is refused
+(`fallback-extraction`): run `midmem reextract --library <id> --doc-ids <doc>` first, then approve. No protected
+recall slot and no operator authority: those come only from curation.
 
 **Receipts.** Each approval leaves:
 - `provenance.approval = { by: "operator-approval", from, to, at, via, note, liftedFrom }` on the entry (kept for
-  good: a revoke adds `revokedAt` / `revokeNote` / `revokeVia`; a later approval moves the old record to
-  `provenance.approvalHistory`; archive, forget and a superseding re-ingest leave it on the old row as history). Like
-  the rest of provenance it is projected onto the entry's wiki page and kept in the revision export — which is why
-  a note carrying a secret-shaped value is refused;
+  good: a revoke adds `revokedAt` / `revokeNote` / `revokeVia`; a tier move by any other road — maintain's earned
+  promotion, `promote --curated`, `promote <id> memory` — ends it with `{ endedAt, endedBy: "promote", endedTier }`; a
+  later approval moves the old record to `provenance.approvalHistory`; archive, forget and a superseding re-ingest
+  leave it on the old row as history). Like the rest of provenance it is projected onto the entry's wiki page and
+  kept in the revision export — which is why a note carrying a secret-shaped value is refused;
 - a `promote` log row — the earned path's `{ id, toTier }` plus `{ by: "operator-approval", at, via, note }` — and
   for a refusal an `approve-wisdom-denied` row `{ id, denied, via }`; a revoke logs `revoke-wisdom` (or
-  `revoke-wisdom-denied`);
+  `revoke-wisdom-denied`); a repeat that answers `changed: false` writes nothing;
 - audit rows: `governance` with op `approve-wisdom` / `revoke-wisdom` (allowed or denied, with the policy) and the
   transition verifier's `transition:promote` receipt with `by: "operator-approval"`. Log and audit rows age out
-  after `MIDMEM_RETENTION_DAYS` (90); the provenance record does not.
+  after `MIDMEM_RETENTION_DAYS` (90); the provenance record does not. The write, the record, the log row and the
+  transition receipt are one transaction (`BEGIN IMMEDIATE`): a crash leaves all of them or none.
 
 **Listing the operator-approved wisdom.** For one capture system: `midmem entries --library <id>` — rows with
 `approval.approvedAt` set (and `promotion.wisdomBy: "operator-approved"`). For the whole store, read-only on the db
-(or on a `.backup` copy):
+(or on a `.backup` copy) — live records only (not revoked, not ended by another road, the entry still in the tier the
+approval put it in):
 ```sql
 SELECT id, json_extract(provenance, '$.approval.at') AS approvedAt, json_extract(provenance, '$.approval.via') AS via,
        substr(content, 1, 80) AS content
   FROM entries
  WHERE status = 'active' AND tier = 'wisdom'
    AND json_extract(provenance, '$.approval.by') = 'operator-approval'
-   AND json_extract(provenance, '$.approval.revokedAt') IS NULL;
+   AND json_extract(provenance, '$.approval.to') = tier
+   AND json_extract(provenance, '$.approval.revokedAt') IS NULL
+   AND json_extract(provenance, '$.approval.endedAt') IS NULL;
 ```
 
 **Revoking.** Normally from the capture system's UI. By hand, as the store user (`sudo -u midmem midmem
 revoke-wisdom <entryId> --note "<why>"`): the entry returns to `memory` with a fresh lease by its type (a web
-article 90 days), its project back, counters and trust as they were. Earned and curated wisdom answer
-`not-operator-approved`: they are not this verb's to take back (forget or archive them as before). A revoked entry
-that meets the earned rule is promoted again by the next `maintain` — as earned wisdom, which no revoke undoes.
+article 90 days), its project back, counters and trust as they were; a second identical call answers `changed:
+false`. Earned and curated wisdom answer `not-operator-approved` — also an entry whose approval another road ended:
+they are not this verb's to take back (forget or archive them as before). A revoked entry that meets the earned rule
+is promoted again by the next `maintain` — as earned wisdom, which no revoke undoes.
 
 **Claims review** (same date): `midmem claims-deferred --library <id>` lists one capture system's deferred claims
-with their doc ids, entries and the neighbour each contradicts; `midmem claim-resolve <claimId> --replace-neighbor`
-accepts a claim and supersedes that neighbour in one transaction (refused for a neighbour of higher authority). Both
-appear in the ordinary queues: `lint`'s `deferredClaims` and `writeConflicts`, the consistency report's supersede
-chains.
+with their doc ids, entries and the neighbour each contradicts — only claims whose source entry is still active;
+`staleOmitted` counts the deferred claims of superseded capture versions (or archived / forgotten entries) it leaves
+out. Those stay in the whole ledger (`claims-deferred` without flags, `lint`'s `deferredClaims`) until `claims-sweep`
+archives them as `source-gone` (its orphan rule covers deferred claims). `midmem claim-resolve <claimId>
+--replace-neighbor` accepts a claim and supersedes that neighbour in one transaction (refused for a neighbour of
+higher authority, a claim whose source is gone, a claim that is no observed fact); it flags for review only the
+concept labels the contested claim names (rule (ii) of the supersede rule), so `lint`'s `stalePaths` grows by those
+alone. All of it appears in the ordinary queues: `lint`'s `deferredClaims`, `writeConflicts` and `stalePaths`, the
+consistency report's supersede chains.
 
 ## Health signals worth watching
 
@@ -475,15 +497,23 @@ heading as a claim, narrowed stance markers, `claims-restance`): stances stored 
 they were until `midmem claims-restance --dryRun`, then without `--dryRun`, re-judges them.
 - **Order: MidMem first, then the capture system's queues.** A capture system tells a capable MidMem by
   `thresholds.operatorApproval: true` on `entries` (each row then carries `approval`). An older MidMem prints its
-  usage text (not JSON) for `approve-wisdom` / `revoke-wisdom`, but its CLI ignores switches it does not know:
-  `claims-deferred --library <id>` prints the whole ledger and **`claim-resolve <id> --replace-neighbor` ACCEPTS the
-  claim** (both stand) — never send either to one.
+  usage text (not JSON) for `approve-wisdom` / `revoke-wisdom` **with exit 0**, and its CLI ignores switches it does
+  not know: `claims-deferred --library <id>` prints the whole ledger and **`claim-resolve <id> --replace-neighbor`
+  ACCEPTS the claim** (both stand) — never send either to one.
 - **What changes on the store on day one:** nothing until an operator acts. `maintain` neither approves nor revokes,
   and the earned rule is unchanged; `promote <id> wisdom` without `--curated` is denied as before.
+- **What changes for callers:** `claim-resolve` and `claims-deferred` are strict (an unknown, misspelt, `=value` or
+  repeated flag, a second id: exit 1, nothing written — `claim-resolve <id> --replace-neighbour` used to be a plain
+  accept); accept / reject answer a first call exactly as before, a repeat of the same resolution answers
+  `{ success: true, changed: false, id, status }`, and any other non-deferred claim answers `{ success: false, denied:
+  "not-deferred", id, status, resolution, message }` (it carried only `message`). Approval needs a model-extracted
+  entry. A store locked past `busy_timeout` at open now answers `ERROR: database is locked` (exit 1, as before) instead
+  of a stack trace.
 - **Rollback:** stop the capture system's approve / revoke / replace sends first. The older release keeps every
   approved entry in `wisdom` (the tier is all it reads) with its record in provenance, but cannot revoke it and shows
   no `approval` key; a `--replace-neighbor` resolution reads as an ordinary supersede chain. After the re-upgrade the
-  records are live again as they were.
+  records are live again as they were — the older release's `promote` does not end a record, so check
+  `approval.revocable` entries that an agent moved during the rollback window (the listing query above).
 - Long-lived MCP servers show the `entry_status` keys after they reconnect; there is no new MCP tool.
 
 ## When things look wrong

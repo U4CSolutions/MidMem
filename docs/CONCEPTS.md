@@ -29,11 +29,14 @@ uncurated writes, and the one other road in is the operator's approval.
 **Operator-approved wisdom** (operator decision 2026-11-10; `approve-wisdom`, [INTEGRATION-MODES.md
 §6](INTEGRATION-MODES.md) item 6(e)). The operator may approve ONE `memory` entry into `wisdom`. The
 approval stands in for the **usage evidence** of the earned rule (retrievals, trust, helpful votes) and
-for nothing else: the entry must still be active, in `memory`, not a `working` entry, above the
-write-time grounding floor, and not flagged instruction-like; governance and the transition verifier
-still run, with their receipts. It is not curation — authority stays what it was (`web` for a capture),
-so no protected recall slots — and `revoke-wisdom` takes it back (the entry returns to `memory` with a
-fresh lease and can then earn wisdom by use like any other). This is not LLM judgment in a promotion
+for nothing else: the entry must still be active, in `memory`, not a `working` entry, model-extracted
+(wisdom is never re-extracted), above the write-time grounding floor, and not flagged instruction-like;
+governance and the transition verifier still run, with their receipts. The approved entry then has what
+the wisdom tier gives an earned one — no lease, no distrust archival, verbatim recall, no re-extraction,
+the lift from its project to global — and nothing more. It is not curation — authority stays what it was
+(`web` for a capture), so no protected recall slots — and `revoke-wisdom` takes it back (the entry returns
+to `memory` with a fresh lease and can then earn wisdom by use like any other); any other road that moves
+the entry ends the approval. This is not LLM judgment in a promotion
 path, so the roadmap's non-goals — no LLM in any verifier or tagger path, promotion never by LLM
 judgment — stay true: the decision is a person's, made on one entry, recorded with when and through which
 system; every check is the same deterministic code; and a model may at most **prepare** a case for the
