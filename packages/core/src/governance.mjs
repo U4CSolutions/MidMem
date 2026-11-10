@@ -56,10 +56,32 @@ export function defaultPolicies(cfg) {
       },
     },
     {
+      // Operator-approved wisdom (2026-11-10): the ONE road into a curated-only tier that is not a curated
+      // write. It admits exactly two ops and nothing else: 'approve-wisdom' (the tier directly below the
+      // curated-only tier → that tier) and 'revoke-wisdom' (back down, only for an entry whose wisdom came
+      // from an operator approval). Both need the explicit operator approval flag and never carry
+      // curated:true — an approval replaces the usage evidence of the earned rule, it never grants
+      // curation (operator authority, protected slots). curated-tier-write above is untouched:
+      // `promote <id> wisdom` without curated:true is denied exactly as before.
+      name: 'operator-approved-wisdom',
+      applies: (op) => op === 'approve-wisdom' || op === 'revoke-wisdom',
+      check: (op, ctx) => {
+        if (ctx.curated === true) return { allow: false, reason: 'an operator approval never carries curated:true' };
+        if (ctx.operatorApproved !== true) return { allow: false, reason: `${op} needs an explicit operator approval (operatorApproved:true)` };
+        const names = cfg.tiers.map((t) => t.name);
+        const [hi, lo] = op === 'approve-wisdom' ? [ctx.toTier, ctx.fromTier] : [ctx.fromTier, ctx.toTier];
+        if (!tierByName[hi]?.curatedOnly) return { allow: false, reason: `${op}: '${hi}' is not a curated-only tier` };
+        if (names.indexOf(lo) < 0 || names.indexOf(lo) !== names.indexOf(hi) - 1) return { allow: false, reason: `${op}: only between the tier below '${hi}' and '${hi}', not '${lo}'` };
+        if (op === 'revoke-wisdom' && ctx.approvedBy !== 'operator-approval') return { allow: false, reason: 'revoke-wisdom: only wisdom that an operator approval put there' };
+        return { allow: true };
+      },
+    },
+    {
       // Lifecycle class (roadmap #44): `working` is context-assembly state and never climbs tiers —
       // the documented contract, now enforced on the manual path too (auto-promotion filters it out).
+      // An operator approval (2026-11-10) is a promotion too: the same rule holds for it.
       name: 'working-never-promotes',
-      applies: (op) => op === 'promote',
+      applies: (op) => op === 'promote' || op === 'approve-wisdom',
       check: (_op, ctx) => (ctx.memFunction === 'working')
         ? { allow: false, reason: "memory function 'working' is lease-bound context state; it cannot be promoted" }
         : { allow: true },

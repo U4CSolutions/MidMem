@@ -5,8 +5,13 @@
  */
 import { randomUUID } from 'node:crypto';
 import { genId, nowISO, json, tokenize } from './util.mjs';
+import { normalizeAuthority, authorityRank } from './authority.mjs';
 
 const STATUSES = new Set(['active', 'verified', 'contradicted', 'superseded', 'archived', 'deferred']);
+/** `claim-resolve --replace-neighbor` refusals (2026-11-10), in the order the checks run. Fixed: a capture system keys on them. */
+export const REPLACE_NEIGHBOR_DENIALS = Object.freeze(['not-found', 'not-deferred', 'no-neighbor', 'neighbor-not-live', 'neighbor-authority', 'transition-verifier']);
+/** A claim's origin authority label; a claim stored without one ranks as `doc` (authorityRank), and is reported so. */
+const claimAuthority = (c) => normalizeAuthority(c?.provenance?.authority) || 'doc';
 
 /** Negation markers: the polarity signal shared by the write-path relate(), the audit-time
  *  findContradictions() and reclassifyWriteConflicts() — one set, so the three stay one rule. */
@@ -241,6 +246,95 @@ export class ClaimStore {
   deferred() {
     return this.db.prepare("SELECT * FROM claims WHERE status='deferred' ORDER BY updated_at ASC, id ASC")
       .all().map((r) => this.#h(r));
+  }
+
+  /**
+   * Where a claim came from, in a capture system's terms (2026-11-10): the library and doc id the source was
+   * ingested with (`ingest --library --doc-id`, the ids `entries --library --doc-ids` reads), its title, and the
+   * entry whose ingest produced the claim. Through `source.sourceId` (written at ingest since #41, and by
+   * reextract and claim_supersede, which inherit it): the entry with that `source_id` (any status — `entries
+   * <id>` tells whether it is still the live one) and its `provenance.source`, else the sources row's own
+   * metadata. A legacy claim without one maps by `source.path`: the newest sources row at that path and the
+   * active entry standing for it. A claim from no library source (an agent's, a remembered note) maps to nulls.
+   */
+  originOf(c) {
+    const s = c?.source && typeof c.source === 'object' ? c.source : {};
+    let row = null, entry = null;
+    if (typeof s.sourceId === 'string' && s.sourceId) {
+      row = this.db.prepare('SELECT id, title, metadata FROM sources WHERE id=?').get(s.sourceId) || null;
+      entry = this.db.prepare('SELECT id, provenance FROM entries WHERE source_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1').get(s.sourceId) || null;
+    } else if (typeof s.path === 'string' && s.path) {
+      row = this.db.prepare('SELECT id, title, metadata FROM sources WHERE path=? ORDER BY ingested_at DESC, rowid DESC LIMIT 1').get(s.path) || null;
+      entry = this.db.prepare("SELECT e.id, e.provenance FROM entries e JOIN sources s ON s.id = e.source_id WHERE s.path=? AND e.status='active' ORDER BY e.updated_at DESC, e.id LIMIT 1").get(s.path) || null;
+    }
+    const fromEntry = json(entry?.provenance, {})?.source;
+    const src = fromEntry && typeof fromEntry === 'object' ? fromEntry : (json(row?.metadata, {})?.source || {});
+    const str = (v) => (typeof v === 'string' && v ? v : null);
+    return { libraryId: str(src.libraryId), docId: str(src.docId), sourceTitle: str(s.title) ?? str(row?.title), entryId: entry?.id ?? null };
+  }
+
+  /**
+   * The claims review queue of ONE library (2026-11-10, INTEGRATION-MODES §6 item 7; CLI `claims-deferred --library`):
+   * the deferred claims whose source belongs to `libraryId` (originOf), oldest first (the ledger's order), paged.
+   * Each row carries what an operator needs to judge it without a second read: the claim, where it came from, its
+   * write-time relation, and the live neighbour it contradicts, mapped the same way. A pure read.
+   * → { total, claims: [{ id, content, status, stance, deferredAt, deferReason, libraryId, docId, sourceTitle,
+   *     entryId, authority, relation: { relation, shared, similarity, containment? } | null,
+   *     neighbor: { id, content, status, stance, libraryId, docId, sourceTitle, entryId, authority } | null }] }
+   */
+  deferredForLibrary(libraryId, { limit = 50, offset = 0 } = {}) {
+    const mine = this.deferred().map((c) => ({ c, o: this.originOf(c) })).filter((x) => x.o.libraryId === libraryId);
+    const row = ({ c, o }) => {
+      const wr = c.metadata?.writeRelation;
+      const nb = typeof wr?.neighborId === 'string' ? this.get(wr.neighborId) : null;
+      const no = nb ? this.originOf(nb) : null;
+      return {
+        id: c.id, content: c.content, status: c.status, stance: claimStance(c),
+        deferredAt: c.metadata?.deferredAt ?? null, deferReason: c.metadata?.deferReason ?? null,
+        libraryId: o.libraryId, docId: o.docId, sourceTitle: o.sourceTitle, entryId: o.entryId, authority: claimAuthority(c),
+        relation: wr && typeof wr === 'object' ? { relation: wr.relation ?? null, shared: wr.shared ?? null, similarity: wr.similarity ?? null, ...(wr.containment != null ? { containment: wr.containment } : {}) } : null,
+        neighbor: nb ? { id: nb.id, content: nb.content, status: nb.status, stance: claimStance(nb), libraryId: no.libraryId, docId: no.docId, sourceTitle: no.sourceTitle, entryId: no.entryId, authority: claimAuthority(nb) } : null,
+      };
+    };
+    return { total: mine.length, claims: mine.slice(offset, offset + limit).map(row) };
+  }
+
+  /** `claim-resolve --replace-neighbor` (2026-11-10): the checks, in REPLACE_NEIGHBOR_DENIALS order (the transition
+   *  verifier is the orchestrator's) → { claim, neighbor } | { denied, message }. A pure read. A neighbour is the
+   *  claim's write-time `writeRelation.neighborId`; live = active or verified; a claim never replaces a neighbour of
+   *  HIGHER authority (a web claim never supersedes an operator-authored one; no label ranks as doc). */
+  replaceNeighborCheck(id) {
+    const c = this.get(id);
+    if (!c) return { denied: 'not-found', message: `not found: ${id}` };
+    if (c.status !== 'deferred') return { denied: 'not-deferred', message: `not deferred: '${c.status}'` };
+    const nid = c.metadata?.writeRelation?.neighborId;
+    if (typeof nid !== 'string' || !nid) return { denied: 'no-neighbor', message: 'the claim records no write-time neighbor' };
+    const nb = this.get(nid);
+    if (!nb || (nb.status !== 'active' && nb.status !== 'verified')) return { denied: 'neighbor-not-live', message: `neighbor ${nid} is ${nb ? `'${nb.status}'` : 'gone'}` };
+    if (authorityRank(claimAuthority(nb)) > authorityRank(claimAuthority(c))) return { denied: 'neighbor-authority', message: `neighbor authority '${claimAuthority(nb)}' is higher than this claim's '${claimAuthority(c)}'` };
+    return { claim: c, neighbor: nb };
+  }
+
+  /** Accept a deferred claim AND supersede its live neighbour by it, in ONE transaction (2026-11-10). The existing
+   *  supersede chain fields — the neighbour `superseded` with `metadata.superseded_by` = this claim, this claim's
+   *  `metadata.supersedes` = the neighbour — so claim-validity, current reads and the consistency check read it as
+   *  any supersede; this claim also records `deferredResolution` and `judged` { action: 'replace-neighbor', at,
+   *  from } (its write tag stays as history). A `supersedes` it already carried (a claim_supersede replacement
+   *  deferred at write) is kept as `supersedesEarlier`. The neighbour's contradictedBy stays as its evidence.
+   *  The checks re-run inside the transaction. → { success, id, status, neighbor: { id, status } } | { success: false, denied, message } */
+  replaceNeighbor(id) {
+    return this.db.tx(() => {
+      const chk = this.replaceNeighborCheck(id);
+      if (chk.denied) return { success: false, ...chk };
+      const { claim: c, neighbor: nb } = chk;
+      const at = nowISO();
+      const prior = typeof c.metadata.supersedes === 'string' && c.metadata.supersedes !== nb.id ? c.metadata.supersedes : null;
+      const meta = { ...c.metadata, deferredResolution: { action: 'replace-neighbor', at }, judged: { action: 'replace-neighbor', at, from: c.metadata.writeRelation?.relation ?? null }, supersedes: nb.id, ...(prior ? { supersedesEarlier: prior } : {}) };
+      const upd = this.db.prepare('UPDATE claims SET status=?, metadata=?, updated_at=? WHERE id=?');
+      upd.run('active', JSON.stringify(meta), at, c.id);
+      upd.run('superseded', JSON.stringify({ ...nb.metadata, superseded_by: c.id }), at, nb.id);
+      return { success: true, id: c.id, status: 'active', neighbor: { id: nb.id, status: 'superseded' } };
+    });
   }
 
   /**

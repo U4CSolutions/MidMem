@@ -23,7 +23,7 @@ import { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, forgetNodes,
 import { verifyTransition, verifyPromotion, auditTransition } from './transitions.mjs';
 import { loadPacks, recordPattern } from './packs.mjs';
 import { exportKnowledge } from './export.mjs';
-import { entryStatus, forgetSource, feedbackIfActive, ENTRY_STATUS_ID_RE } from './entrystatus.mjs';
+import { entryStatus, forgetSource, feedbackIfActive, ENTRY_STATUS_ID_RE, approvalBlockers, approvalContext, approvalTiers, liveApproval, isLiveEntry, APPROVAL_NOTE_MAX, APPROVAL_VIA_RE } from './entrystatus.mjs';
 import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
 import { normalizeAuthority, clampAuthority, authorityRank } from './authority.mjs';
 import { checkConsistency } from './consistency.mjs';
@@ -1578,6 +1578,132 @@ export class Orchestrator {
     });
   }
 
+  /** The operator's note and the calling system's name on approve-wisdom / revoke-wisdom: usage errors (thrown,
+   *  before anything is read or written) — a bounded id, a note of ≤ 500 characters with no control characters
+   *  but newline and tab and no secret-shaped value (it is stored with the entry and in the export), a short name. */
+  #approvalArgs(verb, id, note, via) {
+    if (typeof id !== 'string' || !ENTRY_STATUS_ID_RE.test(id)) throw new Error(`${verb} needs one <entryId> (got ${String(id ?? '').slice(0, 40) || 'none'})`);
+    if (note != null && typeof note !== 'string') throw new Error(`${verb}: --note must be text`);
+    if (via != null && (typeof via !== 'string' || !APPROVAL_VIA_RE.test(via))) throw new Error(`${verb}: --via must be a system name of 1-40 letters, digits, . _ : - (got ${String(via).slice(0, 40)})`);
+    const n = note ? note : null;
+    if (n && n.length > APPROVAL_NOTE_MAX) throw new Error(`${verb}: --note is at most ${APPROVAL_NOTE_MAX} characters (got ${n.length})`);
+    if (n && /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(n)) throw new Error(`${verb}: --note carries a control character`);
+    const kind = n && this.cfg.ingest?.secretTextGuard !== false ? secretTextKind(n) : null;
+    if (kind) throw new Error(`${verb}: --note carries a secret-shaped value (${kind}); strip it`);
+    return { note: n, via: via ?? null };
+  }
+
+  /**
+   * Operator-approved wisdom (operator decision 2026-11-10, INTEGRATION-MODES §6 6e; CLI `approve-wisdom`, NO MCP
+   * tool): memory → wisdom on the operator's explicit approval of ONE entry. The approval REPLACES THE USAGE
+   * EVIDENCE of the earned rule (retrieval_count, trust, helpful_count) AND NOTHING ELSE — every other check of
+   * the earned path holds, in this order (approvalBlockers; the first that applies is the answer):
+   *   not-found · not-active (status, or an expired lease — maintain sweeps before it promotes) · already-wisdom ·
+   *   not-memory-tier (only the tier directly below wisdom; never fact → wisdom) · lifecycle (a `working` entry
+   *   never promotes) · grounding-below-floor (the transition verifier's write-time grounding floor, as
+   *   maintain's pre-filter) · instruction-like (the #40 screen: an entry shaped like an instruction to an agent
+   *   is never approved into the permanent tier) · governance (the 'operator-approved-wisdom' policy and
+   *   working-never-promotes; curated-tier-write is not weakened) · transition-verifier (re-run inside the
+   *   governed write with its receipt, exactly as promote() runs it; it answers only when the entry changed
+   *   between the checks).
+   * The tier moves through the same memory.promote the earned path uses: the destination tier's lease (wisdom:
+   * none) and the project lift (#18) are identical. Authority stays what it was and curated is never set: no
+   * protected recall slots, no operator authority. The record `{ by: 'operator-approval', from, to, at, via, note,
+   * liftedFrom }` lands in provenance.approval in the same write; the `promote` log row is the earned path's
+   * `{ id, toTier }` plus the reason (`by`, `at`, `via`, `note`); the transition receipt likewise carries `by`; the
+   * governance audit row is governed()'s. Denials are logged (`approve-wisdom-denied`).
+   * → { success: true, id, tier, approval: { at, via } } | { success: false, denied, id, message }
+   */
+  async approveWisdom(id, { note = null, via = null } = {}) {
+    const args = this.#approvalArgs('approve-wisdom', id, note, via);
+    const deny = (denied, message) => { this.db.logOp('approve-wisdom-denied', { id, denied, via: args.via }); return { success: false, denied, id, message }; };
+    const say = (code, e) => ({
+      'not-found': `no entry ${id}`,
+      'not-active': `entry is ${e?.status === 'active' ? 'past its lease' : e?.status} — only an active entry can be approved`,
+      'already-wisdom': `entry is already in tier '${e?.tier}'`,
+      'not-memory-tier': `entry is in tier '${e?.tier}' — only the tier directly below wisdom can be approved`,
+      lifecycle: "a 'working' entry is lease-bound context state and never promotes",
+      'grounding-below-floor': `write-time grounding ${e?.provenance?.grounding?.summaryScore} is below the promotion floor ${this.cfg.transitions?.promoteMinGrounding ?? 0.3}`,
+      'instruction-like': `the entry is flagged instruction-like (${(e?.provenance?.instructionLike?.matched || []).join(', ') || 'its content'}) — never approved into wisdom`,
+    }[code] || code);
+    const e = this.recall(id);
+    const pre = approvalBlockers(this, e);
+    if (pre.length) return deny(pre[0], say(pre[0], e));
+    const t = approvalTiers(this);
+    try {
+      return await governed(this.gov, 'approve-wisdom', approvalContext(this, e), () => this.db.tx(() => {
+        // Re-read inside the write: a capture's re-ingest, an archive or a reextract may have landed meanwhile.
+        const cur = this.recall(id);
+        const now = approvalBlockers(this, cur).filter((c) => c !== 'grounding-below-floor');
+        if (now.length) return deny(now[0], say(now[0], cur));
+        // The transition verifier with its receipt, as promote() runs it for the earned path.
+        if (this.cfg.transitions?.enabled !== false) {
+          const verdict = verifyPromotion(cur, this.cfg.transitions);
+          auditTransition(this.db, 'promote', { ...verdict, id, toTier: t.to, by: 'operator-approval' }, { before: cur.content || '', after: cur.content || '' });
+          if (!verdict.pass && this.cfg.transitions?.deny !== false) {
+            this.db.logOp('promote-denied', { id, toTier: t.to, reason: verdict.reason, by: 'operator-approval' });
+            return deny('transition-verifier', verdict.reason);
+          }
+        }
+        const at = nowISO();
+        const r = this.memory.promote(id, t.to, { approval: { by: 'operator-approval', from: cur.tier, to: t.to, at, via: args.via, note: args.note } });
+        if (r.success === false) return deny('not-found', r.message);
+        this.db.logOp('promote', { id, toTier: t.to, by: 'operator-approval', at, via: args.via, note: args.note, ...(r.liftedFrom ? { liftedFrom: r.liftedFrom } : {}) });
+        this.#markVaultDirty();
+        return { success: true, id, tier: t.to, approval: { at, via: args.via } };
+      }));
+    } catch (err) {
+      if (err instanceof GovernanceError) return deny('governance', err.message);
+      throw err;
+    }
+  }
+
+  /**
+   * Revoke an operator approval (2026-11-10, §6 6e; CLI `revoke-wisdom`, NO MCP tool): only for an entry whose
+   * wisdom came from an operator approval (earned and curated wisdom → 'not-operator-approved'). Checks in order:
+   * not-found · not-active · not-wisdom · not-operator-approved · governance. The entry goes back to the tier
+   * below with a FRESH lease by the rule ingest applies to its type (the capture pack's ttlDays — web-article 90
+   * days — else the tier TTL), the project the approval lifted comes back, counters / trust / favorite untouched;
+   * the approval record stays as history with `revokedAt` (and `revokeNote` / `revokeVia`). Afterwards the entry
+   * can earn wisdom in maintain like any other (it qualifies by use or not) or be approved again (the revoked
+   * record then moves to provenance.approvalHistory). Logged (`revoke-wisdom`; denials `revoke-wisdom-denied`),
+   * governed (op 'revoke-wisdom', audit row).
+   * → { success: true, id, tier, expiresAt, project, approval: { at, via, revokedAt } } | { success: false, denied, id, message }
+   */
+  async revokeWisdom(id, { note = null, via = null } = {}) {
+    const args = this.#approvalArgs('revoke-wisdom', id, note, via);
+    const deny = (denied, message) => { this.db.logOp('revoke-wisdom-denied', { id, denied, via: args.via }); return { success: false, denied, id, message }; };
+    const t = approvalTiers(this);
+    const check = (e) => {
+      if (!e) return ['not-found', `no entry ${id}`];
+      if (!isLiveEntry(e)) return ['not-active', `entry is ${e.status === 'active' ? 'past its lease' : e.status}`];
+      if (!t || e.tier !== t.to) return ['not-wisdom', `entry is in tier '${e.tier}', not '${t?.to}'`];
+      if (!liveApproval(e)) return ['not-operator-approved', 'its wisdom did not come from an operator approval (earned or curated wisdom is never revoked here)'];
+      return null;
+    };
+    const e = this.recall(id);
+    const pre = check(e);
+    if (pre) return deny(...pre);
+    try {
+      return await governed(this.gov, 'revoke-wisdom', { id, fromTier: t.to, toTier: t.from, operatorApproved: true, approvedBy: liveApproval(e).by, curated: false }, () => this.db.tx(() => {
+        const cur = this.recall(id);
+        const now = check(cur);
+        if (now) return deny(...now);
+        const a = liveApproval(cur);
+        const revokedAt = nowISO();
+        const record = { ...a, revokedAt, ...(args.note ? { revokeNote: args.note } : {}), ...(args.via ? { revokeVia: args.via } : {}) };
+        const r = this.memory.returnToTier(id, t.to, t.from, { project: a.liftedFrom ?? null, approval: record });
+        if (!r.success) return deny('not-active', r.message);
+        this.db.logOp('revoke-wisdom', { id, fromTier: t.to, toTier: t.from, at: revokedAt, via: args.via, note: args.note, expiresAt: r.expiresAt, project: r.project, approvedAt: a.at });
+        this.#markVaultDirty();
+        return { success: true, id, tier: r.tier, expiresAt: r.expiresAt, project: r.project, approval: { at: a.at, via: a.via ?? null, revokedAt } };
+      }));
+    } catch (err) {
+      if (err instanceof GovernanceError) return deny('governance', err.message);
+      throw err;
+    }
+  }
+
   /** WiCER-style projection QA: completeness + sampled fidelity probes over the compiled wiki. */
   probeProjection(opts = {}) {
     const r = probeProjection(this.db, this.memory, this.cfg, { ...this.cfg.projectionQA, ...opts });
@@ -1614,49 +1740,55 @@ export class Orchestrator {
     }
     const old = this.claims.get(oldId);
     const r = this.claims.supersede(oldId, next); this.db.logOp('claim-supersede', { oldId, current: r.current }); if (r.success) this.#markVaultDirty();
-    // HiGram path rewrite (roadmap #12), report-only: when a claim is superseded, flag the nodes
-    // on ITS dependency path — and their community parents — as needing review. Judgment clears
-    // the flags (clearStaleFlags); nothing here mutates knowledge. Scoped rule (2026-10-12): the old
-    // matcher (graph.findByText — any label containing ANY ≥ 3-char token of the claim as a
-    // substring: "and", "the", "memory") flagged 264 nodes for one 40-word claim, 95 of them
-    // community parents, so the flag stopped meaning anything. A node is on the path when
-    //  (i) the claim's own source ingest created it (node.source === the claim's source.path), or
-    //  (ii) its label, as whole words, shares ≥ 2 significant tokens with the claim (the claim
-    //       store's tokenisation + negation set) AND they cover ≥ the containment floor
-    //       (claims.contradictionMinContainment) of the label's own significant tokens — a label
-    //       named BY the claim, not one that merely shares a common word with it.
-    // Deterministic. Community parents are flagged only through a flagged member, as before.
-    if (r.success && old) {
-      const flagged = [];
-      const ts = nowISO();
-      const srcPath = typeof old.source?.path === 'string' && old.source.path ? old.source.path : null;
-      const claimSig = significantTokens(old.content);
-      const floor = this.claims.containmentFloor();
-      const onPath = (n) => {
-        if (srcPath && n.source === srcPath) return true;
-        const label = significantTokens(n.label);
-        let shared = 0; for (const t of label) if (claimSig.has(t)) shared++;
-        return shared >= 2 && shared / label.size >= floor;
-      };
-      for (const n of this.graph.allNodes()) {
-        if (n.type === 'community' || !onPath(n)) continue;
-        this.db.prepare('UPDATE nodes SET properties=? WHERE id=?')
-          .run(JSON.stringify({ ...n.properties, staleReview: { claim: oldId, at: ts } }), n.id);
-        flagged.push(n.id);
-        for (const e of this.graph.neighbors(n.id)) {
-          if (e.type !== 'member_of') continue;
-          const parent = this.graph.node(e.to);
-          if (parent && !parent.properties.staleReview) {
-            this.db.prepare('UPDATE nodes SET properties=? WHERE id=?')
-              .run(JSON.stringify({ ...parent.properties, staleReview: { claim: oldId, at: ts, via: n.id } }), parent.id);
-            flagged.push(parent.id);
-          }
+    if (r.success && old) r.stalePath = this.#flagStalePath(old);
+    return r;
+  }
+
+  /**
+   * HiGram path rewrite (roadmap #12), report-only: when a claim is superseded, flag the nodes
+   * on ITS dependency path — and their community parents — as needing review. Judgment clears
+   * the flags (clearStaleFlags); nothing here mutates knowledge. Scoped rule (2026-10-12): the old
+   * matcher (graph.findByText — any label containing ANY ≥ 3-char token of the claim as a
+   * substring: "and", "the", "memory") flagged 264 nodes for one 40-word claim, 95 of them
+   * community parents, so the flag stopped meaning anything. A node is on the path when
+   *  (i) the claim's own source ingest created it (node.source === the claim's source.path), or
+   *  (ii) its label, as whole words, shares ≥ 2 significant tokens with the claim (the claim
+   *       store's tokenisation + negation set) AND they cover ≥ the containment floor
+   *       (claims.contradictionMinContainment) of the label's own significant tokens — a label
+   *       named BY the claim, not one that merely shares a common word with it.
+   * Deterministic. Community parents are flagged only through a flagged member, as before.
+   * Shared by supersedeClaim and `claim-resolve --replace-neighbor` (2026-11-10). Returns the flagged node ids.
+   */
+  #flagStalePath(old) {
+    const oldId = old.id;
+    const flagged = [];
+    const ts = nowISO();
+    const srcPath = typeof old.source?.path === 'string' && old.source.path ? old.source.path : null;
+    const claimSig = significantTokens(old.content);
+    const floor = this.claims.containmentFloor();
+    const onPath = (n) => {
+      if (srcPath && n.source === srcPath) return true;
+      const label = significantTokens(n.label);
+      let shared = 0; for (const t of label) if (claimSig.has(t)) shared++;
+      return shared >= 2 && shared / label.size >= floor;
+    };
+    for (const n of this.graph.allNodes()) {
+      if (n.type === 'community' || !onPath(n)) continue;
+      this.db.prepare('UPDATE nodes SET properties=? WHERE id=?')
+        .run(JSON.stringify({ ...n.properties, staleReview: { claim: oldId, at: ts } }), n.id);
+      flagged.push(n.id);
+      for (const e of this.graph.neighbors(n.id)) {
+        if (e.type !== 'member_of') continue;
+        const parent = this.graph.node(e.to);
+        if (parent && !parent.properties.staleReview) {
+          this.db.prepare('UPDATE nodes SET properties=? WHERE id=?')
+            .run(JSON.stringify({ ...parent.properties, staleReview: { claim: oldId, at: ts, via: n.id } }), parent.id);
+          flagged.push(parent.id);
         }
       }
-      if (flagged.length) this.db.logOp('stale-path', { claim: oldId, flagged: flagged.length, rule: 'scoped' });
-      r.stalePath = flagged;
     }
-    return r;
+    if (flagged.length) this.db.logOp('stale-path', { claim: oldId, flagged: flagged.length, rule: 'scoped' });
+    return flagged;
   }
 
   /** HiGram (roadmap #12): clear reviewed stale-path flags (judgment op; ids required). */
@@ -1713,6 +1845,48 @@ export class Orchestrator {
       this.db.logOp('claim-resolve', { id, action, success: r.success });
       if (r.success) this.#markVaultDirty();
       return r;
+    });
+  }
+
+  /** The claims review queue of one library (2026-11-10, INTEGRATION-MODES §6 item 7; CLI `claims-deferred --library
+   *  <id> [--limit <n ≤ 200, default 50>] [--offset <n>]`): ClaimStore.deferredForLibrary. A pure read — no log row. */
+  deferredClaimsForLibrary({ libraryId, limit = 50, offset = 0 } = {}) {
+    if (typeof libraryId !== 'string' || !ENTRY_STATUS_ID_RE.test(libraryId)) throw new Error(`bad library id: ${String(libraryId ?? '').slice(0, 40)}`);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new Error('limit must be an integer 1..200');
+    if (!Number.isInteger(offset) || offset < 0) throw new Error('offset must be a non-negative integer');
+    return this.claims.deferredForLibrary(libraryId, { limit, offset });
+  }
+
+  /**
+   * `claim-resolve <id> --replace-neighbor` (2026-11-10, INTEGRATION-MODES §6 6f; CLI only — the MCP `claim_resolve`
+   * tool keeps accept | reject): accept this deferred claim AND supersede its contradicting neighbour by it with
+   * the existing supersede mechanics, in one transaction (ClaimStore.replaceNeighbor). Refused (`{ success: false,
+   * denied, id, message }`, nothing written but the log row and receipts) when the claim is unknown (not-found), not
+   * deferred (not-deferred), records no neighbour (no-neighbor), the neighbour is not live (neighbor-not-live) or of
+   * higher authority (neighbor-authority), or the transition verifier — the receipt supersedeClaim writes —
+   * denies the pair (transition-verifier). Then the superseded neighbour's dependency path is flagged for review,
+   * as any supersede (stalePath). Governed as op 'claim-resolve' (action 'replace-neighbor'); logged as claim-resolve.
+   * → { success: true, id, status: 'active', neighbor: { id, status: 'superseded' }, stalePath: [node ids] }
+   */
+  async resolveDeferredReplacingNeighbor(id) {
+    if (typeof id !== 'string' || !ENTRY_STATUS_ID_RE.test(id)) throw new Error(`claim-resolve needs one <claimId> (got ${String(id ?? '').slice(0, 40) || 'none'})`);
+    return governed(this.gov, 'claim-resolve', { id, action: 'replace-neighbor' }, () => {
+      const deny = (denied, message) => { this.db.logOp('claim-resolve', { id, action: 'replace-neighbor', success: false, denied }); return { success: false, denied, id, message }; };
+      const chk = this.claims.replaceNeighborCheck(id);
+      if (chk.denied) return deny(chk.denied, chk.message);
+      if (this.cfg.transitions?.enabled !== false) {
+        const verdict = verifyTransition({ before: chk.neighbor.content, after: chk.claim.content }, this.cfg.transitions);
+        auditTransition(this.db, 'supersede', { ...verdict, oldId: chk.neighbor.id, claimId: id, by: 'replace-neighbor' }, { before: chk.neighbor.content, after: chk.claim.content });
+        if (!verdict.pass && this.cfg.transitions?.deny !== false) {
+          this.db.logOp('supersede-denied', { oldId: chk.neighbor.id, claimId: id, subjectOverlap: verdict.subjectOverlap, coverage: verdict.coverage });
+          return deny('transition-verifier', `the replacement is off-subject (subject overlap ${verdict.subjectOverlap} < ${verdict.gates.minSubjectOverlap})`);
+        }
+      }
+      const r = this.claims.replaceNeighbor(id);
+      if (!r.success) return deny(r.denied, r.message);
+      this.db.logOp('claim-resolve', { id, action: 'replace-neighbor', success: true, neighbor: r.neighbor.id });
+      this.#markVaultDirty();
+      return { ...r, stalePath: this.#flagStalePath(chk.neighbor) };
     });
   }
 

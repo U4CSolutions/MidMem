@@ -10,6 +10,8 @@ import { normalizeProject, projectClause } from './projectaxis.mjs';
  *  the two agree). A favorite counts as one helpful vote. */
 export const HELPFUL_TRUST_DELTA = 0.05;
 const UNHELPFUL_TRUST_DELTA = -0.10;
+/** Earlier operator approvals of one entry (each revoked) kept in provenance.approvalHistory — bounded. */
+const APPROVAL_HISTORY_MAX = 20;
 
 export class TieredMemory {
   /** @param {import('./db.mjs').StateDB} db @param {object} cfg */
@@ -191,7 +193,12 @@ export class TieredMemory {
     `).all(...params).map((r) => ({ id: r.id, tier: r.tier, vector: json(r.emb, []) }));
   }
 
-  promote(id, toTier) {
+  /** `approval` (operator-approved wisdom, 2026-11-10): the record `{ by, from, to, at, via, note }` lands in
+   *  `provenance.approval` in the SAME single write as the tier move, with `liftedFrom` = the project the lift
+   *  below moved (null when nothing was lifted) so a revoke can put it back. An earlier record (a revoked
+   *  approval) moves to `provenance.approvalHistory`. Without `approval` the write is exactly the earned
+   *  path's (maintain, `promote --curated`): same lease rule, same lift, nothing else recorded. */
+  promote(id, toTier, { approval = null } = {}) {
     const tc = this.tier(toTier);
     if (!tc) throw new Error(`unknown tier: ${toTier}`);
     const r = this.db.prepare('SELECT id, project, provenance FROM entries WHERE id=?').get(id);
@@ -203,6 +210,15 @@ export class TieredMemory {
     // GLOBAL — that tier is the cross-project lesson set. Lineage is kept (provenance.liftedFrom)
     // so the source project is never lost. Deterministic; off via projectAxis.liftOnCurated=false.
     const lift = this.cfg.projectAxis?.liftOnCurated !== false && tc.curatedOnly && r.project != null;
+    if (approval) {
+      const prov = json(r.provenance, {}) || {};
+      if (lift) prov.liftedFrom = { project: r.project, tier: toTier, at: nowISO() };
+      if (prov.approval) prov.approvalHistory = [...(Array.isArray(prov.approvalHistory) ? prov.approvalHistory : []), prov.approval].slice(-APPROVAL_HISTORY_MAX);
+      prov.approval = { ...approval, liftedFrom: lift ? r.project : null };
+      this.db.prepare(`UPDATE entries SET tier=?, status='active', expires_at=?, updated_at=?, ${lift ? 'project=NULL, ' : ''}provenance=? WHERE id=?`)
+        .run(toTier, expiresAt, nowISO(), JSON.stringify(prov), id);
+      return { success: true, message: `promoted ${id} → ${toTier} (operator approval${lift ? `; lifted from project '${r.project}' to global` : ''})`, ...(lift ? { liftedFrom: r.project } : {}) };
+    }
     if (lift) {
       const prov = { ...json(r.provenance, {}), liftedFrom: { project: r.project, tier: toTier, at: nowISO() } };
       this.db.prepare("UPDATE entries SET tier=?, status='active', expires_at=?, updated_at=?, project=NULL, provenance=? WHERE id=?")
@@ -212,6 +228,33 @@ export class TieredMemory {
     this.db.prepare("UPDATE entries SET tier=?, status='active', expires_at=?, updated_at=? WHERE id=?")
       .run(toTier, expiresAt, nowISO(), id);
     return { success: true, message: `promoted ${id} → ${toTier}` };
+  }
+
+  /**
+   * Revoke an operator approval (2026-11-10): the tier move back. One conditional write — only while the row is
+   * still ACTIVE in `fromTier` (a concurrent change makes it a no-op, `{ success: false }`):
+   *  - tier → `toTier` with a FRESH lease by the rule ingest applies to the entry's type: the lease resolver
+   *    (a capture pack's ttlDays for that type in that tier — web-article 90 days) before the tier TTL;
+   *  - the project the approval's lift moved comes back (`project`, only when the row is still global), and a
+   *    `provenance.liftedFrom` naming that lift goes (the approval record keeps it as history);
+   *  - `provenance` = the caller's record update (the approval kept, with `revokedAt`).
+   * Counters, trust, favorite, content, scope and authority are untouched.
+   */
+  returnToTier(id, fromTier, toTier, { project = null, approval } = {}) {
+    const tc = this.tier(toTier);
+    if (!tc) throw new Error(`unknown tier: ${toTier}`);
+    const r = this.db.prepare('SELECT id, type, project, provenance FROM entries WHERE id=?').get(id);
+    if (!r) return { success: false, message: `not found: ${id}` };
+    const ttl = this.#resolvedLease(r.type, toTier) ?? tc.ttl;
+    const expiresAt = ttl ? new Date(Date.now() + ttl).toISOString() : null;
+    const prov = json(r.provenance, {}) || {};
+    const restore = project != null && r.project == null ? project : null;
+    if (restore && prov.liftedFrom?.project === restore && prov.liftedFrom?.tier === fromTier) delete prov.liftedFrom;
+    if (approval !== undefined) prov.approval = approval;
+    const [row] = this.db.prepare(`UPDATE entries SET tier=?, expires_at=?, updated_at=?, ${restore ? 'project=?, ' : ''}provenance=?
+      WHERE id=? AND status='active' AND tier=? RETURNING tier, expires_at, project`)
+      .all(...[toTier, expiresAt, nowISO(), ...(restore ? [restore] : []), JSON.stringify(prov), id, fromTier]);
+    return row ? { success: true, tier: row.tier, expiresAt: row.expires_at, project: row.project ?? null } : { success: false, message: `not active in ${fromTier}: ${id}` };
   }
 
   async forget(id, { soft = true } = {}) {
