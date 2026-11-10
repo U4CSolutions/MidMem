@@ -5124,9 +5124,9 @@ try {
       const idR10 = (await kc83('d-m10', 'The tollcross83 ferry carries cyclists across the lake at noon. Riders board from the slipway.', modelEnv83)).out.entry.id;
       await o83.approveWisdom(idR10);
       ev83.evaluate = function (op, ctx) { if (op === 'revoke-wisdom' && ctx.id === idR10) o83.db.prepare("UPDATE entries SET provenance=json_set(provenance,'$.approval.endedAt','2026-11-10T00:00:00.000Z','$.approval.endedBy','promote') WHERE id=?").run(idR10); return Object.getPrototypeOf(this).evaluate.call(this, op, ctx); };
-      const m10 = await o83.revokeWisdom(idR10);
+      const m10 = await o83.revokeWisdom(idR10).catch((e) => ({ threw: e.message })); // a missing re-check fails here as an assertion, not a crash
       delete ev83.evaluate;
-      ok(m10.denied === 'not-operator-approved' && o83.recall(idR10).tier === 'wisdom',
+      ok(m10.denied === 'not-operator-approved' && !m10.threw && o83.recall(idR10).tier === 'wisdom',
         'M10: another road ending the approval between the checks and the write → not-operator-approved from the re-check; the entry stays wisdom');
       const idR17 = (await kc83('d-m17', 'The ashcombe83 chapel choir rehearses on Thursdays. Singers warm up with long scales.', modelEnv83)).out.entry.id;
       await o83.approveWisdom(idR17);
