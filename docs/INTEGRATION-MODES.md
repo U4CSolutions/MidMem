@@ -332,6 +332,9 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
      re-ingest of the same source with changed content archives it as it archives earned wisdom (the new version
      enters `memory` unapproved); `forget-source`, `archive`, `feedback` and favorites treat it as any entry (the
      record stays on an archived or forgotten row as history); `lint`'s `lowTrustWisdom` lists it by its own rule.
+     Linked duplicates (item 6(b)) are ONE entry, so one approval stands for every source that entry holds. The older
+     agent verb `promote <id> memory` can move any wisdom entry down without a revoke; the approval is then no longer
+     live (`approvedAt: null`, not revocable) and the next approval keeps it as history.
    - **Usage errors** (exit 1, `ERROR:` on stderr, nothing written): no id or two; any flag but `--note` / `--via` (a
      stray `--curated` included); a bare `--note`; a note over 500 characters, with a control character other than
      newline and tab, or carrying a secret-shaped value (the ingest boundary's rule); a `--via` other than 1–40
@@ -376,8 +379,9 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    and `midmem brief` counts the active favorites.
    Since 2026-11-10 each entry also carries `approval: { eligible, blockedBy, approvedAt, via, revocable }`:
    `blockedBy` lists every `approve-wisdom` code that applies now, in item 6(e)'s order (`governance` only when the
-   tier and lifecycle checks pass), `eligible` is `blockedBy` empty, `approvedAt` / `via` are those of a live (not
-   revoked) approval, and `revocable` is true for an active entry whose wisdom an approval put there. Where the row
+   tier and lifecycle checks pass), `eligible` is `blockedBy` empty, `approvedAt` / `via` are those of a live approval
+   (not revoked, the entry still in `wisdom`), and `revocable` is true for an active entry whose wisdom an approval put
+   there. Where the row
    explains promotion, `promotion.wisdomBy` says why a wisdom entry is wisdom when the store can tell:
    `operator-approved` (a live approval), `curated` (operator authority — only a curated write sets it) or `null` (an
    entry earned in `maintain` and one promoted by a caller with `--curated` leave no per-entry record that tells them

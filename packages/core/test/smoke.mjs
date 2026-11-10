@@ -4710,6 +4710,17 @@ try {
       && o77.recall(E77.R).provenance.approval?.by === 'operator-approval' && o77.recall(nR80.entry.id).tier === 'memory' && !o77.recall(nR80.entry.id).provenance.approval
       && hR80.id === nR80.entry.id && hR80.approval.eligible === true && hR80.approval.approvedAt === null && hR80.history === 2,
       "a re-ingest (a new version) supersedes the approved entry exactly as the earned twin's: archived, record kept as history; the new head enters memory unapproved and eligible");
+    // The older `promote <id> memory` (an agent verb, never the capture system's) can move any wisdom entry down: an
+    // approval it bypassed is no longer live (approvedAt null, not revocable), and the next approval keeps it as history.
+    E77.Q = (await ing77(o77, L77, 'doc-q', 'The brackwater77 lock keeper logs every barge through the canal. Barges queue at the upper gate.')).entry.id;
+    const aQ80 = await o77.approveWisdom(E77.Q, { via: 'knowledge-capture' });
+    const dQ80 = await o77.promote(E77.Q, 'memory');
+    const vQ80 = view77(o77, E77.Q);
+    const rQ80 = await o77.revokeWisdom(E77.Q), a2Q80 = await o77.approveWisdom(E77.Q);
+    const hQ80 = o77.recall(E77.Q).provenance.approvalHistory;
+    ok(aQ80.success && dQ80.success !== false && vQ80.tier === 'memory' && vQ80.approval.approvedAt === null && vQ80.approval.revocable === false && vQ80.approval.eligible === true
+      && rQ80.denied === 'not-wisdom' && a2Q80.success && hQ80?.length === 1 && hQ80[0].at === aQ80.approval.at && !hQ80[0].revokedAt,
+      'promote <id> memory (the existing agent verb) moving an approved entry down leaves no live approval: approvedAt null, not revocable, eligible; the next approval keeps the bypassed record as history');
     {
       const { startFakeOpenAI } = await import('./helpers/fake-openai.mjs');
       const fake80 = await startFakeOpenAI({ dim: 16 });

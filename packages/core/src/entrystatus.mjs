@@ -72,10 +72,12 @@ export function approvalTiers(o) {
   return i > 0 ? { from: names[i - 1], to: names[i] } : null;
 }
 
-/** The live approval record of an entry: `provenance.approval` written by an operator approval and not revoked. */
+/** The live approval record of an entry: `provenance.approval` written by an operator approval, not revoked, and the
+ *  entry still in the tier it approved (an older verb, `promote <id> memory`, can move any wisdom entry down; the
+ *  record then describes history, not the entry's standing). */
 export function liveApproval(e) {
   const a = e?.provenance?.approval;
-  return a && typeof a === 'object' && a.by === 'operator-approval' && !a.revokedAt ? a : null;
+  return a && typeof a === 'object' && a.by === 'operator-approval' && !a.revokedAt && a.to === e.tier ? a : null;
 }
 
 /** An active row: status active AND its lease not run out (an expired lease is dead before the sweep runs). */
