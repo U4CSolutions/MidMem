@@ -330,12 +330,16 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
      the `transition:promote` receipt plus `by`; a governance audit row for op `approve-wisdom` with
      `{ fromTier, toTier, operatorApproved: true, curated: false, memFunction }`. Denials are logged
      (`approve-wisdom-denied`); a `changed: false` answer writes nothing.
-   - **An approval ends when another road moves the entry.** Any tier move that is not `approve-wisdom` /
-     `revoke-wisdom` — `maintain`'s earned promotion, an agent's `promote --curated`, `promote <id> memory` moving it
-     down — stamps the record `{ endedAt, endedBy: "promote", endedTier }` in the same write. An ended record is never
-     live again: the entry is not revocable, `approvedAt` is null, `wisdomBy` does not say `operator-approved`, and the
-     OPERATIONS listing leaves it out. A later `approve-wisdom` writes a fresh record (the old one moves to
-     `provenance.approvalHistory`).
+   - **An approval ends when another road moves the entry to another tier.** Exactly: a `promote` that changes the
+     entry's tier — `promote <id> memory` (or `fact`) moving it down, and thereafter any promotion back up, `maintain`'s
+     earned one included — stamps an unended record `{ endedAt, endedBy: "promote", endedTier }` in the same write. A
+     promote that leaves the entry in its tier changes nothing on it and ends nothing: a same-tier `promote <id> wisdom
+     --curated` on an approved entry records no curation (authority stays `web`, no curated mark exists), so the entry
+     stays operator-approved and revocable. `maintain` promotes a candidate only if it is still active in the tier it
+     was found in — checked again inside its write — so an approval landing while `maintain` runs is never stamped,
+     and that candidate is not counted as promoted. An ended record is never live again: the entry is not revocable,
+     `approvedAt` is null, `wisdomBy` does not say `operator-approved`, and the OPERATIONS listing leaves it out. A
+     later `approve-wisdom` writes a fresh record (the old one moves to `provenance.approvalHistory`).
    - **Revoke** takes back only a live approval. Checks in order: `not-found`, `not-active`, then — if the latest
      approval was revoked by `revoke-wisdom`, the entry is back in `memory` and nothing ended the record since —
      `{ success: true, changed: false, … }`; `not-wisdom`; `not-operator-approved` (earned and curated wisdom, also when
@@ -384,9 +388,9 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    node the neighbour's capture created. Success: `{ success: true, changed: true, id, status: "active", neighbor: {
    id, status: "superseded" }, stalePath }`. Refused (`{ success: false, denied, id, message }`, exit 0; nothing written
    but the log row and the receipts) in this order: `not-found`; `not-deferred` (it also carries `status` and
-   `resolution`, see Retries); `claim-source-gone` (the claim's source entry is no longer active — a superseded capture
-   version, an archived or forgotten entry: such a claim would be swept as `source-gone` and take the live neighbour
-   with it); `claim-stance` (the claim is no observed fact — `provisional`, `quoted` or `rejected`, as
+   `resolution`, see Retries); `claim-source-gone` (the claim's source entry is no longer live — a superseded capture
+   version, an archived or forgotten entry, or one whose lease has run out though `maintain` has not swept it yet: such
+   a claim would be swept as `source-gone` and take the live neighbour with it); `claim-stance` (the claim is no observed fact — `provisional`, `quoted` or `rejected`, as
    `claims-restance` can re-tag a deferred claim — and would drop an observed fact from current reads);
    `no-neighbor` (the claim records no write-time neighbour — an explicit deferral, say); `neighbor-not-live` (the
    neighbour is not active or verified, e.g. another claim already replaced it); `neighbor-authority` (the neighbour's
@@ -405,7 +409,9 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    `approve-wisdom`, `revoke-wisdom` and `--replace-neighbor` take the store's write lock before they re-check
    (`BEGIN IMMEDIATE`), and every write waits up to `busy_timeout` (5 s) for the lock, so the message appears only when
    another writer holds it longer than that; any verb, reads included, can then exit 1 that way (a store locked at open
-   answers `ERROR: database is locked` too). Usage errors (exit 1, `ERROR:` and the reason) are final.
+   answers `ERROR: database is locked` too; opening waits out `busy_timeout` as well). Whatever its cause, `database is
+   locked` is always a retryable unknown outcome: re-read, then retry. Usage errors (exit 1, `ERROR:` and the reason)
+   are final.
 
    None of these exceptions changes an entry's authority (`web`) or scope. Only (e) changes a tier (`memory` ↔
    `wisdom`) and, through the project lift, the project (put back on revoke).
@@ -439,10 +445,15 @@ system keeps the evidence (the raw artifact and the canonical text) permanently,
    (limit ≤ 200, default 50) → `{ total, staleOmitted, claims: [{ id, content, status, stance, deferredAt, deferReason,
    libraryId, docId, sourceTitle, entryId, authority, relation: { relation, shared, similarity, containment? } | null,
    neighbor: { id, content, status, stance, libraryId, docId, sourceTitle, entryId, authority } | null }] }` — the
-   deferred claims whose source belongs to that library AND whose source entry is still active, oldest first; `total`
-   counts those (before paging). A deferred claim of a superseded capture version (or of an archived or forgotten entry)
-   is left out and counted in `staleOmitted`: it is not the operator's to judge (`--replace-neighbor` refuses it,
-   `claim-source-gone`), and `claims-sweep` archives it as `source-gone` — its orphan rule covers deferred claims.
+   deferred claims whose source belongs to that library AND whose source entry is still live, oldest first; `total`
+   counts those (before paging). **Two rules, one each:** the queue and `--replace-neighbor` count a source as gone
+   when no entry stands for it that is active with a lease not run out (`expires_at` null or later than now — what
+   `isLiveEntry` and the reads use); `claims-sweep` counts it gone only when no entry is active (status only), so it
+   never archives the claims of an entry whose lease ran out before `maintain` swept it. A deferred claim of a
+   superseded capture version, an archived or forgotten entry, or an expired one is left out and counted in
+   `staleOmitted`: it is not the operator's to judge (`--replace-neighbor` refuses it, `claim-source-gone`); once the
+   entry is no longer active (`maintain` sweeps an expired lease), `claims-sweep` archives it as `source-gone` — its
+   orphan rule covers deferred claims.
    **Offset paging shifts when a claim is resolved** (a resolved claim leaves the list): after each resolution re-read
    from offset 0. Any flag but `--library` / `--limit` / `--offset`, or one given twice, is a usage error. A claim's
    `libraryId` / `docId` are the ones its source was ingested with (`--library` / `--doc-id`, the ids `entries

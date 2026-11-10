@@ -137,9 +137,10 @@ recall slot and no operator authority: those come only from curation.
 
 **Receipts.** Each approval leaves:
 - `provenance.approval = { by: "operator-approval", from, to, at, via, note, liftedFrom }` on the entry (kept for
-  good: a revoke adds `revokedAt` / `revokeNote` / `revokeVia`; a tier move by any other road — maintain's earned
-  promotion, `promote --curated`, `promote <id> memory` — ends it with `{ endedAt, endedBy: "promote", endedTier }`; a
-  later approval moves the old record to `provenance.approvalHistory`; archive, forget and a superseding re-ingest
+  good: a revoke adds `revokedAt` / `revokeNote` / `revokeVia`; a `promote` that moves the entry to another tier —
+  `promote <id> memory`, and any promotion back up after it, maintain's included — ends it with `{ endedAt, endedBy:
+  "promote", endedTier }`, while a promote that leaves it in its tier (a same-tier `promote <id> wisdom --curated`)
+  ends nothing ([INTEGRATION-MODES.md §6](INTEGRATION-MODES.md) 6(e) has the exact rule); a later approval moves the old record to `provenance.approvalHistory`; archive, forget and a superseding re-ingest
   leave it on the old row as history). Like the rest of provenance it is projected onto the entry's wiki page and
   kept in the revision export — which is why a note carrying a secret-shaped value is refused;
 - a `promote` log row — the earned path's `{ id, toTier }` plus `{ by: "operator-approval", at, via, note }` — and
@@ -173,10 +174,14 @@ they are not this verb's to take back (forget or archive them as before). A revo
 is promoted again by the next `maintain` — as earned wisdom, which no revoke undoes.
 
 **Claims review** (same date): `midmem claims-deferred --library <id>` lists one capture system's deferred claims
-with their doc ids, entries and the neighbour each contradicts — only claims whose source entry is still active;
-`staleOmitted` counts the deferred claims of superseded capture versions (or archived / forgotten entries) it leaves
-out. Those stay in the whole ledger (`claims-deferred` without flags, `lint`'s `deferredClaims`) until `claims-sweep`
-archives them as `source-gone` (its orphan rule covers deferred claims). `midmem claim-resolve <claimId>
+with their doc ids, entries and the neighbour each contradicts. **Which source counts as gone — two rules:** the
+queue and `--replace-neighbor` treat a source as gone when no entry stands for it that is active AND whose lease has
+not run out (`expires_at` null or later than now); `claims-sweep` treats it as gone only when no entry is active
+(status only), so it never archives the claims of an entry whose lease ran out before `maintain` swept it.
+`staleOmitted` counts the deferred claims the queue leaves out (superseded capture versions, archived, forgotten or
+expired entries). They stay in the whole ledger (`claims-deferred` without flags, `lint`'s `deferredClaims`) until
+`claims-sweep` archives them as `source-gone` — an expired entry's only after `maintain` has swept it (its orphan rule
+covers deferred claims). `midmem claim-resolve <claimId>
 --replace-neighbor` accepts a claim and supersedes that neighbour in one transaction (refused for a neighbour of
 higher authority, a claim whose source is gone, a claim that is no observed fact); it flags for review only the
 concept labels the contested claim names (rule (ii) of the supersede rule), so `lint`'s `stalePaths` grows by those
@@ -512,8 +517,42 @@ they were until `midmem claims-restance --dryRun`, then without `--dryRun`, re-j
 - **Rollback:** stop the capture system's approve / revoke / replace sends first. The older release keeps every
   approved entry in `wisdom` (the tier is all it reads) with its record in provenance, but cannot revoke it and shows
   no `approval` key; a `--replace-neighbor` resolution reads as an ordinary supersede chain. After the re-upgrade the
-  records are live again as they were — the older release's `promote` does not end a record, so check
-  `approval.revocable` entries that an agent moved during the rollback window (the listing query above).
+  records are live again as they were. **But the older code moves tiers without ending approval records:** an
+  approved entry that an agent demoted (`promote <id> memory`) during the rollback window and that the old `maintain`
+  then earned back into wisdom looks operator-approved again after the re-upgrade (`revocable: true`), and
+  `revoke-wisdom` would move that earned wisdom down. Once, right after the re-upgrade, as the store user, list the
+  affected records — a live-looking record on an entry that a `promote` the approval did not write (no `by`) moved to
+  another tier after the approval — then end them. Nothing runs this by itself.
+  ```sql
+  -- 1. Dry run: the records the repair will end.
+  SELECT e.id, e.tier, json_extract(e.provenance, '$.approval.at') AS approvedAt
+    FROM entries e
+   WHERE json_extract(e.provenance, '$.approval.by') = 'operator-approval'
+     AND json_extract(e.provenance, '$.approval.revokedAt') IS NULL
+     AND json_extract(e.provenance, '$.approval.endedAt') IS NULL
+     AND EXISTS (SELECT 1 FROM log l
+                  WHERE l.operation = 'promote'
+                    AND json_extract(l.detail, '$.id') = e.id
+                    AND json_extract(l.detail, '$.by') IS NULL
+                    AND json_extract(l.detail, '$.toTier') <> json_extract(e.provenance, '$.approval.to')
+                    AND l.ts > json_extract(e.provenance, '$.approval.at'));
+  -- 2. End them (same condition).
+  UPDATE entries
+     SET provenance = json_set(provenance, '$.approval.endedAt', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                               '$.approval.endedBy', 'rollback-repair', '$.approval.endedTier', tier)
+   WHERE json_extract(provenance, '$.approval.by') = 'operator-approval'
+     AND json_extract(provenance, '$.approval.revokedAt') IS NULL
+     AND json_extract(provenance, '$.approval.endedAt') IS NULL
+     AND EXISTS (SELECT 1 FROM log l
+                  WHERE l.operation = 'promote'
+                    AND json_extract(l.detail, '$.id') = entries.id
+                    AND json_extract(l.detail, '$.by') IS NULL
+                    AND json_extract(l.detail, '$.toTier') <> json_extract(entries.provenance, '$.approval.to')
+                    AND l.ts > json_extract(entries.provenance, '$.approval.at'));
+  ```
+  It keys on the log's `promote` rows, which `maintain --force` prunes after `MIDMEM_RETENTION_DAYS` (90): run it
+  before a rollback window that long has aged out. A same-tier promote during the window ends nothing, as on the new
+  code; an approval made through the new code writes its `promote` row with `by`, so it never matches.
 - Long-lived MCP servers show the `entry_status` keys after they reconnect; there is no new MCP tool.
 
 ## When things look wrong
