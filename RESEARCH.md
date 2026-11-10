@@ -1,4 +1,4 @@
-<!-- research-tracker: evaluated-through=2026-10-12T11:19:56.316Z -->
+<!-- research-tracker: evaluated-through=2026-11-09T13:20:06.510Z -->
 # RESEARCH — midmem-kb-store
 
 Research and architecture decisions behind **midmem-kb-store**, grounded in published work we
@@ -25,6 +25,119 @@ what the marker at the top has not yet evaluated.
 > (1–15, shipped) and [`docs/ROADMAP-2026-09.md`](docs/ROADMAP-2026-09.md) (16–42).
 
 ---
+
+## 2026-11-09 — Weeks of 2026-10-12 → 10-18, 10-19 → 10-25 and 11-02 → 11-08: write for retrieval, keep the raw evidence as the baseline, pin the version, and measure whether memory changed the decision
+
+Three weekly reports evaluated together (ingested 2026-10-19, 10-26 and 11-09 with `--sections`; parent
+grounding 0.816 / 0.838 / 0.754, every section its own entry; the 10-26 ingest fell back twice under
+model timeouts and was repaired by `reextract`). Twenty-two papers cited; every arXiv id was fetched
+from the arXiv API and the digests' titles, dates and figures were read against the abstracts. The
+11-09 edition is a verification-first synthesis: its own search found no paper first submitted
+2026-11-02 → 11-08, and the API confirms Memorix [2611.00060](https://arxiv.org/abs/2611.00060) carries an
+October 13 record date despite its identifier. Carry-overs keep their verdicts: LLM-Wiki
+[2605.25480](https://arxiv.org/abs/2605.25480), Agent Zero Memory
+[2608.29606](https://arxiv.org/abs/2608.29606) (VALIDATION, 2026-10-05), Filesystem-Based Memory
+[2607.26637](https://arxiv.org/abs/2607.26637) (already in the backlog table). Verdicts across the
+three weeks: 1 ADOPT NOW · 9 VALIDATION · 6 BACKLOG · 6 NOT ADOPTING.
+
+### ADOPT NOW — a raw-retrieval baseline the bench must beat
+- **Paper (2026-10-26 report):** Zhengye Bao, Shengtao Zhang, Haokai Zhang et al., *Is Complex Agentic
+  Memory Always Needed? Naive RAG Is Stronger Than We Thought* — arXiv
+  [2610.30755](https://arxiv.org/abs/2610.30755) (submitted 2026-10-22).
+- **Finding:** Raw-RAG — dense retrieval and reranking over the raw, unmodified history — ranks first
+  among the compared memory systems in six of seven benchmark–model settings across LoCoMo,
+  LongMemEval, MEME and MemoryAgentBench, beating the strongest agentic system by 0.13–5.53 points.
+  Its higher coverage of necessary evidence (answer values *and* the relations and dependency paths
+  needed to derive them) offsets lower utilisation; even complete access to a transformed store leaves
+  an accuracy gap relative to raw evidence.
+- **Decision:** MidMem's bench (#35) compares treatment against a **no-memory** baseline. That cannot
+  show whether the store's transformations (summaries, claims, concept routing, sufficiency gating)
+  earn their keep over simply retrieving the raw fixture text. Adopted as roadmap **#59**: a protected
+  `raw-rag` baseline slice — hybrid lexical + vector retrieval over the bench's raw fixture documents
+  at the same token budget — reported beside treatment on every metric, with the PROMOTE verdict
+  requiring treatment ≥ raw-RAG on the protected slices. Not adopted: replacing the store with raw
+  retrieval — the library lane (#49) already holds the raw text where it exists; the measure is the point.
+- **Validation:** the slice's own row in `test/bench.mjs` and the verdict rule; the first run records
+  the measured lift (or its absence) in the changelog.
+
+### VALIDATION — confirmed by these weeks, no change
+- **MemCode** (10-19) — Xin Li, Liang Hu, Duoqian Miao et al., *MemCode: Discrete Semantic
+  Representations for Long-Term Agent Memory* — arXiv [2610.19472](https://arxiv.org/abs/2610.19472).
+  Retrieval-oriented writing: self-contained atomic memory units, a discrete associative path beside
+  vector search, online atomic writes separated from offline consolidation; best overall accuracy on
+  LongMemEval-S and LoCoMo with construction 3–21× faster than LightMem. Validates writing for
+  retrieval — grounded claims and per-section entries (`--sections`) as the atomic units, the concept
+  graph and community routing (P4, #12) as the deterministic associative path, and the forced-maintain
+  batches as offline consolidation. Not adopted: a learned codebook (a derived index that a model
+  migration can orphan).
+- **AiO-Mem** (10-19) — Bingbing Wang et al., *All-in-One Memory: Process-Rewarded Reinforcement
+  Learning for Memory Agents* — arXiv [2610.21147](https://arxiv.org/abs/2610.21147). Search, write and
+  stop as transitions over one source-traceable evidence state, evaluated as whole trajectories.
+  Validates the bench's cross-task slices (#35) — every protected metric depends on an earlier task's
+  writes — and the op log as the trajectory record. The learned policy stays NOT ADOPTING.
+- **FedSkillGit** (10-19) — Boxun Lan et al., *FedSkillGit: Federated Skill Evolution via Version
+  Control* — arXiv [2610.21348](https://arxiv.org/abs/2610.21348). Skills evolve as bounded rule-level
+  patches with experience summaries, sanitised and validated before a version is published; up to
+  22 % over the compared baselines. Validates the #27 amendment of 2026-10-05 (procedures verified,
+  then superseded by version, never rewritten in place) and the pack version ledger (#47).
+- **Seeing, Maintaining, and Learning** (10-19) — Minghao Guo et al., arXiv
+  [2610.19366](https://arxiv.org/abs/2610.19366), a survey: representation and management policy are
+  orthogonal axes (static / dynamic content under a stable policy / self-evolving policy). Validates
+  keeping policy in `MIDMEM_*` knobs and pack versions, apart from content; MidMem is a T2 system by
+  design (dynamic content, operator-governed policy).
+- **Anti-Persistence** (10-26) — Ruhan Wang, Kishan Panaganti, Dongruo Zhou, *More Memory, Worse
+  Agents: Error Reproduction and Anti-Persistence in LLM Agents* — arXiv
+  [2610.27406](https://arxiv.org/abs/2610.27406). Stored abstractions reproduce their own errors through
+  an abstraction → execution → re-abstraction loop; keeping trajectories and outcomes while regenerating
+  task-specific guidance and discarding it after use gives the best held-out success at the lowest
+  LLM-call cost. Validates #44 (`working` never promotes), the verify-then-freeze rule on #27, and the
+  stance tag on claims (#33); its "derivation chains must not count as independent confirmations"
+  amends **#34** (backlog table).
+- **PerMIT** (10-26) — Tanqiu Jiang et al., arXiv [2610.28987](https://arxiv.org/abs/2610.28987).
+  Environment-derived memory reaches a sensitive action only through a confirmation gate; two
+  integrity theorems machine-checked in Lean 4; zero observed attack success on Trojan Hippo.
+  Validates the separation MidMem already draws: retrieved text is evidence, never instruction (#40),
+  authority is assigned at origin and never raised (#10), and MidMem records decisions without granting
+  anything. Not adopted: a proof-checked gate — the consumer's allowlist is the gate here.
+- **When LLMs Forget What They Believe** (10-26) — Yancheng Zhu, Yifan Yuan, arXiv
+  [2610.31314](https://arxiv.org/abs/2610.31314). 88.6 % of long-dialogue failures are behavioural
+  drift, not forgetting; Structured State Anchoring recovers up to 24.4 points. Validates measuring
+  stored-vs-used (#43) rather than recall alone; compliance itself is the harness's job, not the store's.
+- **Memory-Aware Reward Modeling** (10-26) — Yijiang River Dong et al., arXiv
+  [2610.31272](https://arxiv.org/abs/2610.31272). ~1,000 judgments from 87 participants: memory-conditioned
+  answers are not consistently preferred; automated judges over-favour memory use; a memory-aware
+  reward model reaches 72.8 %. Validates the use-memory decision MidMem already makes — proactive recall
+  injects only above a relevance threshold and the sufficiency gate (#19) abstains — and the rule that
+  usage, not availability, earns promotion.
+- **BetaMem** (10-26) — Mai Liu et al., arXiv [2610.26554](https://arxiv.org/abs/2610.26554). A
+  dual-level write contract (valid operation + source support) lifts the pass rate from 50.9 % to
+  86.2 %. Validates grounding-before-persist, the claim-shape and unit-drift checks (#56, #57) and
+  canonical source identity as MidMem's write contract.
+- **Beyond Memory** (11-09) — Priscila Saboia Moreira, Christopher R. Sweet, arXiv
+  [2607.24759](https://arxiv.org/abs/2607.24759) (record date 2026-05-29). A templated llm-wiki memory for
+  collaborative research that keeps dead ends and walked-back claims. Validates negative knowledge as
+  first-class (`dead_end` work events, Failed Attempts in the record skill, claims superseded with
+  history) — the same ground as Continual Graph Memory (2026-10-12).
+- **Filesystem-Based Memory for LLM Agents** (11-09) — Sizhe Zhou, Sheldon Yu, Hui Wei, arXiv
+  [2607.26637](https://arxiv.org/abs/2607.26637). Organised stores roughly halve retrieval cost at scale,
+  organisation erodes over time, and tidiness did not by itself improve answers. Validates projection QA
+  (the wiki is a measured view, never the store) and the deterministic, rebuildable projection.
+- **Memory for Autonomous LLM Agents** (11-09) — Pengfei Du, arXiv
+  [2603.07670](https://arxiv.org/abs/2603.07670), a survey: write–manage–read with a taxonomy over
+  temporal scope, representation and control policy. Validates the function axis and lifecycle roles
+  over one source (one entry, several derived forms, never several facts).
+
+### BACKLOG and NOT ADOPTING from these weeks → the tables at the end
+EGCForest [2610.19836](https://arxiv.org/abs/2610.19836) (actor · artifact · channel views; **#58**),
+MemDuet [2610.19928](https://arxiv.org/abs/2610.19928) (cheap-first selection, strong-model
+verification; amends **#33**), Memorix [2611.00060](https://arxiv.org/abs/2611.00060) (version-pinned
+project view; **#60**), MemPABench [2610.30485](https://arxiv.org/abs/2610.30485) (interaction
+preferences with scope and validity; amends **#52**), ColaBench [2610.30989](https://arxiv.org/abs/2610.30989)
+(memory-guided external retrieval; amends **#49**), Anti-Persistence's derivation chains (amends
+**#34**). Not adopting: Memorilla [2610.21375](https://arxiv.org/abs/2610.21375) (latent memory tokens),
+MemCode's learned codebook, AiO-Mem's learned policy, PerMIT's proof-checked gate, StateTrack's
+compliance layer as a store feature, ActMem [2603.00026](https://arxiv.org/abs/2603.00026)
+(counterfactual reasoning inside retrieval).
 
 ## 2026-10-12 — Week of 2026-10-05 to 10-11: scope the commit, version the state, admit by policy, measure whether persistence changed anything
 
@@ -811,6 +924,12 @@ Evidence: numbers (benchmark / controlled result) or prose (the source gives no 
 
 | Paper | Finding that matters | Candidate | Roadmap # | Effort | Evidence | Blocker / note |
 |---|---|---|---|---|---|---|
+| EGCForest [2610.19836](https://arxiv.org/abs/2610.19836) | enterprise chat evidence spans threads, channels and time with authority conditioned on the speaker; Channel / Actor / Artifact forests over one immutable log recover it (up to 20.85 points over MemOS) | deterministic multi-view projections of the one store — by actor (session key / author), by artifact (source path, library doc), by timeline — as wiki views and `query` filters; speaker identity is never authorization | **#58** | M | numbers | depends on #48's filters |
+| MemDuet [2610.19928](https://arxiv.org/abs/2610.19928) | a small model selects evidence fast, a large model verifies and updates in order: 9.74× mean speedup, 73.91 % fewer output tokens vs RL-MemAgent | #33's second half routes only VERIFY-class candidates (contradictions, authority-adjacent, durable preferences) to the stronger model; everything else stays on the small local extractor | **#33** (amended) | M | numbers | none |
+| Memorix [2611.00060](https://arxiv.org/abs/2611.00060) (record date 2026-10-13) | what an agent should read is mostly determined by its project: compute the selection once, pin it to source versions, reuse and refresh it (up to 1.5× resolved rate, 100× lower amortized cost, 38× lower build time) | a **project memory view manifest**: the sources and entries selected for a `project` (#18), pinned to source hashes and the entries' versions, materialised once, refreshed on source change, auditable; the hook and `handoff_brief` read the view first, dynamic retrieval second | **#60** | M | numbers | depends on #18 |
+| MemPABench [2610.30485](https://arxiv.org/abs/2610.30485) | memory of *how* to assist (clarify / confirm / act) across 99 sessions and four months with five changes per user; retrieval memory did not beat No Memory; file memory misapplied preferences out of context | #52's `relational` function carries interaction preferences with scope, validity window and exceptions; the bench slice tests the chosen action, not the retrieved sentence | **#52** (amended) | M | numbers | none |
+| ColaBench [2610.30989](https://arxiv.org/abs/2610.30989) | history decides which external documents to consult; MemKB 86.25 % with 4.07 rounds per task over 13,033 documents | the library lane (#49) takes the retrieval plan from the project view / recent episodes: which library documents to ask for, not just whether to ask | **#49** (amended) | S | numbers | none |
+| Anti-Persistence [2610.27406](https://arxiv.org/abs/2610.27406) (derivation half) | an abstraction that shaped a trajectory then counts the trajectory as confirmation | #34's lineage independence treats a claim derived from an entry's own earlier claims as one lineage, never as corroboration | **#34** (amended) | S | numbers | none |
 | QGMem [2610.11920](https://arxiv.org/abs/2610.11920) | event-indexed atomic memories; a dense graph is built only around the units retrieval and reranking selected for THIS query, exposing dependencies and contradictions at answer time; gains on six benchmarks at compact context | #25's expansion assembles a query-local graph (anchors + ≤ 2 hops over typed edges) behind the sufficiency gate, cached by index version and invalidated on a state change; never a global graph in every prompt | **#25** (amended) | M | numbers (prose for us) | none |
 | T-Mem [2610.12874](https://arxiv.org/abs/2610.12874) | multi-party decisions: evidence clusters in short time spans; transitions must be reconstructed, not just time-stamped; consistent gains on two multi-party benchmarks | decision claims retrieve their temporal neighbourhood (`supersedes`, `corrected_by`, validity windows) and the projection renders **Current Decision / Decision History / Evidence Timeline** views | **#24** (amended) | M | prose | none |
 | Hippocam [2610.12124](https://arxiv.org/abs/2610.12124) | nested intents: active context centred on the current intent; completed intents consolidate into outcomes and state, older prefixes abstract recursively, originals stay reachable; mechanism only, no headline figure | #53's episode boundary is an intent boundary: a closed task label consolidates its working entries into outcome / state / open obligations with drill-down links to the originals (#43 keeps them readable) | **#53** (amended) | M | prose | depends on #18 |
@@ -895,3 +1014,16 @@ Evidence: numbers (benchmark / controlled result) or prose (the source gives no 
 - **Trajectory replay and world-model rulebooks** — DeltaReplay [2610.11707](https://arxiv.org/abs/2610.11707),
   Memento 3 [2610.11794](https://arxiv.org/abs/2610.11794): the acting agent's concern; MidMem records
   procedures and outcomes (#27, #22) and does not execute or predict.
+- **Latent memory tokens** — Memorilla [2610.21375](https://arxiv.org/abs/2610.21375) (16 query-conditioned
+  tokens in a frozen model's embedding space): the REMORY ruling of 2026-10-12 stands — a model-coupled
+  cache is not provenance, not deletable, not portable.
+- **A learned codebook as the associative index** — MemCode [2610.19472](https://arxiv.org/abs/2610.19472):
+  the deterministic concept graph is MidMem's associative path; a learned index a model migration can orphan
+  is not.
+- **A proof-checked confirmation gate inside memory** — PerMIT [2610.28987](https://arxiv.org/abs/2610.28987):
+  authorization lives in governance code and the consumer's allowlist (the 2026-09-09 ruling); MidMem records
+  and never grants.
+- **Compliance enforcement as a store feature** — StateTrack-Bench [2610.31314](https://arxiv.org/abs/2610.31314):
+  whether an agent obeys a recalled constraint is the harness's test; MidMem measures stored vs used (#43).
+- **Counterfactual reasoning inside retrieval** — ActMem [2603.00026](https://arxiv.org/abs/2603.00026): a model
+  in the retrieval path; retrieval stays deterministic, reasoning belongs to the consumer.
