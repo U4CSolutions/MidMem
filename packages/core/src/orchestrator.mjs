@@ -626,7 +626,7 @@ export class Orchestrator {
         if (this.cfg.transitions?.enabled !== false && !verifyPromotion(this.recall(c.id), this.cfg.transitions).pass) continue;
         // Governance still gates each promotion — a veto stands, the rest proceed.
         try {
-          const pr = await this.promote(c.id, c.to, { curated: c.curated });
+          const pr = await this.promote(c.id, c.to, { curated: c.curated, fromTier: c.from }); // a candidate that moved meanwhile is a no-op
           if (pr?.success !== false) promoted.push(c);
         } catch { /* vetoed */ }
       }
@@ -1562,10 +1562,15 @@ export class Orchestrator {
     });
   }
 
-  async promote(id, toTier, { curated = false } = {}) {
+  async promote(id, toTier, { curated = false, fromTier = null } = {}) {
     // Lifecycle class (#44): the entry's function is part of the governed context so the
     // working-never-promotes policy can see it on the manual path.
     const memFunction = this.recall(id)?.mem_function || null;
+    // `fromTier` — maintain's earned promotion only (2026-11-10): the candidate was computed before this call; if it is
+    // no longer active in that tier (an operator approval or another write landed meanwhile) nothing is done or
+    // logged, and maintain does not count it. memory.promote re-checks the same inside its UPDATE.
+    const stale = () => { const cur = this.recall(id); return !cur || cur.tier !== fromTier || cur.status !== 'active'; };
+    if (fromTier && stale()) return { success: false, moved: true, message: `no longer active in tier '${fromTier}': ${id}` };
     return governed(this.gov, 'promote', { toTier, curated, memFunction }, () => {
       // Transition check (TRUSTMEM): drifted-at-write content must not climb tiers.
       if (this.cfg.transitions?.enabled !== false) {
@@ -1577,7 +1582,9 @@ export class Orchestrator {
           return { success: false, denied: 'transition-verifier', ...verdict };
         }
       }
-      const r = this.memory.promote(id, toTier); this.db.logOp('promote', { id, toTier }); this.#markVaultDirty(); return r;
+      const r = this.memory.promote(id, toTier, fromTier ? { fromTier } : {});
+      if (r.moved) return r;
+      this.db.logOp('promote', { id, toTier }); this.#markVaultDirty(); return r;
     });
   }
 
@@ -1868,6 +1875,9 @@ export class Orchestrator {
 
   /** TARL: resolve a deferred claim — accept (→ active) or reject (→ archived). */
   async resolveDeferredClaim(id, action) {
+    // A repeat of the recorded accept / reject (2026-11-10) is answered before governance: no audit row, no log row.
+    const again = this.claims.resolutionRepeat(id, action);
+    if (again) return again;
     return governed(this.gov, 'claim-resolve', { id, action }, () => {
       const r = this.claims.resolveDeferred(id, action);
       this.db.logOp('claim-resolve', { id, action, success: r.success, ...(r.changed === false ? { changed: false } : {}) });

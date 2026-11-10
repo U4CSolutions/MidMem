@@ -19,7 +19,9 @@ export class StateDB {
     this.path = dbPath;
     if (dbPath !== ':memory:') fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+    // busy_timeout FIRST (2026-11-10): `journal_mode = WAL` already needs the file lock, so on a store nobody holds
+    // open (no -wal / -shm) a concurrent open or a held lock failed at once with "database is locked" instead of waiting.
+    this.db.exec('PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
     this.#migrate();
   }
 

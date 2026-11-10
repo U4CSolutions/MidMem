@@ -5022,13 +5022,18 @@ try {
         'F2: any other claim that is not deferred is a final refusal naming denied not-deferred, its status and the recorded resolution (accept after a reject; replace after an accept)');
 
       // F3 — BEGIN IMMEDIATE: concurrent approvals of one entry both answer exit 0 (one changed:true, one changed:false).
+      // On a WARM store: one idle connection holds it open (-wal / -shm present), so no child opens a closed store (V1).
+      const { DatabaseSync: DatabaseSync83 } = await import('node:sqlite');
+      const idle83 = new DatabaseSync83(db83); idle83.prepare('SELECT COUNT(*) c FROM entries').get();
+      const warm83 = fs.existsSync(`${db83}-wal`) && fs.existsSync(`${db83}-shm`);
       const cc83 = [];
       for (let i = 0; i < 3; i++) {
         const id = (await kc83(`d-c${i}`, `The concur${'abc'[i]}83 tower rings its bell at noon for the market. Traders open their stalls when it rings.`, modelEnv83)).out.entry.id;
         const [x, y] = await Promise.all([cliAsync83({}, 'approve-wisdom', id, '--via', 'knowledge-capture'), cliAsync83({}, 'approve-wisdom', id, '--via', 'knowledge-capture')]);
         cc83.push({ codes: [x.code, y.code], changed: [x.out?.changed, y.out?.changed].sort(), promotes: o83.db.prepare("SELECT COUNT(*) c FROM log WHERE operation='promote' AND json_extract(detail,'$.id')=?").get(id).c, err: (x.err + y.err).slice(0, 80) });
       }
-      ok(cc83.every((c) => c.codes[0] === 0 && c.codes[1] === 0 && JSON.stringify(c.changed) === '[false,true]' && c.promotes === 1),
+      idle83.close();
+      ok(warm83 && cc83.every((c) => c.codes[0] === 0 && c.codes[1] === 0 && JSON.stringify(c.changed) === '[false,true]' && c.promotes === 1),
         `F3: two concurrent approve-wisdom children on one entry, 3 rounds: both exit 0, one changed:true and one changed:false, one promote row — never "database is locked" (${JSON.stringify(cc83)})`);
       const holder83 = (ms) => new Promise((resolve) => {
         const h = spawn(process.execPath, ['-e', `const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(${JSON.stringify(db83)});d.exec('PRAGMA busy_timeout=5000; BEGIN IMMEDIATE');d.prepare("INSERT INTO log(ts,operation,detail) VALUES('x','holder83','{}')").run();console.log('locked');setTimeout(()=>{d.exec('COMMIT');d.close();},${ms});`], { stdio: ['ignore', 'pipe', 'ignore'] });
@@ -5045,23 +5050,27 @@ try {
       ok(shortL.code === 0 && shortL.out?.changed === true && longL.code === 1 && /^ERROR: database is locked/m.test(longL.err) && !/\n\s+at /.test(longL.err) && o83.recall(idL).tier === 'wisdom',
         'F3: a write lock held 1.5 s (under busy_timeout) → the approval waits and lands; held 8 s → exit 1, "ERROR: database is locked" (no stack trace), nothing changed — the transient answer a caller re-reads and retries');
 
-      // F4 — an approval ends when another road moves the entry: promote --curated, or a demote and the earned rule.
+      // F4 — an approval ends when another road MOVES the entry to another tier (a demote, then the earned rule); a
+      // same-tier promote --curated records nothing on the entry and ends nothing (fix round 2, V2).
       const listing83 = () => o83.db.prepare(`SELECT id FROM entries WHERE status = 'active' AND tier = 'wisdom'
         AND json_extract(provenance, '$.approval.by') = 'operator-approval' AND json_extract(provenance, '$.approval.to') = tier
         AND json_extract(provenance, '$.approval.revokedAt') IS NULL AND json_extract(provenance, '$.approval.endedAt') IS NULL`).all().map((r) => r.id);
       const idCu = (await kc83('d-cur', 'The curatorial83 museum restored a steam crane for the quay. Volunteers rebuilt its boiler.', modelEnv83)).out.entry.id;
       const idEa = (await kc83('d-earn', 'The earnshaw83 market sells heritage apples every Saturday. Growers bring forty kinds.', modelEnv83)).out.entry.id;
       const ok83 = [await o83.approveWisdom(idCu), await o83.approveWisdom(idEa)].every((r) => r.changed === true) && listing83().includes(idCu) && listing83().includes(idEa);
-      await o83.promote(idCu, 'wisdom', { curated: true }); // an agent's curated write: wisdom by another road
+      const pc83 = await o83.promote(idCu, 'wisdom', { curated: true }); // an agent's curated write in the SAME tier
+      const vCu = view77(o83, idCu), pCu = o83.recall(idCu).provenance.approval;
+      ok(ok83 && pc83.success === true && !pCu.endedAt && o83.recall(idCu).provenance.authority === 'web' && vCu.approval.revocable === true && vCu.promotion.wisdomBy === 'operator-approved'
+        && listing83().includes(idCu) && (await o83.revokeWisdom(idCu)).changed === true && o83.recall(idCu).tier === 'memory',
+        'F4/V2: a same-tier promote <id> wisdom --curated on an approved entry records nothing on it (authority web, no curated mark) and ends nothing: still operator-approved, revocable, listed; revoke answers changed:true');
       await o83.promote(idEa, 'memory'); // an agent's demote
       o83.db.prepare('UPDATE entries SET retrieval_count=5, trust_score=0.7, helpful_count=2 WHERE id=?').run(idEa);
       const me83 = await o83.maintain({ force: true });
-      const vCu = view77(o83, idCu), vEa = view77(o83, idEa), pCu = o83.recall(idCu).provenance.approval, pEa = o83.recall(idEa).provenance.approval;
-      ok(ok83 && me83.promoted.some((p) => p.id === idEa) && o83.recall(idEa).tier === 'wisdom' && pCu.endedBy === 'promote' && pCu.endedTier === 'wisdom' && !!pCu.endedAt && pEa.endedTier === 'memory'
-        && vCu.approval.revocable === false && vCu.approval.approvedAt === null && vCu.promotion.wisdomBy === null && vEa.approval.revocable === false && vEa.promotion.wisdomBy === null
-        && (await o83.revokeWisdom(idCu)).denied === 'not-operator-approved' && (await o83.revokeWisdom(idEa)).denied === 'not-operator-approved'
-        && (await o83.approveWisdom(idCu)).denied === 'already-wisdom' && !listing83().includes(idCu) && !listing83().includes(idEa) && listing83().includes(eM) && o83.recall(idCu).tier === 'wisdom',
-        'F4: promote --curated on an approved entry, and a demote followed by the earned rule, end the record (endedAt / endedBy / endedTier): not live, not revocable, wisdomBy null, revoke-wisdom refuses (never moves earned or curated wisdom down), approve answers already-wisdom, the OPERATIONS listing leaves both out');
+      const vEa = view77(o83, idEa), pEa = o83.recall(idEa).provenance.approval;
+      ok(me83.promoted.some((p) => p.id === idEa) && o83.recall(idEa).tier === 'wisdom' && pEa.endedBy === 'promote' && pEa.endedTier === 'memory' && !!pEa.endedAt
+        && vEa.approval.revocable === false && vEa.approval.approvedAt === null && vEa.promotion.wisdomBy === null && (await o83.revokeWisdom(idEa)).denied === 'not-operator-approved'
+        && (await o83.approveWisdom(idEa)).denied === 'already-wisdom' && !listing83().includes(idEa) && listing83().includes(eM),
+        'F4: a demote (promote <id> memory) ends the record (endedAt / endedBy / endedTier memory) and the earned rule then puts the entry back: not live, not revocable, wisdomBy null, revoke-wisdom refuses (never moves earned wisdom down), approve answers already-wisdom, the OPERATIONS listing leaves it out');
       await o83.promote(idEa, 'memory');
       const reA83 = await o83.approveWisdom(idEa);
       ok(reA83.changed === true && view77(o83, idEa).approval.revocable === true && o83.recall(idEa).provenance.approvalHistory?.at(-1)?.endedTier === 'memory', 'F4: a later approval writes a fresh live record; the ended one moves to approvalHistory');
@@ -5148,6 +5157,122 @@ try {
         && /Retries and unknown outcomes/.test(im83) && /exit 0/.test(im83),
         'F9/D2: docs/reference/CLI.md lists --replace-neighbor and the claims-deferred flags (gen-docs reads bracket flags); §6 states the retry contract and that anything with shell access to the store can run these writes');
     } finally { o83.close(); await fake83.close(); }
+  }
+
+  // 84. Fix round 2 (verification of 55a398a, 2026-11-10): V1 busy_timeout before journal_mode (a closed store opened
+  //     while another process holds it locked waits instead of failing); V2 a promote that changes nothing ends nothing
+  //     (maintain's stale candidate, a same-tier promote --curated); V3 an accept / reject repeat writes no row; V4 the
+  //     OPERATIONS rollback-repair SQL; V5 an expired, unswept capture counts as gone for the queue and --replace-neighbor
+  //     but not for claims-sweep; V6 the N10 / N11 answers and a deterministic BEGIN IMMEDIATE check (N13).
+  {
+    const { DatabaseSync: DatabaseSync84 } = await import('node:sqlite');
+    const L84 = 'kb-84';
+    const o84 = new Orchestrator(base77('c84'));
+    try {
+      const claimOf84 = (entryId) => o84.db.prepare("SELECT id FROM claims WHERE json_extract(source,'$.sourceId') = ? ORDER BY rowid").get(o84.recall(entryId).source_id).id;
+      const pair84 = async (tag, yes, no) => { const a = (await ing77(o84, L84, `${tag}-n`, yes)).entry.id, b = (await ing77(o84, L84, `${tag}-d`, no)).entry.id; return { nEntry: a, dEntry: b, n: claimOf84(a), d: claimOf84(b) }; };
+      const rows84 = () => ({ audit: o84.db.prepare('SELECT COUNT(*) c FROM audit').get().c, log: o84.db.prepare('SELECT COUNT(*) c FROM log').get().c });
+
+      // V1 — a CLOSED store (no -wal / -shm; only CLI children ever touch it) opened while another process holds it
+      // locked (rollback journal, BEGIN EXCLUSIVE, 1.5 s): with busy_timeout set first the open waits and succeeds.
+      const dirV1 = path.join(tmp, 'c84v1'); fs.mkdirSync(dirV1, { recursive: true });
+      const dbV1 = path.join(dirV1, 'state.db');
+      fs.writeFileSync(path.join(dirV1, 'note84.md'), 'The openlock84 gauge house logs the river level every hour. Wardens read it at dawn.');
+      const iV1 = cli53(dbV1, 'ingest', path.join(dirV1, 'note84.md'), '--type', 'note');
+      const closedV1 = iV1.code === 0 && !fs.existsSync(`${dbV1}-wal`) && !fs.existsSync(`${dbV1}-shm`);
+      const heldV1 = await new Promise((resolve) => {
+        const h = spawn(process.execPath, ['-e', `const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(${JSON.stringify(dbV1)});d.exec('PRAGMA journal_mode=DELETE');d.exec('BEGIN EXCLUSIVE');d.prepare("INSERT INTO log(ts,operation,detail) VALUES('x','holder84','{}')").run();console.log('locked');setTimeout(()=>{d.exec('COMMIT');d.close();},1500);`], { stdio: ['ignore', 'pipe', 'ignore'] });
+        const closed = new Promise((r) => h.on('close', r));
+        h.stdout.once('data', () => resolve({ closed }));
+      });
+      const t84 = Date.now(); const rV1 = cli53(dbV1, 'entries', iV1.out?.entry?.id ?? 'none'); const msV1 = Date.now() - t84;
+      await heldV1.closed;
+      ok(closedV1 && rV1.code === 0 && rV1.out?.entries?.[0]?.id === iV1.out.entry.id && msV1 >= 1000 && !/locked/.test(rV1.err),
+        `V1: a closed store opened while another process holds it locked for 1.5 s → the open waits it out (${msV1} ms) and answers; busy_timeout is set before journal_mode`);
+
+      // V2 — maintain computes its earned candidates, an operator approval lands, then maintain's stale promote runs: a no-op.
+      const A84 = (await ing77(o84, L84, 'd-a', 'The ferrowind84 lighthouse keeps a fog signal log for the northern strait. Keepers record every blast.')).entry.id;
+      o84.db.prepare('UPDATE entries SET retrieval_count=5, trust_score=0.7, helpful_count=2 WHERE id=?').run(A84);
+      let ap84 = null, once84 = false;
+      const promote84 = o84.promote.bind(o84);
+      o84.promote = async (id, to, opts) => { if (!once84 && id === A84) { once84 = true; ap84 = await o84.approveWisdom(A84, { via: 'knowledge-capture' }); } return promote84(id, to, opts); };
+      const m84 = await o84.maintain({ force: true });
+      delete o84.promote;
+      const vA84 = view77(o84, A84), pr84 = logs77(o84, 'promote').filter((d) => d.id === A84);
+      ok(ap84?.changed === true && !m84.promoted.some((p) => p.id === A84) && !o84.recall(A84).provenance.approval.endedAt && vA84.promotion.wisdomBy === 'operator-approved' && vA84.approval.revocable === true
+        && pr84.length === 1 && pr84[0].by === 'operator-approval' && (await o84.revokeWisdom(A84)).changed === true,
+        "V2: maintain's candidate approved meanwhile → its promote is a no-op (not counted, no promote row): the approval stays live (wisdomBy operator-approved, revocable) and revoke answers changed:true");
+
+      // V3 — an accept / reject repeat is answered before governance: no audit row, no log row.
+      const c84 = await pair84('d-c', 'The cobbleton84 tram stops at the market square every noon.', 'The cobbleton84 tram never stops at the market square every noon.');
+      const r84 = await pair84('d-r', 'The rookhaven84 bell rings over the harbour at dusk.', 'The rookhaven84 bell never rings over the harbour at dusk.');
+      const acc84 = await o84.resolveDeferredClaim(c84.d, 'accept'), rej84 = await o84.resolveDeferredClaim(r84.d, 'reject');
+      const before84 = rows84();
+      const acc84b = await o84.resolveDeferredClaim(c84.d, 'accept'), rej84b = await o84.resolveDeferredClaim(r84.d, 'reject');
+      const after84 = rows84();
+      ok(acc84.success && acc84.changed === undefined && rej84.success && JSON.stringify(acc84b) === JSON.stringify({ success: true, changed: false, id: c84.d, status: 'active' })
+        && JSON.stringify(rej84b) === JSON.stringify({ success: true, changed: false, id: r84.d, status: 'archived' }) && JSON.stringify(after84) === JSON.stringify(before84),
+        'V3: an accept / reject repeat answers changed:false and writes nothing — the audit and log row counts are unchanged');
+
+      // V4 — the OPERATIONS rollback-repair SQL: the old code's moves (simulated with its exact writes: tier, lease, a
+      // `promote` log row without `by`) are found and ended; an untouched approval and a same-tier promote are not.
+      const E84 = (await ing77(o84, L84, 'd-e', 'The corvallen84 ferry carries cyclists across the lake at noon. Riders board from the slipway.')).entry.id;
+      const K84 = (await ing77(o84, L84, 'd-k', 'The kestrelby84 museum restored a steam crane for the quay. Volunteers rebuilt its boiler.')).entry.id;
+      const C84 = (await ing77(o84, L84, 'd-cc', 'The curling84 club floods the rink every winter. Members sweep the ice at dawn.')).entry.id;
+      for (const x of [E84, K84, C84]) await o84.approveWisdom(x);
+      const later84 = (id, by = 1000) => new Date(Date.parse(o84.recall(id).provenance.approval.at) + by).toISOString();
+      const logAt84 = o84.db.prepare("INSERT INTO log(ts,operation,detail) VALUES(?,'promote',?)");
+      o84.db.prepare("UPDATE entries SET tier='memory', expires_at=? WHERE id=?").run(new Date(Date.now() + 30 * 864e5).toISOString(), E84); logAt84.run(later84(E84), JSON.stringify({ id: E84, toTier: 'memory' }));
+      o84.db.prepare("UPDATE entries SET tier='wisdom', expires_at=NULL WHERE id=?").run(E84); logAt84.run(later84(E84, 2000), JSON.stringify({ id: E84, toTier: 'wisdom' }));
+      logAt84.run(later84(C84), JSON.stringify({ id: C84, toTier: 'wisdom' })); // a same-tier promote --curated
+      const ops84 = fs.readFileSync(path.join(bin53, '..', '..', '..', 'docs', 'OPERATIONS.md'), 'utf8').match(/```sql\n( *-- 1\. Dry run[\s\S]*?) *```/)[1].replace(/^  /gm, '');
+      const [sel84, upd84] = ops84.split(/-- 2\. End them \(same condition\)\.\n/);
+      const wasLive84 = view77(o84, E84).approval.revocable;
+      const listed84 = o84.db.prepare(sel84.replace(/^-- 1\..*\n/, '')).all().map((r) => r.id);
+      const ch84 = o84.db.prepare(upd84).run().changes;
+      ok(wasLive84 === true && JSON.stringify(listed84) === JSON.stringify([E84]) && ch84 === 1 && o84.recall(E84).provenance.approval.endedBy === 'rollback-repair'
+        && view77(o84, E84).approval.revocable === false && (await o84.revokeWisdom(E84)).denied === 'not-operator-approved' && view77(o84, K84).approval.revocable === true
+        && view77(o84, C84).approval.revocable === true && o84.db.prepare(sel84.replace(/^-- 1\..*\n/, '')).all().length === 0,
+        "V4: the OPERATIONS rollback-repair SQL (read from the doc) lists only the entry the old code moved after its approval, ends it (endedBy rollback-repair; revoke then refuses), and leaves an untouched approval and a same-tier promote alone; a second run lists nothing");
+
+      // V5 — an expired, unswept capture: gone for the queue and --replace-neighbor, not for claims-sweep until maintain sweeps it.
+      const x84 = await pair84('d-x', 'The harlowe84 kiln fires pottery every Thursday night.', 'The harlowe84 kiln never fires pottery every Thursday night.');
+      o84.db.prepare('UPDATE entries SET expires_at=? WHERE id=?').run(new Date(Date.now() - 1000).toISOString(), x84.dEntry);
+      const q84 = o84.deferredClaimsForLibrary({ libraryId: L84, limit: 200 });
+      const rx84 = await o84.resolveDeferredReplacingNeighbor(x84.d);
+      await o84.claimsSweep({ fragments: false });
+      const keptBySweep84 = o84.claims.get(x84.d).status === 'deferred' && o84.recall(x84.dEntry).status === 'active';
+      ok(!q84.claims.some((c) => c.id === x84.d) && q84.staleOmitted === 1 && rx84.denied === 'claim-source-gone' && o84.claims.get(x84.n).status === 'active' && keptBySweep84,
+        'V5: a capture whose lease ran out (not yet swept) → its deferred claim is left out of the queue (staleOmitted 1) and --replace-neighbor answers claim-source-gone; claims-sweep (status only) leaves it alone');
+      await o84.maintain({ force: true });
+      await o84.claimsSweep({ fragments: false });
+      ok(o84.recall(x84.dEntry).status === 'archived' && o84.claims.get(x84.d).status === 'archived' && o84.claims.get(x84.d).metadata.archivedBy?.reason === 'source-gone',
+        'V5: once maintain has swept the expired entry, claims-sweep archives its claim as source-gone');
+
+      // V6 — the answers the round-2 surviving mutants N10 / N11 would turn into changed:false, and N13 deterministically.
+      const n84 = await pair84('d-n', 'The marlowe84 ferry departs the eastern quay at six every morning.', 'The marlowe84 ferry never departs the eastern quay at six every morning.');
+      await o84.resolveDeferredReplacingNeighbor(n84.d);
+      const an84 = await o84.resolveDeferredClaim(n84.d, 'accept');
+      const plain84 = claimOf84((await ing77(o84, L84, 'd-plain', 'The pennick84 orchard ships pears to the coastal markets each autumn.')).entry.id);
+      const ap84b = await o84.resolveDeferredClaim(plain84, 'accept');
+      ok(an84.success === false && an84.denied === 'not-deferred' && an84.resolution === 'replace-neighbor' && an84.status === 'active'
+        && ap84b.success === false && ap84b.denied === 'not-deferred' && ap84b.resolution === null && ap84b.status === 'active',
+        'V6/N11: accept after --replace-neighbor → not-deferred (resolution replace-neighbor); accept on a claim never deferred → not-deferred (resolution null) — neither is a changed:false repeat');
+      const R84 = (await ing77(o84, L84, 'd-rv', 'The ravelin84 weir lifts its gates when the river runs high. Wardens log each lift.')).entry.id;
+      await o84.approveWisdom(R84); await o84.revokeWisdom(R84);
+      await o84.promote(R84, 'wisdom', { curated: true }); await o84.promote(R84, 'memory');
+      const rv84 = await o84.revokeWisdom(R84);
+      ok(rv84.success === false && rv84.denied === 'not-wisdom' && !!o84.recall(R84).provenance.approval.endedAt,
+        'V6/N10: revoke, then promote --curated up and a demote back (the revoked record ended by those moves), then revoke → not-wisdom, not a changed:false repeat');
+      const T84 = (await ing77(o84, L84, 'd-tx', 'The tidewell84 lock keeper logs every barge through the canal. Barges queue at the upper gate.')).entry.id;
+      const side84 = new DatabaseSync84(o84.cfg.dbPath); side84.exec('PRAGMA busy_timeout = 0');
+      let reads84 = 0, sideErr84 = null;
+      o84.recall = (id) => { const r = Object.getPrototypeOf(o84).recall.call(o84, id); if (id === T84 && ++reads84 === 2) { try { side84.prepare("INSERT INTO log(ts,operation,detail) VALUES('x','side84','{}')").run(); } catch (e) { sideErr84 = e.message; } } return r; };
+      const ax84 = await o84.approveWisdom(T84).catch((e) => ({ threw: e.message }));
+      delete o84.recall; side84.close();
+      ok(ax84.success === true && ax84.changed === true && /locked|busy/i.test(sideErr84 || '') && o84.recall(T84).tier === 'wisdom',
+        'V6/N13: approve holds the write lock from BEGIN (IMMEDIATE): another connection cannot write between its re-check and its write (refused at once), and the approval lands — a deferred BEGIN would let that write in and then fail');
+    } finally { o84.close(); }
   }
 
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);

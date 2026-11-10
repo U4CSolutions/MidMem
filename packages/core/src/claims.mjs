@@ -218,17 +218,28 @@ export class ClaimStore {
    *  `contradictedBy` — the same bookkeeping reclassifyWriteConflicts does — so lint stops
    *  reporting a decided pair as a pending write conflict (2026-10-06). Reject keeps the tag: the
    *  row is archived and the tag is its history. */
+  /** A retry of accept / reject (2026-11-10): the claim is no longer deferred, the resolution recorded on it is the one
+   *  asked for, and its end state still holds (accept → active, reject → archived) → `{ success: true, changed: false,
+   *  id, status }`; otherwise null. A pure read: the orchestrator answers it before governance, so a repeat writes
+   *  neither an audit row nor a log row. */
+  resolutionRepeat(id, action) {
+    if (action !== 'accept' && action !== 'reject') return null;
+    const c = this.get(id);
+    if (!c || c.status === 'deferred') return null;
+    const resolution = c.metadata?.deferredResolution?.action ?? null;
+    return resolution === action && c.status === (action === 'accept' ? 'active' : 'archived') ? { success: true, changed: false, id, status: c.status } : null;
+  }
+
   resolveDeferred(id, action) {
     if (action !== 'accept' && action !== 'reject') return { success: false, message: `action must be accept|reject, got '${action}'` };
     const c = this.get(id);
     if (!c) return { success: false, message: `not found: ${id}` };
     if (c.status !== 'deferred') {
-      // A retry (2026-11-10): the resolution asked for is the one recorded and its end state still holds → already done
-      // by this road, nothing changes. Any other non-deferred claim is a final refusal that says what the record holds.
-      // The first answer (a deferred claim resolved) is exactly as before.
-      const resolution = c.metadata?.deferredResolution?.action ?? null;
-      if (resolution === action && c.status === (action === 'accept' ? 'active' : 'archived')) return { success: true, changed: false, id, status: c.status };
-      return { success: false, denied: 'not-deferred', id, status: c.status, resolution, message: `not deferred: '${c.status}'` };
+      // A retry (2026-11-10) is already done by this road: resolutionRepeat. Any other non-deferred claim is a final
+      // refusal that says what the record holds. The first answer (a deferred claim resolved) is exactly as before.
+      const again = this.resolutionRepeat(id, action);
+      if (again) return again;
+      return { success: false, denied: 'not-deferred', id, status: c.status, resolution: c.metadata?.deferredResolution?.action ?? null, message: `not deferred: '${c.status}'` };
     }
     const status = action === 'accept' ? 'active' : 'archived';
     const at = nowISO();
@@ -282,21 +293,25 @@ export class ClaimStore {
   }
 
   /** Whether a claim's source no longer stands (2026-11-10): it records a source (its `source.sourceId`, else a legacy
-   *  `source.path`) and no ACTIVE entry stands for it — the entry was superseded by a re-capture, archived or forgotten.
-   *  The same rule `claims-sweep` archives orphans by (reason `source-gone`, deferred claims included). A claim that
-   *  records no source at all (an agent's, a test's) has nothing to lose: false. */
+   *  `source.path`) and no LIVE entry stands for it — active AND its lease not run out (expires_at null or later than
+   *  now, the clock isLiveEntry and the reads use): the entry was superseded by a re-capture, archived, forgotten, or
+   *  its lease ran out and maintain has not swept it yet. The queue (`claims-deferred --library`) and
+   *  `--replace-neighbor` use this rule. `claims-sweep` keeps its own, status only: it never archives the claims of an
+   *  entry that maintain has not swept yet. A claim that records no source at all (an agent's, a test's): false. */
   sourceGone(c) {
     const s = c?.source && typeof c.source === 'object' ? c.source : {};
-    if (typeof s.sourceId === 'string' && s.sourceId) return !this.db.prepare("SELECT 1 FROM entries WHERE source_id=? AND status='active' LIMIT 1").get(s.sourceId);
-    if (typeof s.path === 'string' && s.path) return !this.db.prepare("SELECT 1 FROM entries e JOIN sources s ON s.id = e.source_id WHERE s.path=? AND e.status='active' LIMIT 1").get(s.path);
+    const now = nowISO();
+    if (typeof s.sourceId === 'string' && s.sourceId) return !this.db.prepare("SELECT 1 FROM entries WHERE source_id=? AND status='active' AND (expires_at IS NULL OR expires_at > ?) LIMIT 1").get(s.sourceId, now);
+    if (typeof s.path === 'string' && s.path) return !this.db.prepare("SELECT 1 FROM entries e JOIN sources s ON s.id = e.source_id WHERE s.path=? AND e.status='active' AND (e.expires_at IS NULL OR e.expires_at > ?) LIMIT 1").get(s.path, now);
     return false;
   }
 
   /**
    * The claims review queue of ONE library (2026-11-10, INTEGRATION-MODES §6 item 7; CLI `claims-deferred --library`):
    * the deferred claims whose source belongs to `libraryId` (originOf) AND still stands (sourceGone false), oldest first
-   * (the ledger's order), paged. A deferred claim of a superseded capture version (or of an archived / forgotten entry)
-   * is left out — it is the sweep's (`claims-sweep`, reason source-gone), not the operator's — and counted in
+   * (the ledger's order), paged. A deferred claim of a superseded capture version, of an archived / forgotten entry or
+   * of one whose lease has run out is left out — not the operator's to judge; `claims-sweep` archives it as source-gone
+   * once the entry is no longer active (after maintain swept an expired lease) — and counted in
    * `staleOmitted`; `total` counts the listed rows only. Each row carries what an operator needs to judge it without a
    * second read: the claim, where it came from, its write-time relation, and the neighbour it contradicts, mapped the
    * same way. A pure read.
@@ -340,7 +355,7 @@ export class ClaimStore {
       if (c.status === 'active' && nb0?.status === 'superseded' && nb0.metadata?.superseded_by === c.id) return { done: true, claim: c, neighbor: nb0 };
       return { denied: 'not-deferred', message: `not deferred: '${c.status}'`, extra: { status: c.status, resolution } };
     }
-    if (this.sourceGone(c)) return { denied: 'claim-source-gone', message: 'the claim\'s source entry is no longer active (a superseded capture version, an archived or forgotten entry)' };
+    if (this.sourceGone(c)) return { denied: 'claim-source-gone', message: 'the claim\'s source entry is no longer live (a superseded capture version, an archived or forgotten entry, or a lease that has run out)' };
     if (this.stanceEnabled() && claimStance(c) !== 'observed') return { denied: 'claim-stance', message: `the claim's stance is '${claimStance(c)}', not an observed fact` };
     const nid = c.metadata?.writeRelation?.neighborId;
     if (typeof nid !== 'string' || !nid) return { denied: 'no-neighbor', message: 'the claim records no write-time neighbor' };
