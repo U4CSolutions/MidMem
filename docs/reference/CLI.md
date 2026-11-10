@@ -7,7 +7,7 @@ Parsed from `packages/core/bin/cli.mjs` (the wrapper `midmem <command>` in a dep
 | command | flags read |
 |---|---|
 | `init` | — |
-| `ingest` | `--sections` `--type` `--title` `--scope` `--curated` `--authority` `--favorite` |
+| `ingest` | `--sections` `--type` `--title` `--scope` `--curated` `--authority` `--min-chars` `--min-sections` `--favorite` |
 | `ingest-content` | `--stdin` `--type` `--title` `--scope` `--authority` `--curated` `--favorite` |
 | `remember` | `--tier` `--type` `--scope` `--curated` `--function` `--authority` |
 | `query` | `--tiers` `--scopes` `--functions` `--limit` `--graph` `--minAuthority` `--deep` `--historical` `--statuses` `--asOf` `--bounded` `--includeWorking` `--audit` |
@@ -15,9 +15,9 @@ Parsed from `packages/core/bin/cli.mjs` (the wrapper `midmem <command>` in a dep
 | `handoff` | `--profile` `--scopes` `--tiers` |
 | `recall` | — |
 | `feedback` | `--unhelpful` `--favorite` `--unfavorite` |
-| `entries` | `--library` `--claims` `--limit` `--offset` |
-| `reextract` | `--library` `--all` `--limit` `--dryRun` |
-| `forget-source` | `--library` `--dryRun` |
+| `entries` | `--library` `--doc-ids` `--claims` `--limit` `--offset` |
+| `reextract` | `--library` `--doc-ids` `--all` `--limit` `--dry-run` `--dryRun` `--retry-failed` |
+| `forget-source` | `--library` `--doc-id` `--dryRun` |
 | `brief` | — |
 | `lint` | — |
 | `project` | `--force` |
@@ -31,14 +31,14 @@ Parsed from `packages/core/bin/cli.mjs` (the wrapper `midmem <command>` in a dep
 | `close-tasks` | `--task` `--match` `--opaque` `--olderThanDays` `--dryRun` |
 | `forget-entries` | `--match` `--opaque` `--scope` `--project` `--types` `--olderThanDays` `--dryRun` |
 | `forget-nodes` | `--match` `--opaque` `--types` `--dryRun` |
-| `claims` | `--limit` `--stances` `--all` |
+| `claims` | `--limit` `--stances` `--all` `--all-stances` |
 | `contradictions` | `--minShared` |
 | `claims-deferred` | `--library` `--limit` `--offset` |
 | `claim-defer` | `--reason` |
-| `claim-resolve` | `--reject` |
+| `claim-resolve` | `--reject` `--replace-neighbor` |
 | `claims-reclassify` | `--dryRun` |
 | `claims-restance` | `--dryRun` |
-| `claims-sweep` | `--dryRun` |
+| `claims-sweep` | `--no-fragments` `--no-orphans` `--dryRun` |
 | `stale-clear` | — |
 | `claim-validity` | — |
 | `query-probes` | `--sample` `--topK` |
@@ -78,8 +78,8 @@ Usage: ocmw <init|ingest <path>|ingest-content <text>|remember <text>|query <tex
   ingest-content <text> | --stdin: same source flags (one of --canonical-uri/--source-uri/--doc-id required) + --type --title --scope --authority (default web) --curated
   favorites (schema 6): feedback <entryId> --favorite | --unfavorite (idempotent; a favorite is ONE helpful vote and the unfavorite takes back only that vote; active entries only; {success, id, favorite, helpful_count, trust_score, changed}; feedback refuses any other switch and a second id) | ingest <path> … --favorite (also ingest-content; the entry the ingest stands for becomes a favorite; a re-ingest that supersedes a favorite carries it and its vote, once)
   capture systems (INTEGRATION-MODES §6): feedback <entryId> [--unhelpful | --favorite | --unfavorite] (active entries only; else {success:false, reason}) | entries <entry ids…> | entries --library <id> [--doc-ids a,b] [--limit <n ≤ 5000, default 500>] [--offset <n>] [--claims] (lifecycle read; never a recall) | forget-source --library <id> --doc-id <docId> [--dryRun] (soft-forgets every entry from that source, unlinks it from alsoSources) | reextract [--library <id> [--doc-ids a,b]] [--only-fallback (default) | --all] [--limit <n ≤ 5000, default 100>] [--retry-failed] [--dry-run] (re-runs model extraction on active entries whose source file is unchanged, in place: id, tier, lease and counters kept; writes only when the model answers; never curated entries; an entry whose answer failed is retried after 24 h, or now with --retry-failed)
-  operator approval (INTEGRATION-MODES §6 6e, 2026-11-10; CLI only, ONE entry per call, never --curated): approve-wisdom <entryId> [--note <text ≤ 500>] [--via <system ≤ 40>] (memory → wisdom on an explicit operator approval: it replaces the usage evidence of the earned rule and nothing else; authority unchanged, never curated) → {success:true, id, tier, approval:{at, via}} | {success:false, denied, id, message}, denied in check order: not-found|not-active|already-wisdom|not-memory-tier|lifecycle|grounding-below-floor|instruction-like|governance|transition-verifier | revoke-wisdom <entryId> [--note <text ≤ 500>] [--via <system ≤ 40>] (operator-approved wisdom only: back to memory with a fresh lease by its type, the lifted project restored, counters kept, the record kept with revokedAt) → {success:true, id, tier, expiresAt, project, approval:{at, via, revokedAt}} | {success:false, denied: not-found|not-active|not-wisdom|not-operator-approved|governance, id, message}
-  claims review (§6 6f + item 7, 2026-11-10): claims-deferred --library <id> [--limit <n ≤ 200, default 50>] [--offset <n>] → {total, claims:[{id, content, status, stance, deferredAt, deferReason, libraryId, docId, sourceTitle, entryId, authority, relation, neighbor}]} (the deferred claims of that library, oldest first; without flags the whole ledger as before) | claim-resolve <claimId> --replace-neighbor (CLI only: accept it AND supersede its live neighbour, one transaction) → {success:true, id, status, neighbor:{id, status}, stalePath} | {success:false, denied: not-found|not-deferred|no-neighbor|neighbor-not-live|neighbor-authority|transition-verifier, id, message}
+  operator approval (INTEGRATION-MODES §6 6e, 2026-11-10; CLI only, ONE entry per call, each flag once, never --curated): approve-wisdom <entryId> [--note <text ≤ 500 UTF-16 units>] [--via <system ≤ 40>] (memory → wisdom on an explicit operator approval: it replaces the usage evidence of the earned rule and nothing else; authority unchanged, never curated; the entry then has what earned wisdom has) → {success:true, changed, id, tier, approval:{at, via}} (changed:false = already approved by this road, the original record) | {success:false, denied, id, message}, denied in check order: not-found|not-active|already-wisdom|not-memory-tier|lifecycle|fallback-extraction|grounding-below-floor|instruction-like|governance|transition-verifier | revoke-wisdom <entryId> [--note <text>] [--via <system>] (a live operator approval only: back to memory with a fresh lease by its type, the lifted project restored, counters kept, the record kept with revokedAt) → {success:true, changed, id, tier, expiresAt, project, approval:{at, via, revokedAt}} (changed:false = already revoked) | {success:false, denied, id, message}, denied in check order: not-found|not-active|not-wisdom|not-operator-approved|governance
+  claims review (§6 6f + item 7, 2026-11-10): claims-deferred --library <id> [--limit <n ≤ 200, default 50>] [--offset <n>] → {total, staleOmitted, claims:[{id, content, status, stance, deferredAt, deferReason, libraryId, docId, sourceTitle, entryId, authority, relation, neighbor}]} (the deferred claims of that library whose source entry is still active, oldest first; without flags the whole ledger as before; any other flag is refused) | claim-resolve <claimId> [--reject | --replace-neighbor] (exactly one id, at most one of the two, nothing else; a repeat of the same resolution → {success:true, changed:false, id, status}; any other claim not deferred → {success:false, denied:not-deferred, id, status, resolution, message}) | --replace-neighbor (CLI only: accept it AND supersede its live neighbour, one transaction) → {success:true, changed, id, status, neighbor:{id, status}, stalePath} | {success:false, denied, id, message}, denied in check order: not-found|not-deferred|claim-source-gone|claim-stance|no-neighbor|neighbor-not-live|neighbor-authority|transition-verifier
 ```
 
 ## Sub-command usage

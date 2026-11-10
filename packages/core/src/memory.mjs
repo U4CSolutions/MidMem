@@ -197,7 +197,8 @@ export class TieredMemory {
    *  `provenance.approval` in the SAME single write as the tier move, with `liftedFrom` = the project the lift
    *  below moved (null when nothing was lifted) so a revoke can put it back. An earlier record (a revoked
    *  approval) moves to `provenance.approvalHistory`. Without `approval` the write is exactly the earned
-   *  path's (maintain, `promote --curated`): same lease rule, same lift, nothing else recorded. */
+   *  path's (maintain, `promote --curated`): same lease rule, same lift — plus, only on an entry that carries an
+   *  unended approval record, the stamp that ends it (below). */
   promote(id, toTier, { approval = null } = {}) {
     const tc = this.tier(toTier);
     if (!tc) throw new Error(`unknown tier: ${toTier}`);
@@ -218,6 +219,18 @@ export class TieredMemory {
       this.db.prepare(`UPDATE entries SET tier=?, status='active', expires_at=?, updated_at=?, ${lift ? 'project=NULL, ' : ''}provenance=? WHERE id=?`)
         .run(toTier, expiresAt, nowISO(), JSON.stringify(prov), id);
       return { success: true, message: `promoted ${id} → ${toTier} (operator approval${lift ? `; lifted from project '${r.project}' to global` : ''})`, ...(lift ? { liftedFrom: r.project } : {}) };
+    }
+    // An operator approval ends when the entry moves tier by any other road (2026-11-10): maintain's earned promotion,
+    // `promote --curated`, or `promote <id> memory` moving it down. The record stays, stamped { endedAt, endedBy,
+    // endedTier }, in the same single write, so it can never again read as live (revocable, operator-approved) on
+    // wisdom that another road put there. Entries never approved write exactly as before.
+    const prov0 = json(r.provenance, {}) || {};
+    const a = prov0.approval;
+    if (a && typeof a === 'object' && a.by === 'operator-approval' && !a.endedAt) {
+      const prov = { ...prov0, ...(lift ? { liftedFrom: { project: r.project, tier: toTier, at: nowISO() } } : {}), approval: { ...a, endedAt: nowISO(), endedBy: 'promote', endedTier: toTier } };
+      this.db.prepare(`UPDATE entries SET tier=?, status='active', expires_at=?, updated_at=?, ${lift ? 'project=NULL, ' : ''}provenance=? WHERE id=?`)
+        .run(toTier, expiresAt, nowISO(), JSON.stringify(prov), id);
+      return lift ? { success: true, message: `promoted ${id} → ${toTier} (lifted from project '${r.project}' to global)`, liftedFrom: r.project } : { success: true, message: `promoted ${id} → ${toTier}` };
     }
     if (lift) {
       const prov = { ...json(r.provenance, {}), liftedFrom: { project: r.project, tier: toTier, at: nowISO() } };

@@ -84,7 +84,8 @@ function genCliDoc() {
         'Flags listed are the ones each command reads; positional args are shown in the usage text below.\n\n';
   md += '| command | flags read |\n|---|---|\n';
   for (const c of cases) {
-    const flags = [...new Set([...c.line.matchAll(/flags\.([a-zA-Z]+)/g)].map((m) => `--${m[1]}`))];
+    // `flags.name` and the bracket form `flags['dash-name']` (2026-11-10: the table missed claim-resolve --replace-neighbor).
+    const flags = [...new Set([...c.line.matchAll(/flags(?:\.([a-zA-Z]+)|\['([a-z][a-z0-9-]*)'\])/g)].map((m) => `--${m[1] ?? m[2]}`))];
     md += `| \`${c.cmd}\` | ${flags.map((f) => `\`${f}\``).join(' ') || '—'} |\n`;
   }
   // The MAIN usage string is the `Usage: ocmw …` one; sub-usages (`prospective`, `vectors`) are the

@@ -57,8 +57,9 @@ export function promotionThresholds(o) {
 
 /** Operator-approved wisdom (2026-11-10, INTEGRATION-MODES §6 6e). `approve-wisdom`'s denial codes, in the order
  *  the checks run (the first that applies is the answer); `revoke-wisdom`'s likewise. Fixed: a capture system
- *  keys its UI on them. */
-export const APPROVAL_DENIALS = Object.freeze(['not-found', 'not-active', 'already-wisdom', 'not-memory-tier', 'lifecycle', 'grounding-below-floor', 'instruction-like', 'governance', 'transition-verifier']);
+ *  keys its UI on them. A repeat of a write that already holds by this road is no denial but
+ *  `{ success: true, changed: false }` (checked after not-active). */
+export const APPROVAL_DENIALS = Object.freeze(['not-found', 'not-active', 'already-wisdom', 'not-memory-tier', 'lifecycle', 'fallback-extraction', 'grounding-below-floor', 'instruction-like', 'governance', 'transition-verifier']);
 export const REVOKE_DENIALS = Object.freeze(['not-found', 'not-active', 'not-wisdom', 'not-operator-approved', 'governance']);
 /** Bounds on the operator's note and the calling system's name (`--note`, `--via`). */
 export const APPROVAL_NOTE_MAX = 500;
@@ -77,8 +78,22 @@ export function approvalTiers(o) {
  *  record then describes history, not the entry's standing). */
 export function liveApproval(e) {
   const a = e?.provenance?.approval;
-  return a && typeof a === 'object' && a.by === 'operator-approval' && !a.revokedAt && a.to === e.tier ? a : null;
+  return a && typeof a === 'object' && a.by === 'operator-approval' && !a.revokedAt && !a.endedAt && a.to === e.tier ? a : null;
 }
+
+/** The record of a revoke that still stands (2026-11-10): the latest approval was revoked by revoke-wisdom, the entry
+ *  is back in the tier the approval came from, and no other road has moved it since (`endedAt` unset). A repeated
+ *  revoke-wisdom answers `changed: false` on it. */
+export function revokedApproval(e) {
+  const a = e?.provenance?.approval;
+  return a && typeof a === 'object' && a.by === 'operator-approval' && a.revokedAt && !a.endedAt && a.from === e.tier ? a : null;
+}
+
+/** Not model-extracted (2026-11-10, D1): an INGESTED entry (it has a source row) whose provenance.extraction is not
+ *  the model's — the deterministic fallback, or no record at all (ingested before 2026-10-07; reextract selects
+ *  those too). Its summary, concepts and claims are frozen heuristics, and wisdom is never re-extracted: reextract
+ *  it first. A direct write (remember, record_work) has no extraction and is not caught here. */
+export const fallbackExtracted = (e) => !!e?.source_id && e?.provenance?.extraction?.mode !== 'lmstudio';
 
 /** An active row: status active AND its lease not run out (an expired lease is dead before the sweep runs). */
 export const isLiveEntry = (e) => e?.status === 'active' && !(e.expires_at && e.expires_at <= nowISO());
@@ -93,7 +108,8 @@ export function approvalContext(o, e) {
  * Every check `approve-wisdom` applies before its governed write, in order — the earned path's own checks
  * (maintain(): an active row in the tier below wisdom, never a `working` entry, the write-time grounding floor of
  * the transition verifier) with the usage evidence (retrievals, trust, helpful votes) left out, plus the #40
- * instruction-likeness screen. `governance: true` also evaluates the policy set (pure: no audit row) — the
+ * instruction-likeness screen and (D1, 2026-11-10) model extraction: a fallback-extracted capture is never approved
+ * into a tier that is never re-extracted. `governance: true` also evaluates the policy set (pure: no audit row) — the
  * `entries` read; approveWisdom lets governed() decide and audit instead. Returns the applicable codes
  * (APPROVAL_DENIALS order); empty = eligible. Never writes.
  */
@@ -105,6 +121,7 @@ export function approvalBlockers(o, e, { governance = false } = {}) {
   if (t && e.tier === t.to) out.push('already-wisdom');
   else if (!t || e.tier !== t.from) out.push('not-memory-tier');
   if (e.mem_function === 'working') out.push('lifecycle');
+  if (fallbackExtracted(e)) out.push('fallback-extraction');
   if (o.cfg.transitions?.enabled !== false && !verifyPromotion(e, o.cfg.transitions).pass) out.push('grounding-below-floor');
   if (entryInstructionLikeness(e).flag) out.push('instruction-like');
   // The policies re-check the tier pair and the lifecycle class; report governance only for what they add.
@@ -142,8 +159,7 @@ function promotionOf(o, e) {
   const m = o.cfg.maintenance || {};
   const g = verifyPromotion(e, o.cfg.transitions);
   const groundingGate = { pass: g.pass, summaryScore: g.summaryScore ?? null, gate: g.gate ?? null };
-  // wisdomBy (2026-11-10): why a wisdom entry is wisdom — 'operator-approved' | 'curated' | null (see wisdomByOf).
-  const base = { next, rule: null, eligible: false, blockers: [], progress: null, groundingGate, runsIn: 'maintain', wisdomBy: wisdomByOf(o, e) };
+  const base = { next, rule: null, eligible: false, blockers: [], progress: null, groundingGate, runsIn: 'maintain' };
   if (e.status !== 'active') return { ...base, blockers: ['not-active'] };
   if (!next || !tc?.autoPromote) return { ...base, next: null, blockers: ['top-tier'], permanent: !tc?.ttl };
   if (e.mem_function === 'working') return { ...base, blockers: ['working-function'] };
@@ -198,7 +214,8 @@ function view(o, e, withClaims) {
       active: cl.filter((c) => c.status === 'active' || c.status === 'verified').length, total: cl.length,
       ...(withClaims ? { items: cl.slice(0, MAX_CLAIM_ITEMS).map((c) => ({ id: c.id, content: clip(c.content, 500), status: c.status })) } : {}),
     },
-    promotion: promotionOf(o, e),
+    // wisdomBy (2026-11-10): why a wisdom entry is wisdom — 'operator-approved' | 'curated' | null — appended last.
+    promotion: { ...promotionOf(o, e), wisdomBy: wisdomByOf(o, e) },
     // Operator-approved wisdom (2026-11-10, §6 6e): may the operator approve this entry, and is it approved now.
     approval: approvalOf(o, e),
   };

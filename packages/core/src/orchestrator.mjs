@@ -23,7 +23,7 @@ import { recordWorkEvent, listOpenTasks, closeTasks, forgetEntries, forgetNodes,
 import { verifyTransition, verifyPromotion, auditTransition } from './transitions.mjs';
 import { loadPacks, recordPattern } from './packs.mjs';
 import { exportKnowledge } from './export.mjs';
-import { entryStatus, forgetSource, feedbackIfActive, ENTRY_STATUS_ID_RE, approvalBlockers, approvalContext, approvalTiers, liveApproval, isLiveEntry, APPROVAL_NOTE_MAX, APPROVAL_VIA_RE } from './entrystatus.mjs';
+import { entryStatus, forgetSource, feedbackIfActive, ENTRY_STATUS_ID_RE, approvalBlockers, approvalContext, approvalTiers, liveApproval, revokedApproval, isLiveEntry, APPROVAL_NOTE_MAX, APPROVAL_VIA_RE } from './entrystatus.mjs';
 import { refreshConceptGraph, mergeConceptNodes, conceptDupeCandidates } from './concepts.mjs';
 import { normalizeAuthority, clampAuthority, authorityRank } from './authority.mjs';
 import { checkConsistency } from './consistency.mjs';
@@ -72,6 +72,9 @@ function refuseSecretsInUri(field, value) {
  *  `sk-…`) need a token-like tail (a digit or an uppercase letter), so "bearer authentication-schemes"
  *  or "sk-learn-compatible-estimators" pass. The other prefixes are distinctive on their own. */
 const SECRET_ASSIGN_RE = new RegExp(`(?<![A-Za-z0-9_-])(?:[A-Za-z0-9]+[_-])*${SECRET_NAME_WORDS}=[^\\s&"']{8,}`, 'i');
+/** Notes only (approve-wisdom / revoke-wisdom --note, 2026-11-10): the `password: …` form of the assignment above, for
+ *  the names that never label anything but a secret (not auth / session / sig, which label ordinary prose). */
+const NOTE_SECRET_COLON_RE = /(?<![A-Za-z0-9_-])(?:[A-Za-z0-9]+[_-])*(?:token|api[_-]?key|apikey|secret|password|passwd|pwd|authorization|bearer|jwt|access[_-]?key|private[_-]?key|credential)s?\s*:\s*[^\s&"']{8,}/i;
 const TOKEN_LIKE = (s) => /[0-9A-Z]/.test(s);
 const SECRET_TEXT_SHAPES = [
   ['bearer token', /\bbearer\s+([A-Za-z0-9\-._~+/]{16,}=*)/gi, TOKEN_LIKE],
@@ -1579,16 +1582,19 @@ export class Orchestrator {
   }
 
   /** The operator's note and the calling system's name on approve-wisdom / revoke-wisdom: usage errors (thrown,
-   *  before anything is read or written) — a bounded id, a note of ≤ 500 characters with no control characters
-   *  but newline and tab and no secret-shaped value (it is stored with the entry and in the export), a short name. */
+   *  before anything is read or written) — a bounded id; a note of ≤ 500 UTF-16 code units (JavaScript string
+   *  length: an emoji counts 2) with no control character but newline and tab, no C1 control, no line / paragraph
+   *  separator and no bidirectional override or isolate (U+202A–U+202E, U+2066–U+2069), and no secret-shaped value
+   *  (the ingest boundary's rule, plus — for notes only — the `password: …` form); a short system name. The note is
+   *  stored with the entry, projected onto its wiki page and kept in the export. */
   #approvalArgs(verb, id, note, via) {
     if (typeof id !== 'string' || !ENTRY_STATUS_ID_RE.test(id)) throw new Error(`${verb} needs one <entryId> (got ${String(id ?? '').slice(0, 40) || 'none'})`);
     if (note != null && typeof note !== 'string') throw new Error(`${verb}: --note must be text`);
     if (via != null && (typeof via !== 'string' || !APPROVAL_VIA_RE.test(via))) throw new Error(`${verb}: --via must be a system name of 1-40 letters, digits, . _ : - (got ${String(via).slice(0, 40)})`);
     const n = note ? note : null;
-    if (n && n.length > APPROVAL_NOTE_MAX) throw new Error(`${verb}: --note is at most ${APPROVAL_NOTE_MAX} characters (got ${n.length})`);
-    if (n && /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(n)) throw new Error(`${verb}: --note carries a control character`);
-    const kind = n && this.cfg.ingest?.secretTextGuard !== false ? secretTextKind(n) : null;
+    if (n && n.length > APPROVAL_NOTE_MAX) throw new Error(`${verb}: --note is at most ${APPROVAL_NOTE_MAX} UTF-16 code units (got ${n.length})`);
+    if (n && /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2028\u2029\u202A-\u202E\u2066-\u2069]/.test(n)) throw new Error(`${verb}: --note carries a control, separator or bidirectional-format character (only newline and tab are allowed)`);
+    const kind = n && this.cfg.ingest?.secretTextGuard !== false ? (secretTextKind(n) || (NOTE_SECRET_COLON_RE.test(n) ? 'secret-named key: value' : null)) : null;
     if (kind) throw new Error(`${verb}: --note carries a secret-shaped value (${kind}); strip it`);
     return { note: n, via: via ?? null };
   }
@@ -1598,21 +1604,25 @@ export class Orchestrator {
    * tool): memory → wisdom on the operator's explicit approval of ONE entry. The approval REPLACES THE USAGE
    * EVIDENCE of the earned rule (retrieval_count, trust, helpful_count) AND NOTHING ELSE — every other check of
    * the earned path holds, in this order (approvalBlockers; the first that applies is the answer):
-   *   not-found · not-active (status, or an expired lease — maintain sweeps before it promotes) · already-wisdom ·
-   *   not-memory-tier (only the tier directly below wisdom; never fact → wisdom) · lifecycle (a `working` entry
-   *   never promotes) · grounding-below-floor (the transition verifier's write-time grounding floor, as
-   *   maintain's pre-filter) · instruction-like (the #40 screen: an entry shaped like an instruction to an agent
-   *   is never approved into the permanent tier) · governance (the 'operator-approved-wisdom' policy and
-   *   working-never-promotes; curated-tier-write is not weakened) · transition-verifier (re-run inside the
-   *   governed write with its receipt, exactly as promote() runs it; it answers only when the entry changed
-   *   between the checks).
-   * The tier moves through the same memory.promote the earned path uses: the destination tier's lease (wisdom:
-   * none) and the project lift (#18) are identical. Authority stays what it was and curated is never set: no
-   * protected recall slots, no operator authority. The record `{ by: 'operator-approval', from, to, at, via, note,
-   * liftedFrom }` lands in provenance.approval in the same write; the `promote` log row is the earned path's
-   * `{ id, toTier }` plus the reason (`by`, `at`, `via`, `note`); the transition receipt likewise carries `by`; the
-   * governance audit row is governed()'s. Denials are logged (`approve-wisdom-denied`).
-   * → { success: true, id, tier, approval: { at, via } } | { success: false, denied, id, message }
+   *   not-found · not-active (status, or an expired lease — maintain sweeps before it promotes) · [the entry is
+   *   wisdom by a LIVE approval → `{ success: true, changed: false }`, the original record; a retry is no refusal] ·
+   *   already-wisdom (wisdom by another road) · not-memory-tier (only the tier directly below wisdom; never fact →
+   *   wisdom) · lifecycle (a `working` entry never promotes) · fallback-extraction (an ingested entry not
+   *   model-extracted: wisdom is never re-extracted, so frozen fallback text is never approved — reextract it
+   *   first) · grounding-below-floor (the transition verifier's write-time grounding floor, as maintain's
+   *   pre-filter) · instruction-like (the #40 screen) · governance (the 'operator-approved-wisdom' policy and
+   *   working-never-promotes; curated-tier-write is not weakened) · transition-verifier (re-run inside the write
+   *   with its receipt, exactly as promote() runs it; it answers only when the entry changed between the checks).
+   * The checks re-run inside ONE BEGIN IMMEDIATE transaction with the write (a concurrent writer waits on the lock
+   * instead of failing the upgrade; an archive, a re-capture or a concurrent approval meanwhile answers its own
+   * code — a concurrent approval that landed first answers `changed: false`). The tier moves through the same
+   * memory.promote the earned path uses: the destination tier's lease (wisdom: none) and the project lift (#18) are
+   * identical. Authority stays what it was and curated is never set: no protected recall slots, no operator
+   * authority. The record `{ by: 'operator-approval', from, to, at, via, note, liftedFrom }` lands in
+   * provenance.approval in the same write; the `promote` log row is the earned path's `{ id, toTier }` plus the
+   * reason (`by`, `at`, `via`, `note`); the transition receipt likewise carries `by`; the governance audit row is
+   * governed()'s. Denials are logged (`approve-wisdom-denied`); a `changed: false` answer writes nothing.
+   * → { success: true, changed, id, tier, approval: { at, via } } | { success: false, denied, id, message }
    */
   async approveWisdom(id, { note = null, via = null } = {}) {
     const args = this.#approvalArgs('approve-wisdom', id, note, via);
@@ -1620,21 +1630,29 @@ export class Orchestrator {
     const say = (code, e) => ({
       'not-found': `no entry ${id}`,
       'not-active': `entry is ${e?.status === 'active' ? 'past its lease' : e?.status} — only an active entry can be approved`,
-      'already-wisdom': `entry is already in tier '${e?.tier}'`,
+      'already-wisdom': `entry is already in tier '${e?.tier}' by another road (earned or curated)`,
       'not-memory-tier': `entry is in tier '${e?.tier}' — only the tier directly below wisdom can be approved`,
       lifecycle: "a 'working' entry is lease-bound context state and never promotes",
+      'fallback-extraction': `the entry is not model-extracted (extraction ${e?.provenance?.extraction?.mode ?? 'not recorded'}) — reextract it first; wisdom is never re-extracted`,
       'grounding-below-floor': `write-time grounding ${e?.provenance?.grounding?.summaryScore} is below the promotion floor ${this.cfg.transitions?.promoteMinGrounding ?? 0.3}`,
       'instruction-like': `the entry is flagged instruction-like (${(e?.provenance?.instructionLike?.matched || []).join(', ') || 'its content'}) — never approved into wisdom`,
     }[code] || code);
+    const t = approvalTiers(this);
+    // Already approved (a retry, or a concurrent approval that landed first): done by this road — the original record.
+    const done = (e) => (e && t && isLiveEntry(e) && e.tier === t.to && liveApproval(e)
+      ? { success: true, changed: false, id, tier: e.tier, approval: { at: liveApproval(e).at, via: liveApproval(e).via ?? null } } : null);
     const e = this.recall(id);
     const pre = approvalBlockers(this, e);
+    if (pre[0] === 'not-found' || pre[0] === 'not-active') return deny(pre[0], say(pre[0], e));
+    if (done(e)) return done(e);
     if (pre.length) return deny(pre[0], say(pre[0], e));
-    const t = approvalTiers(this);
     try {
       return await governed(this.gov, 'approve-wisdom', approvalContext(this, e), () => this.db.tx(() => {
-        // Re-read inside the write: a capture's re-ingest, an archive or a reextract may have landed meanwhile.
+        // Re-read under the write lock: a capture's re-ingest, an archive, a reextract or another approval may have landed.
         const cur = this.recall(id);
         const now = approvalBlockers(this, cur).filter((c) => c !== 'grounding-below-floor');
+        if (now[0] === 'not-found' || now[0] === 'not-active') return deny(now[0], say(now[0], cur));
+        if (done(cur)) return done(cur);
         if (now.length) return deny(now[0], say(now[0], cur));
         // The transition verifier with its receipt, as promote() runs it for the earned path.
         if (this.cfg.transitions?.enabled !== false) {
@@ -1650,8 +1668,8 @@ export class Orchestrator {
         if (r.success === false) return deny('not-found', r.message);
         this.db.logOp('promote', { id, toTier: t.to, by: 'operator-approval', at, via: args.via, note: args.note, ...(r.liftedFrom ? { liftedFrom: r.liftedFrom } : {}) });
         this.#markVaultDirty();
-        return { success: true, id, tier: t.to, approval: { at, via: args.via } };
-      }));
+        return { success: true, changed: true, id, tier: t.to, approval: { at, via: args.via } };
+      }, { immediate: true }));
     } catch (err) {
       if (err instanceof GovernanceError) return deny('governance', err.message);
       throw err;
@@ -1660,34 +1678,41 @@ export class Orchestrator {
 
   /**
    * Revoke an operator approval (2026-11-10, §6 6e; CLI `revoke-wisdom`, NO MCP tool): only for an entry whose
-   * wisdom came from an operator approval (earned and curated wisdom → 'not-operator-approved'). Checks in order:
-   * not-found · not-active · not-wisdom · not-operator-approved · governance. The entry goes back to the tier
-   * below with a FRESH lease by the rule ingest applies to its type (the capture pack's ttlDays — web-article 90
-   * days — else the tier TTL), the project the approval lifted comes back, counters / trust / favorite untouched;
-   * the approval record stays as history with `revokedAt` (and `revokeNote` / `revokeVia`). Afterwards the entry
-   * can earn wisdom in maintain like any other (it qualifies by use or not) or be approved again (the revoked
-   * record then moves to provenance.approvalHistory). Logged (`revoke-wisdom`; denials `revoke-wisdom-denied`),
-   * governed (op 'revoke-wisdom', audit row).
-   * → { success: true, id, tier, expiresAt, project, approval: { at, via, revokedAt } } | { success: false, denied, id, message }
+   * wisdom came from an operator approval that is still live (earned and curated wisdom → 'not-operator-approved',
+   * also when an older approval of it was ended by that other road). Checks in order: not-found · not-active ·
+   * [the latest approval was revoked by revoke-wisdom, the entry is back in memory and nothing moved it since →
+   * `{ success: true, changed: false }` with the current lease and project] · not-wisdom · not-operator-approved ·
+   * governance. The entry goes back to the tier below with a FRESH lease by the rule ingest applies to its type (the
+   * capture pack's ttlDays — web-article 90 days — else the tier TTL), the project the approval lifted comes back,
+   * counters / trust / favorite untouched; the approval record stays as history with `revokedAt` (and `revokeNote` /
+   * `revokeVia`). Afterwards the entry can earn wisdom in maintain like any other (it qualifies by use or not) or be
+   * approved again (the revoked record then moves to provenance.approvalHistory). The checks re-run inside ONE BEGIN
+   * IMMEDIATE transaction with the write. Logged (`revoke-wisdom`; denials `revoke-wisdom-denied`), governed (op
+   * 'revoke-wisdom', audit row); a `changed: false` answer writes nothing.
+   * → { success: true, changed, id, tier, expiresAt, project, approval: { at, via, revokedAt } } | { success: false, denied, id, message }
    */
   async revokeWisdom(id, { note = null, via = null } = {}) {
     const args = this.#approvalArgs('revoke-wisdom', id, note, via);
     const deny = (denied, message) => { this.db.logOp('revoke-wisdom-denied', { id, denied, via: args.via }); return { success: false, denied, id, message }; };
     const t = approvalTiers(this);
+    const done = (e) => { const a = revokedApproval(e); return { success: true, changed: false, id, tier: e.tier, expiresAt: e.expires_at ?? null, project: e.project ?? null, approval: { at: a.at, via: a.via ?? null, revokedAt: a.revokedAt } }; };
     const check = (e) => {
       if (!e) return ['not-found', `no entry ${id}`];
       if (!isLiveEntry(e)) return ['not-active', `entry is ${e.status === 'active' ? 'past its lease' : e.status}`];
+      if (t && revokedApproval(e)) return ['done'];
       if (!t || e.tier !== t.to) return ['not-wisdom', `entry is in tier '${e.tier}', not '${t?.to}'`];
-      if (!liveApproval(e)) return ['not-operator-approved', 'its wisdom did not come from an operator approval (earned or curated wisdom is never revoked here)'];
+      if (!liveApproval(e)) return ['not-operator-approved', 'its wisdom did not come from a live operator approval (earned or curated wisdom is never revoked here)'];
       return null;
     };
     const e = this.recall(id);
     const pre = check(e);
+    if (pre?.[0] === 'done') return done(e);
     if (pre) return deny(...pre);
     try {
       return await governed(this.gov, 'revoke-wisdom', { id, fromTier: t.to, toTier: t.from, operatorApproved: true, approvedBy: liveApproval(e).by, curated: false }, () => this.db.tx(() => {
         const cur = this.recall(id);
         const now = check(cur);
+        if (now?.[0] === 'done') return done(cur);
         if (now) return deny(...now);
         const a = liveApproval(cur);
         const revokedAt = nowISO();
@@ -1696,8 +1721,8 @@ export class Orchestrator {
         if (!r.success) return deny('not-active', r.message);
         this.db.logOp('revoke-wisdom', { id, fromTier: t.to, toTier: t.from, at: revokedAt, via: args.via, note: args.note, expiresAt: r.expiresAt, project: r.project, approvedAt: a.at });
         this.#markVaultDirty();
-        return { success: true, id, tier: r.tier, expiresAt: r.expiresAt, project: r.project, approval: { at: a.at, via: a.via ?? null, revokedAt } };
-      }));
+        return { success: true, changed: true, id, tier: r.tier, expiresAt: r.expiresAt, project: r.project, approval: { at: a.at, via: a.via ?? null, revokedAt } };
+      }, { immediate: true }));
     } catch (err) {
       if (err instanceof GovernanceError) return deny('governance', err.message);
       throw err;
@@ -1757,13 +1782,16 @@ export class Orchestrator {
    *       (claims.contradictionMinContainment) of the label's own significant tokens — a label
    *       named BY the claim, not one that merely shares a common word with it.
    * Deterministic. Community parents are flagged only through a flagged member, as before.
-   * Shared by supersedeClaim and `claim-resolve --replace-neighbor` (2026-11-10). Returns the flagged node ids.
+   * Shared by supersedeClaim and `claim-resolve --replace-neighbor` (2026-11-10), which passes `sourceNodes: false`:
+   * a replacement judged in a capture system's queue flags only rule (ii), the labels the contested claim names —
+   * rule (i) would flag every concept the neighbour's whole capture created (13 nodes for one replacement, measured),
+   * which says "this capture had a claim replaced", not "these concepts are stale". Returns the flagged node ids.
    */
-  #flagStalePath(old) {
+  #flagStalePath(old, { sourceNodes = true } = {}) {
     const oldId = old.id;
     const flagged = [];
     const ts = nowISO();
-    const srcPath = typeof old.source?.path === 'string' && old.source.path ? old.source.path : null;
+    const srcPath = sourceNodes && typeof old.source?.path === 'string' && old.source.path ? old.source.path : null;
     const claimSig = significantTokens(old.content);
     const floor = this.claims.containmentFloor();
     const onPath = (n) => {
@@ -1842,8 +1870,8 @@ export class Orchestrator {
   async resolveDeferredClaim(id, action) {
     return governed(this.gov, 'claim-resolve', { id, action }, () => {
       const r = this.claims.resolveDeferred(id, action);
-      this.db.logOp('claim-resolve', { id, action, success: r.success });
-      if (r.success) this.#markVaultDirty();
+      this.db.logOp('claim-resolve', { id, action, success: r.success, ...(r.changed === false ? { changed: false } : {}) });
+      if (r.success && r.changed !== false) this.#markVaultDirty();
       return r;
     });
   }
@@ -1860,20 +1888,27 @@ export class Orchestrator {
   /**
    * `claim-resolve <id> --replace-neighbor` (2026-11-10, INTEGRATION-MODES §6 6f; CLI only — the MCP `claim_resolve`
    * tool keeps accept | reject): accept this deferred claim AND supersede its contradicting neighbour by it with
-   * the existing supersede mechanics, in one transaction (ClaimStore.replaceNeighbor). Refused (`{ success: false,
-   * denied, id, message }`, nothing written but the log row and receipts) when the claim is unknown (not-found), not
-   * deferred (not-deferred), records no neighbour (no-neighbor), the neighbour is not live (neighbor-not-live) or of
-   * higher authority (neighbor-authority), or the transition verifier — the receipt supersedeClaim writes —
-   * denies the pair (transition-verifier). Then the superseded neighbour's dependency path is flagged for review,
-   * as any supersede (stalePath). Governed as op 'claim-resolve' (action 'replace-neighbor'); logged as claim-resolve.
-   * → { success: true, id, status: 'active', neighbor: { id, status: 'superseded' }, stalePath: [node ids] }
+   * the existing supersede chain fields. Checks (ClaimStore.replaceNeighborCheck), the transition verifier with its
+   * `transition:supersede` receipt, the write, the `claim-resolve` log row and the stale-path flags all run inside
+   * ONE BEGIN IMMEDIATE transaction: all of it lands or none. Refused (`{ success: false, denied, id, message }`,
+   * plus `status` and `resolution` for not-deferred; nothing written but the log row and receipts), in order:
+   * not-found · not-deferred · claim-source-gone · claim-stance · no-neighbor · neighbor-not-live ·
+   * neighbor-authority · transition-verifier. A repeat of a replacement that already holds (the claim active by a
+   * recorded replace-neighbor resolution, its neighbour superseded by it) answers `{ success: true, changed: false,
+   * …, stalePath: [] }` and writes nothing. Stale-path flagging applies rule (ii) only (#flagStalePath). Governed as
+   * op 'claim-resolve' (action 'replace-neighbor'); logged as claim-resolve.
+   * → { success: true, changed, id, status: 'active', neighbor: { id, status: 'superseded' }, stalePath: [node ids] }
    */
   async resolveDeferredReplacingNeighbor(id) {
     if (typeof id !== 'string' || !ENTRY_STATUS_ID_RE.test(id)) throw new Error(`claim-resolve needs one <claimId> (got ${String(id ?? '').slice(0, 40) || 'none'})`);
-    return governed(this.gov, 'claim-resolve', { id, action: 'replace-neighbor' }, () => {
-      const deny = (denied, message) => { this.db.logOp('claim-resolve', { id, action: 'replace-neighbor', success: false, denied }); return { success: false, denied, id, message }; };
+    const done = (chk) => ({ success: true, changed: false, id, status: chk.claim.status, neighbor: { id: chk.neighbor.id, status: chk.neighbor.status }, stalePath: [] });
+    const pre = this.claims.replaceNeighborCheck(id);
+    if (pre.done) return done(pre);
+    return governed(this.gov, 'claim-resolve', { id, action: 'replace-neighbor' }, () => this.db.tx(() => {
+      const deny = (denied, message, extra = {}) => { this.db.logOp('claim-resolve', { id, action: 'replace-neighbor', success: false, denied }); return { success: false, denied, id, ...extra, message }; };
       const chk = this.claims.replaceNeighborCheck(id);
-      if (chk.denied) return deny(chk.denied, chk.message);
+      if (chk.done) return done(chk);
+      if (chk.denied) return deny(chk.denied, chk.message, chk.extra);
       if (this.cfg.transitions?.enabled !== false) {
         const verdict = verifyTransition({ before: chk.neighbor.content, after: chk.claim.content }, this.cfg.transitions);
         auditTransition(this.db, 'supersede', { ...verdict, oldId: chk.neighbor.id, claimId: id, by: 'replace-neighbor' }, { before: chk.neighbor.content, after: chk.claim.content });
@@ -1882,12 +1917,12 @@ export class Orchestrator {
           return deny('transition-verifier', `the replacement is off-subject (subject overlap ${verdict.subjectOverlap} < ${verdict.gates.minSubjectOverlap})`);
         }
       }
-      const r = this.claims.replaceNeighbor(id);
-      if (!r.success) return deny(r.denied, r.message);
+      const r = this.claims.replaceNeighborWrite(chk.claim, chk.neighbor);
       this.db.logOp('claim-resolve', { id, action: 'replace-neighbor', success: true, neighbor: r.neighbor.id });
+      const stalePath = this.#flagStalePath(chk.neighbor, { sourceNodes: false });
       this.#markVaultDirty();
-      return { ...r, stalePath: this.#flagStalePath(chk.neighbor) };
-    });
+      return { success: true, changed: true, ...r, stalePath };
+    }, { immediate: true }));
   }
 
   /** Re-judge write-time `contradictory` tags against the containment floor (2026-10-05): below-floor

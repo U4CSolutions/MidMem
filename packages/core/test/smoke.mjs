@@ -4454,7 +4454,15 @@ try {
   const { loadConfig: loadConfig77 } = await import('../src/index.mjs');
   const L77 = 'kb-77';
   const base77 = (dir, extra = {}) => base53(dir, { vaultPath: path.join(tmp, dir, 'vault'), export: { enabled: false }, maintenance: { ...loadConfig77().maintenance, enabled: false, reextractLimit: 0, reembedLimit: 0 }, ...extra });
-  const ing77 = (o7, lib, docId, content, extra = {}) => o7.ingestContent({ content, source: { libraryId: lib, docId, canonicalUri: `https://news.example.test/${lib}/${docId}` }, type: 'web-article', authority: 'web', project: 'library', title: `Title ${docId}`, ...extra });
+  // Approval needs a model-extracted capture (D1 ruling, 2026-11-10: `fallback-extraction`). These fixtures ingest with the model
+  // off and then record the extraction as the model's (model77) — they test the approval rules, not the extractor; §83 runs
+  // KC's own path (a file ingest through the CLI with the loopback fake model) and the fallback refusal.
+  const model77 = (o7, id) => o7.db.prepare("UPDATE entries SET provenance=json_set(provenance,'$.extraction.mode','lmstudio','$.extraction.model','stub/model-77') WHERE id=?").run(id);
+  const ing77 = async (o7, lib, docId, content, extra = {}, { model = true } = {}) => {
+    const r = await o7.ingestContent({ content, source: { libraryId: lib, docId, canonicalUri: `https://news.example.test/${lib}/${docId}` }, type: 'web-article', authority: 'web', project: 'library', title: `Title ${docId}`, ...extra });
+    if (model && r?.entry?.id) model77(o7, r.entry.id);
+    return r;
+  };
   const row77 = (o7, id) => o7.db.prepare('SELECT tier, status, expires_at, project, trust_score, retrieval_count, helpful_count, favorite, favorite_helpful, scope, type, content, provenance FROM entries WHERE id=?').get(id);
   const view77 = (o7, id) => o7.entryStatus({ ids: [id] }).entries[0];
   const audits77 = (o7, kind) => o7.db.prepare('SELECT detail FROM audit WHERE kind=? ORDER BY id').all(kind).map((r) => JSON.parse(r.detail));
@@ -4479,9 +4487,9 @@ try {
       'entries before: thresholds.operatorApproval true; approval {eligible:true, blockedBy:[], approvedAt:null, via:null, revocable:false} while the earned rule still blocks (no usage); wisdomBy null');
     const c77 = cli53(db77, 'approve-wisdom', A, '--note', 'Operator read it twice; a keeper.', '--via', 'knowledge-capture');
     const recA = o77.recall(A).provenance.approval;
-    ok(c77.code === 0 && keys77(c77.out) === 'approval,id,success,tier' && c77.out.success === true && c77.out.id === A && c77.out.tier === 'wisdom'
+    ok(c77.code === 0 && keys77(c77.out) === 'approval,changed,id,success,tier' && c77.out.success === true && c77.out.changed === true && c77.out.id === A && c77.out.tier === 'wisdom'
       && keys77(c77.out.approval) === 'at,via' && c77.out.approval.via === 'knowledge-capture' && c77.out.approval.at === recA?.at,
-      'CLI approve-wisdom <id> --note --via → exit 0, exactly {success, id, tier: wisdom, approval: {at, via}}');
+      'CLI approve-wisdom <id> --note --via → exit 0, exactly {success, changed: true, id, tier: wisdom, approval: {at, via}}');
     // The earned twin: B reaches the earned rule by use and the forced maintain promotes it.
     o77.db.prepare('UPDATE entries SET retrieval_count=5, trust_score=0.7, helpful_count=2 WHERE id=?').run(B);
     const m77 = await o77.maintain({ force: true });
@@ -4546,7 +4554,11 @@ try {
     E77.E = (await ing77(o77, L77, 'doc-e', 'The corvallen77 ferry carries cyclists across the lake at noon. Riders board from the western slipway.')).entry.id;
     o77.db.prepare('UPDATE entries SET expires_at=? WHERE id=?').run(new Date(Date.now() - 1000).toISOString(), E77.E);
     await den77(E77.E, 'not-active', 'an active row whose lease ran out (maintain would sweep it before it could earn anything)');
-    await den77(A, 'already-wisdom', 'the approved entry again');
+    const rowA78 = JSON.stringify(row77(o77, A)), promoteN78 = logs77(o77, 'promote').length;
+    const again78 = await o77.approveWisdom(A, { note: 'a different note', via: 'other-system' });
+    ok(again78.success === true && again78.changed === false && keys77(again78) === 'approval,changed,id,success,tier' && again78.tier === 'wisdom'
+      && again78.approval.at === recA.at && again78.approval.via === 'knowledge-capture' && JSON.stringify(row77(o77, A)) === rowA78 && logs77(o77, 'promote').length === promoteN78,
+      'the approved entry again → {success: true, changed: false}, the ORIGINAL record (the new --note / --via ignored), nothing written — a retry is no refusal');
     await den77(B, 'already-wisdom', 'the earned twin');
     E77.F = (await o77.storeMemory({ content: 'The dravelin77 quarry ships slate to the coast every week.', tier: 'fact', type: 'note' })).id;
     await den77(E77.F, 'not-memory-tier', 'a fact-tier entry (never fact → wisdom)');
@@ -4610,7 +4622,7 @@ try {
     const b79 = row77(o77, A);
     const rv79 = cli53(db77, 'revoke-wisdom', A, '--note', 'Superseded by a newer capture.', '--via', 'knowledge-capture');
     const a79 = row77(o77, A); const p79 = o77.recall(A).provenance;
-    ok(rv79.code === 0 && keys77(rv79.out) === 'approval,expiresAt,id,project,success,tier' && rv79.out.success === true && rv79.out.tier === 'memory' && rv79.out.project === 'library'
+    ok(rv79.code === 0 && keys77(rv79.out) === 'approval,changed,expiresAt,id,project,success,tier' && rv79.out.success === true && rv79.out.changed === true && rv79.out.tier === 'memory' && rv79.out.project === 'library'
       && Math.abs(days77(rv79.out.expiresAt) - 90) < 0.01 && rv79.out.expiresAt === a79.expires_at && keys77(rv79.out.approval) === 'at,revokedAt,via' && rv79.out.approval.at === recA.at && rv79.out.approval.via === 'knowledge-capture',
       'CLI revoke-wisdom <id> --note --via → exit 0, {success, id, tier: memory, expiresAt (a fresh 90-day web-article lease), project (the lift undone), approval: {at, via, revokedAt}}');
     ok(a79.tier === 'memory' && a79.status === 'active' && a79.project === 'library' && a79.trust_score === b79.trust_score && a79.retrieval_count === b79.retrieval_count && a79.helpful_count === b79.helpful_count
@@ -4631,7 +4643,11 @@ try {
         `revoke-wisdom: ${label} → denied ${code}, nothing moves, logged revoke-wisdom-denied`);
     };
     await rden79('memory-nope77-000000000000', 'not-found', 'an unknown id');
-    await rden79(A, 'not-wisdom', 'the revoked entry again (memory now)');
+    const rowA79 = JSON.stringify(row77(o77, A)), revN79 = logs77(o77, 'revoke-wisdom').length;
+    const again79 = await o77.revokeWisdom(A, { note: 'again' });
+    ok(again79.success === true && again79.changed === false && keys77(again79) === 'approval,changed,expiresAt,id,project,success,tier' && again79.tier === 'memory' && again79.expiresAt === a79.expires_at
+      && again79.project === 'library' && JSON.stringify(again79.approval) === JSON.stringify(rv79.out.approval) && JSON.stringify(row77(o77, A)) === rowA79 && logs77(o77, 'revoke-wisdom').length === revN79,
+      'the revoked entry again → {success: true, changed: false} with the same keys (its current lease and project, the revoked record), nothing written');
     await rden79(B, 'not-operator-approved', 'earned wisdom');
     await rden79(E77.C, 'not-operator-approved', 'curated wisdom');
     E77.X = (await ing77(o77, L77, 'doc-x', 'The silvercombe77 bridge opens for tall ships twice a day. Keepers ring a bell before each lift.')).entry.id;
@@ -4643,7 +4659,7 @@ try {
     await rden79(E77.X, 'not-active', 'an approved entry archived since');
     const N79 = (await ing77(o77, L77, 'doc-n', 'The ashgrove77 council approved new cycle lanes for the old town. Work starts in the spring.', { type: 'news' })).entry.id;
     const pf79 = path.join(tmp, 'c77', 'plain79.md'); fs.writeFileSync(pf79, 'The orrindale77 allotments measured soil acidity across forty plots. Gardeners limed the most acidic beds.');
-    const P79 = (await o77.ingest({ path: pf79, type: 'note' })).entry.id;
+    const P79 = (await o77.ingest({ path: pf79, type: 'note' })).entry.id; model77(o77, P79);
     const an79 = await o77.approveWisdom(N79), ap79 = await o77.approveWisdom(P79);
     const rn79 = await o77.revokeWisdom(N79), rp79 = await o77.revokeWisdom(P79);
     ok(an79.success && ap79.success && rn79.success && Math.abs(days77(rn79.expiresAt) - 45) < 0.01 && rp79.success && Math.abs(days77(rp79.expiresAt) - 30) < 0.01 && o77.recall(P79).type === 'ingest' && rp79.project === null,
@@ -4685,7 +4701,7 @@ try {
     o77.db.prepare('UPDATE entries SET retrieval_count=5, helpful_count=2, trust_score=0.7 WHERE id=?').run(A);
     const m80e = await o77.maintain({ force: true });
     const pe80 = o77.recall(A).provenance, ve80 = view77(o77, A);
-    ok(m80e.promoted.some((p) => p.id === A && p.to === 'wisdom') && o77.recall(A).tier === 'wisdom' && !!pe80.approval.revokedAt && pe80.approvalHistory?.length === 1 && ve80.promotion.wisdomBy === null
+    ok(m80e.promoted.some((p) => p.id === A && p.to === 'wisdom') && o77.recall(A).tier === 'wisdom' && !!pe80.approval.revokedAt && pe80.approval.endedBy === 'promote' && pe80.approval.endedTier === 'wisdom' && pe80.approvalHistory?.length === 1 && ve80.promotion.wisdomBy === null
       && ve80.approval.revocable === false && (await o77.revokeWisdom(A)).denied === 'not-operator-approved',
       'once it qualifies by use, maintain promotes the revoked entry the earned way: wisdom again, the revoked records stay history, wisdomBy null, revoke answers not-operator-approved');
     E77.Y = (await ing77(o77, L77, 'doc-y', 'The windmere77 pottery fires its kiln on Thursdays. Apprentices load the shelves at dawn.')).entry.id;
@@ -4719,7 +4735,7 @@ try {
     const rQ80 = await o77.revokeWisdom(E77.Q), a2Q80 = await o77.approveWisdom(E77.Q);
     const hQ80 = o77.recall(E77.Q).provenance.approvalHistory;
     ok(aQ80.success && dQ80.success !== false && vQ80.tier === 'memory' && vQ80.approval.approvedAt === null && vQ80.approval.revocable === false && vQ80.approval.eligible === true
-      && rQ80.denied === 'not-wisdom' && a2Q80.success && hQ80?.length === 1 && hQ80[0].at === aQ80.approval.at && !hQ80[0].revokedAt,
+      && rQ80.denied === 'not-wisdom' && a2Q80.success && a2Q80.changed === true && hQ80?.length === 1 && hQ80[0].at === aQ80.approval.at && !hQ80[0].revokedAt && hQ80[0].endedBy === 'promote' && hQ80[0].endedTier === 'memory',
       'promote <id> memory (the existing agent verb) moving an approved entry down leaves no live approval: approvedAt null, not revocable, eligible; the next approval keeps the bypassed record as history');
     {
       const { startFakeOpenAI } = await import('./helpers/fake-openai.mjs');
@@ -4727,19 +4743,19 @@ try {
       fake80.state.grounded = (t) => [...new Set(t.toLowerCase().match(/\b[a-z]{9,}\b/g) || [])].slice(0, 2);
       const o80 = new Orchestrator(base77('c80', { llmEndpoint: fake80.url, embedModel: 'stub-embed', extractModel: 'stub/extract-80', llmTimeoutMs: 5000 }));
       try {
-        const X = (await ing77(o80, 'kb-80', 'doc-x', 'The ravenscar80 harbour authority dredged the northern channel in spring. Pilots reported smoother approaches afterwards.')).entry.id;
-        const Y = (await ing77(o80, 'kb-80', 'doc-y', 'The fallowmere80 observatory catalogued variable stars during the winter. Astronomers compared brightness curves.')).entry.id;
+        o80.cfg.llmEnabled = true; // KC's production path: the captures are model-extracted (the loopback fake model)
+        const X = (await ing77(o80, 'kb-80', 'doc-x', 'The ravenscar80 harbour authority dredged the northern channel in spring. Pilots reported smoother approaches afterwards.', {}, { model: false })).entry.id;
+        const Y = (await ing77(o80, 'kb-80', 'doc-y', 'The fallowmere80 observatory catalogued variable stars during the winter. Astronomers compared brightness curves.', {}, { model: false })).entry.id;
         const ax80 = await o80.approveWisdom(X, { note: 'reextract fixture' });
         o80.db.prepare('UPDATE entries SET retrieval_count=5, trust_score=0.7, helpful_count=2 WHERE id=?').run(Y);
         await o80.maintain({ force: true });
-        const px = JSON.stringify(o80.recall(X).provenance), cx = o80.recall(X).content;
-        o80.cfg.llmEnabled = true;
-        const r1 = await o80.reextract({ libraryId: 'kb-80' });
-        ok(ax80.success && o80.recall(X).tier === 'wisdom' && o80.recall(Y).tier === 'wisdom' && r1.skipped.denied === 2 && r1.reextracted === 0 && JSON.stringify(o80.recall(X).provenance) === px && o80.recall(X).content === cx && fake80.state.chatCalls === 0,
+        const px = JSON.stringify(o80.recall(X).provenance), cx = o80.recall(X).content, calls80 = fake80.state.chatCalls;
+        const r1 = await o80.reextract({ libraryId: 'kb-80', all: true });
+        ok(ax80.success && o80.recall(X).provenance.extraction?.mode === 'lmstudio' && o80.recall(X).tier === 'wisdom' && o80.recall(Y).tier === 'wisdom' && r1.skipped.denied === 2 && r1.reextracted === 0 && JSON.stringify(o80.recall(X).provenance) === px && o80.recall(X).content === cx && fake80.state.chatCalls === calls80,
           'reextract after approve: the approved entry counts skipped.denied exactly as the earned twin (the wisdom tier is never rewritten); no model call; the record untouched');
         const rvx = await o80.revokeWisdom(X);
         const exp = o80.recall(X).expires_at;
-        const r2 = await o80.reextract({ libraryId: 'kb-80', docIds: ['doc-x'] });
+        const r2 = await o80.reextract({ libraryId: 'kb-80', docIds: ['doc-x'], all: true });
         const axr = o80.recall(X);
         ok(rvx.success && r2.reextracted === 1 && axr.provenance.extraction?.mode === 'lmstudio' && axr.tier === 'memory' && axr.expires_at === exp && axr.provenance.approval?.revokedAt === rvx.approval.revokedAt && axr.provenance.approval.note === 'reextract fixture',
           'after the revoke the entry is re-extracted in place (model mode; id, tier and lease kept) and the approval record survives in provenance');
@@ -4788,7 +4804,7 @@ try {
       const row81 = (id) => lib81.out.claims.find((c) => c.id === id);
       const ROW81 = 'authority,content,deferReason,deferredAt,docId,entryId,id,libraryId,neighbor,relation,sourceTitle,stance,status';
       const NB81 = 'authority,content,docId,entryId,id,libraryId,sourceTitle,stance,status';
-      ok(lib81.code === 0 && keys77(lib81.out) === 'claims,total' && lib81.out.total === 5 && JSON.stringify(ids81(lib81)) === JSON.stringify([d2.claim, d7.claim, d4.claim, w5.claim, z6.claim])
+      ok(lib81.code === 0 && keys77(lib81.out) === 'claims,staleOmitted,total' && lib81.out.staleOmitted === 0 && lib81.out.total === 5 && JSON.stringify(ids81(lib81)) === JSON.stringify([d2.claim, d7.claim, d4.claim, w5.claim, z6.claim])
         && lib81.out.claims.every((c) => keys77(c) === ROW81) && !ids81(lib81).includes(e2.claim),
         'claims-deferred --library: {total, claims} — that library\'s five, oldest first, every row with the fixed keys; another library\'s claim absent');
       const r2 = row81(d2.claim);
@@ -4802,7 +4818,7 @@ try {
       const pg81 = cli53(db81, 'claims-deferred', '--library', L81, '--limit', '2', '--offset', '1');
       const other81 = o81.deferredClaimsForLibrary({ libraryId: L81b }), none81 = cli53(db81, 'claims-deferred', '--library', 'kb-nobody-81');
       ok(pg81.code === 0 && pg81.out.total === 5 && JSON.stringify(ids81(pg81)) === JSON.stringify([d7.claim, d4.claim]) && other81.total === 1 && other81.claims[0].id === e2.claim && other81.claims[0].neighbor.id === e1.claim
-        && none81.code === 0 && JSON.stringify(none81.out) === '{"total":0,"claims":[]}',
+        && none81.code === 0 && JSON.stringify(none81.out) === '{"total":0,"staleOmitted":0,"claims":[]}',
         'paging (--limit 2 --offset 1 → the 2nd and 3rd, total 5); the other library sees only its own; an unknown library → {total: 0, claims: []}');
       const ub81 = [['--library', L81, '--limit', '201'], ['--library', L81, '--limit', '0'], ['--limit', '5'], ['--offset', '1'], ['--library', 'bad lib!'], ['--library', L81, 'extra'], ['--library', L81, '--limit', '-1'], ['--library']]
         .map((a) => cli53(db81, 'claims-deferred', ...a));
@@ -4812,7 +4828,7 @@ try {
       const rden81 = async (id, code, label) => {
         const before = claimsDigest81();
         const r = await o81.resolveDeferredReplacingNeighbor(id);
-        ok(r.success === false && r.denied === code && r.id === id && keys77(r) === 'denied,id,message,success' && claimsDigest81() === before
+        ok(r.success === false && r.denied === code && r.id === id && keys77(r) === (code === 'not-deferred' ? 'denied,id,message,resolution,status,success' : 'denied,id,message,success') && claimsDigest81() === before
           && o81.db.prepare("SELECT detail FROM log WHERE operation='claim-resolve' ORDER BY id DESC LIMIT 1").get() && JSON.parse(o81.db.prepare("SELECT detail FROM log WHERE operation='claim-resolve' ORDER BY id DESC LIMIT 1").get().detail).denied === code,
           `--replace-neighbor: ${label} → denied ${code}, no claim row changes; logged claim-resolve {success:false, denied}`);
       };
@@ -4827,7 +4843,7 @@ try {
       ok(JSON.parse(o81.db.prepare("SELECT detail FROM audit WHERE kind='transition:supersede' ORDER BY id DESC LIMIT 1").get().detail).pass === false, 'the denied pair left its transition:supersede receipt (pass false)');
       const rs81 = cli53(db81, 'claim-resolve', d2.claim, '--replace-neighbor');
       const c2 = st81(d2.claim), c1 = st81(n1.claim);
-      ok(rs81.code === 0 && keys77(rs81.out) === 'id,neighbor,stalePath,status,success' && rs81.out.success === true && rs81.out.id === d2.claim && rs81.out.status === 'active'
+      ok(rs81.code === 0 && keys77(rs81.out) === 'changed,id,neighbor,stalePath,status,success' && rs81.out.success === true && rs81.out.changed === true && rs81.out.id === d2.claim && rs81.out.status === 'active'
         && JSON.stringify(rs81.out.neighbor) === JSON.stringify({ id: n1.claim, status: 'superseded' }) && Array.isArray(rs81.out.stalePath),
         'CLI claim-resolve <id> --replace-neighbor → exit 0, {success, id, status: active, neighbor: {id, status: superseded}, stalePath}');
       ok(c2.status === 'active' && c2.metadata.supersedes === n1.claim && c2.metadata.deferredResolution?.action === 'replace-neighbor' && c2.metadata.judged?.action === 'replace-neighbor' && c2.metadata.judged.from === 'contradictory'
@@ -4898,6 +4914,240 @@ try {
       'the CLI usage text (and so docs/reference/CLI.md) lists each verb\'s codes in check order');
     ok(/earned by use, or approved by the operator in person/.test(con82) && /never by an LLM/.test(con82) && /Operator-approved wisdom/.test(ops82) && /revoke-wisdom/.test(ops82) && /approval\.by/.test(ops82),
       'CONCEPTS states the promotion principle (earned by use, or approved by the operator in person — never by an LLM); OPERATIONS has the receipts, the listing and the revoke');
+  }
+
+  // 83. Fix round 1 (adversarial review of 83abde3, 2026-11-10). KC's own call shape — a stable file per source, ingested
+  //     through the CLI with its library identity, the model on (the loopback fake model) — and the review's findings:
+  //     D1 fallback-extraction + what approval gives; F1 a superseded capture version's deferred claim (left out of the
+  //     queue, refused claim-source-gone, swept as source-gone) and claim-stance; F2 every write form repeatable
+  //     (changed:false; accept / reject repeats; refusals that say what the record holds); F3 BEGIN IMMEDIATE (concurrent
+  //     approvals, a held lock); F4 an approval ended by another road (promote --curated, demote + earned); F5 strict
+  //     claim-resolve / claims-deferred; F6 rule (ii) only; F7 note / via rules; F8 the log row inside the transaction;
+  //     the surviving mutants M08, M10, M15, M16, M17, M19; F9 the generated table; D2 the documented reach.
+  {
+    const { startFakeOpenAI } = await import('./helpers/fake-openai.mjs');
+    const fake83 = await startFakeOpenAI({ dim: 16 });
+    fake83.state.grounded = (t) => [...new Set(t.toLowerCase().match(/\b[a-z]{9,}\b/g) || [])].slice(0, 2);
+    const dir83 = path.join(tmp, 'c83');
+    const db83 = path.join(dir83, 'state.db');
+    const L83 = 'kb-83';
+    const o83 = new Orchestrator(base77('c83'));
+    try {
+      const art83 = (doc) => { const d = path.join(dir83, 'archive', 'web', doc); fs.mkdirSync(d, { recursive: true }); return path.join(d, 'article.md'); };
+      const modelEnv83 = { MIDMEM_LLM_ENABLED: '1', MIDMEM_LLM_ENDPOINT: fake83.url, MIDMEM_EXTRACT_MODEL: 'stub/extract-83', MIDMEM_EMBED_MODEL: 'stub-embed', MIDMEM_LLM_TIMEOUT_MS: '5000', MIDMEM_EMBED_RETRIES: '0' };
+      const cli83 = (extraEnv, ...args) => {
+        const r = spawnSync(process.execPath, [path.join(bin53, 'cli.mjs'), ...args], { env: { ...env53(db83), ...extraEnv }, encoding: 'utf8', timeout: 30000 });
+        let out = null; try { out = JSON.parse(r.stdout); } catch { /* not JSON */ }
+        return { code: r.status, out, err: r.stderr };
+      };
+      // Async: the fake model lives in THIS process, so a model-on child must not block its event loop (spawnSync would).
+      const cliAsync83 = (extraEnv, ...args) => new Promise((resolve) => {
+        const p = spawn(process.execPath, [path.join(bin53, 'cli.mjs'), ...args], { env: { ...env53(db83), ...extraEnv } });
+        let so = '', se = ''; p.stdout.on('data', (d) => { so += d; }); p.stderr.on('data', (d) => { se += d; });
+        p.on('close', (code) => { let out = null; try { out = JSON.parse(so); } catch { /* not JSON */ } resolve({ code, out, err: se }); });
+      });
+      const kc83 = async (doc, text, extraEnv = {}) => {
+        fs.writeFileSync(art83(doc), text);
+        return cliAsync83(extraEnv, 'ingest', art83(doc), '--type', 'web-article', '--authority', 'web', '--scope', 'shared', '--project', 'library', '--title', `Title ${doc}`,
+          '--source-uri', `https://news.example.test/83/${doc}`, '--canonical-uri', `https://news.example.test/83/${doc}`, '--library', L83, '--doc-id', doc, '--capture-method', 'url_fetch', '--captured-at', '2026-11-10T00:00:00Z');
+      };
+      const claimsOf83 = (entryId) => o83.db.prepare("SELECT id FROM claims WHERE json_extract(source,'$.sourceId') = ? ORDER BY rowid").all(o83.recall(entryId).source_id).map((r) => r.id);
+      const st83 = (id) => o83.claims.get(id)?.status;
+      const digest83 = () => JSON.stringify(o83.db.prepare('SELECT id, status, metadata FROM claims ORDER BY rowid').all()) + '|' + o83.db.prepare('SELECT COUNT(*) c FROM log').get().c;
+      const pair83 = async (tag, yes, no) => { const a = (await kc83(`${tag}-n`, yes)).out.entry.id, b = (await kc83(`${tag}-d`, no)).out.entry.id; return { nEntry: a, dEntry: b, n: claimsOf83(a)[0], d: claimsOf83(b)[0] }; };
+
+      // D1 — KC's file ingest: a model-extracted capture is approved; a fallback-extracted one is refused, and entries predicts it.
+      const m83 = await kc83('d-model', 'The brightwell83 lighthouse keeps a fog signal log for the northern strait. Keepers record every blast with the measured visibility.', modelEnv83);
+      const f83 = await kc83('d-fallback', 'The coldharbour83 granary stores rye for the upland bakers. Millers weigh each sack at dusk.');
+      const eM = m83.out?.entry?.id, eF = f83.out?.entry?.id;
+      const vF = cli83({}, 'entries', '--library', L83, '--doc-ids', 'd-fallback').out?.entries?.[0];
+      const aF = cli83({}, 'approve-wisdom', eF), aM = cli83({}, 'approve-wisdom', eM, '--via', 'knowledge-capture');
+      ok(m83.code === 0 && m83.out.mode === 'lmstudio' && f83.code === 0 && f83.out.mode === 'fallback' && JSON.stringify(vF?.approval?.blockedBy) === '["fallback-extraction"]' && vF.approval.eligible === false
+        && aF.code === 0 && aF.out?.denied === 'fallback-extraction' && o83.recall(eF).tier === 'memory' && aM.code === 0 && aM.out?.success === true && aM.out.changed === true && o83.recall(eM).tier === 'wisdom',
+        "D1: KC's file ingest through the CLI — the model-extracted capture is approved; the fallback-extracted one is refused fallback-extraction, as entries predicts (blockedBy [fallback-extraction])");
+      o83.db.prepare("UPDATE entries SET provenance=json_set(provenance,'$.grounding.summaryScore',0.1) WHERE id=?").run(eF);
+      const fL = (await o83.ingestContent({ content: 'The legacy83 ferry crosses the bay twice a day. Pilots log each crossing.', source: { libraryId: L83, docId: 'd-legacy', canonicalUri: 'https://news.example.test/83/d-legacy' }, type: 'web-article', authority: 'web' })).entry.id;
+      o83.db.prepare("UPDATE entries SET provenance=json_remove(provenance,'$.extraction') WHERE id=?").run(fL); // ingested before 2026-10-07: no record
+      ok((await o83.approveWisdom(eF)).denied === 'fallback-extraction' && JSON.stringify(o83.entryStatus({ ids: [eF] }).entries[0].approval.blockedBy) === '["fallback-extraction","grounding-below-floor"]'
+        && (await o83.approveWisdom(fL)).denied === 'fallback-extraction',
+        'D1 check order: fallback-extraction answers before grounding-below-floor (entries lists both); an ingested entry with no extraction record counts as not model-extracted');
+      const long83 = 'The verbatim83 archive note: ' + Array.from({ length: 24 }, (_, i) => `entry ${i} of the ledger keeps its measured value.`).join(' ');
+      const V1 = (await o83.storeMemory({ content: long83, tier: 'memory', type: 'note', scope: 'shared' })).id;
+      const V2 = (await o83.storeMemory({ content: long83.replace(/verbatim83/g, 'twinnote83'), tier: 'memory', type: 'note', scope: 'shared' })).id;
+      const av83 = await o83.approveWisdom(V1);
+      const qv1 = (await o83.query('verbatim83 archive note ledger', { audit: true, limit: 5 })).results.find((r) => r.id === V1);
+      const qv2 = (await o83.query('twinnote83 archive note ledger', { audit: true, limit: 5 })).results.find((r) => r.id === V2);
+      ok(long83.length > 600 && av83.success === true && qv1?.fidelity === 'verbatim' && qv1.content === long83 && qv1.truncated === false && qv2?.fidelity === 'loss-limited' && qv2.content.length === 601 && qv2.truncated === true,
+        'D1, what the approval gives (as earned wisdom has it): the verbatim fidelity class — the whole entry, up to the 4,000-character cap, where its memory twin returns the 600-character preview; a direct write is never refused fallback-extraction');
+
+      // F1 — a re-capture (the same file, new content) leaves the old version's deferred claim in the ledger only.
+      const n83 = await kc83('d-n', 'The quillon83 ferry departs the eastern pier at seven every morning.');
+      const v1 = await kc83('d-v', 'The quillon83 ferry never departs the eastern pier at seven every morning.');
+      const nC = claimsOf83(n83.out.entry.id)[0], v1C = claimsOf83(v1.out.entry.id)[0];
+      const v2 = await kc83('d-v', 'The quillon83 ferry never departs the eastern pier at seven every morning. Timetables changed in May after the pier repair.');
+      const v2C = claimsOf83(v2.out.entry.id).find((id) => /never departs/.test(o83.claims.get(id).content));
+      const q83 = cli83({}, 'claims-deferred', '--library', L83);
+      ok(st83(v1C) === 'deferred' && JSON.stringify(v2.out.superseded) === JSON.stringify([v1.out.entry.id]) && st83(v2C) === 'deferred' && cli83({}, 'claims-deferred').out.some((c) => c.id === v1C)
+        && q83.code === 0 && q83.out.total === 1 && q83.out.staleOmitted === 1 && q83.out.claims.length === 1 && q83.out.claims[0].id === v2C && q83.out.claims[0].entryId === v2.out.entry.id,
+        'F1b: after a re-capture the old version\'s deferred claim is still in the whole ledger, but claims-deferred --library leaves it out (staleOmitted 1, total 1) and lists only the current version\'s');
+      const g83 = cli83({}, 'claim-resolve', v1C, '--replace-neighbor');
+      ok(g83.code === 0 && g83.out?.success === false && g83.out.denied === 'claim-source-gone' && st83(v1C) === 'deferred' && st83(nC) === 'active',
+        "F1a: --replace-neighbor on the superseded version's claim → claim-source-gone; the live neighbour stays");
+      const sw83 = await o83.claimsSweep({ fragments: false });
+      ok(st83(v1C) === 'archived' && o83.claims.get(v1C).metadata.archivedBy?.reason === 'source-gone' && !o83.claims.deferred().some((c) => c.id === v1C) && st83(v2C) === 'deferred' && sw83.orphans >= 1,
+        "F1c: claims-sweep's orphan rule already covers deferred claims: it archives the old version's claim as source-gone; the current version's stays queued");
+      const r83 = cli83({}, 'claim-resolve', v2C, '--replace-neighbor');
+      ok(r83.code === 0 && r83.out?.success === true && r83.out.changed === true && st83(nC) === 'superseded' && o83.currentClaims('quillon83 ferry eastern pier seven morning').some((c) => c.id === v2C),
+        "the current version's claim replaces the neighbour and is what the current read returns");
+      const s83 = await pair83('d-s', 'The brannock83 mill grinds barley for the valley bakers on Tuesdays.', 'The brannock83 mill does not grind barley for the valley bakers on Tuesdays.');
+      o83.db.prepare("UPDATE claims SET metadata=json_set(metadata,'$.stance','quoted') WHERE id=?").run(s83.d); // as claims-restance can re-tag a deferred claim
+      const sg83 = await o83.resolveDeferredReplacingNeighbor(s83.d);
+      ok(sg83.success === false && sg83.denied === 'claim-stance' && st83(s83.d) === 'deferred' && st83(s83.n) === 'active',
+        'F1d: a deferred claim that is no observed fact (stance quoted, as claims-restance can re-tag one) → claim-stance; nothing changes');
+      o83.db.prepare("UPDATE claims SET metadata=json_set(metadata,'$.stance','observed') WHERE id=?").run(s83.d);
+
+      // F2 — every form may be repeated: changed:false when it already holds by this road; refusals say what the record holds.
+      const d0 = digest83();
+      const rr83 = cli83({}, 'claim-resolve', v2C, '--replace-neighbor');
+      ok(rr83.code === 0 && JSON.stringify(rr83.out) === JSON.stringify({ success: true, changed: false, id: v2C, status: 'active', neighbor: { id: nC, status: 'superseded' }, stalePath: [] }) && digest83() === d0,
+        'F2: a repeated --replace-neighbor → {success, changed: false, id, status, neighbor, stalePath: []}, nothing written (no log row either)');
+      const acc1 = cli83({}, 'claim-resolve', s83.d), acc2 = cli83({}, 'claim-resolve', s83.d);
+      const rj = await pair83('d-r', 'The halloway83 bell rings across the harbour at dusk.', 'The halloway83 bell never rings across the harbour at dusk.');
+      const rj1 = cli83({}, 'claim-resolve', rj.d, '--reject'), rj2 = cli83({}, 'claim-resolve', '--reject', rj.d), rj3 = cli83({}, 'claim-resolve', rj.d), rp3 = cli83({}, 'claim-resolve', s83.d, '--replace-neighbor');
+      ok(acc1.code === 0 && keys77(acc1.out) === 'id,judged,status,success' && acc1.out.status === 'active' && acc2.code === 0 && JSON.stringify(acc2.out) === JSON.stringify({ success: true, changed: false, id: s83.d, status: 'active' })
+        && rj1.code === 0 && keys77(rj1.out) === 'id,status,success' && rj1.out.status === 'archived' && JSON.stringify(rj2.out) === JSON.stringify({ success: true, changed: false, id: rj.d, status: 'archived' }),
+        'F2: accept and --reject answer the first call exactly as before; a repeat of the same resolution → {success: true, changed: false, id, status} (--reject before the id works too)');
+      ok(rj3.code === 0 && JSON.stringify(rj3.out) === JSON.stringify({ success: false, denied: 'not-deferred', id: rj.d, status: 'archived', resolution: 'reject', message: "not deferred: 'archived'" })
+        && rp3.code === 0 && rp3.out.success === false && rp3.out.denied === 'not-deferred' && rp3.out.status === 'active' && rp3.out.resolution === 'accept' && st83(s83.n) === 'active',
+        'F2: any other claim that is not deferred is a final refusal naming denied not-deferred, its status and the recorded resolution (accept after a reject; replace after an accept)');
+
+      // F3 — BEGIN IMMEDIATE: concurrent approvals of one entry both answer exit 0 (one changed:true, one changed:false).
+      const cc83 = [];
+      for (let i = 0; i < 3; i++) {
+        const id = (await kc83(`d-c${i}`, `The concur${'abc'[i]}83 tower rings its bell at noon for the market. Traders open their stalls when it rings.`, modelEnv83)).out.entry.id;
+        const [x, y] = await Promise.all([cliAsync83({}, 'approve-wisdom', id, '--via', 'knowledge-capture'), cliAsync83({}, 'approve-wisdom', id, '--via', 'knowledge-capture')]);
+        cc83.push({ codes: [x.code, y.code], changed: [x.out?.changed, y.out?.changed].sort(), promotes: o83.db.prepare("SELECT COUNT(*) c FROM log WHERE operation='promote' AND json_extract(detail,'$.id')=?").get(id).c, err: (x.err + y.err).slice(0, 80) });
+      }
+      ok(cc83.every((c) => c.codes[0] === 0 && c.codes[1] === 0 && JSON.stringify(c.changed) === '[false,true]' && c.promotes === 1),
+        `F3: two concurrent approve-wisdom children on one entry, 3 rounds: both exit 0, one changed:true and one changed:false, one promote row — never "database is locked" (${JSON.stringify(cc83)})`);
+      const holder83 = (ms) => new Promise((resolve) => {
+        const h = spawn(process.execPath, ['-e', `const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(${JSON.stringify(db83)});d.exec('PRAGMA busy_timeout=5000; BEGIN IMMEDIATE');d.prepare("INSERT INTO log(ts,operation,detail) VALUES('x','holder83','{}')").run();console.log('locked');setTimeout(()=>{d.exec('COMMIT');d.close();},${ms});`], { stdio: ['ignore', 'pipe', 'ignore'] });
+        const closed = new Promise((r) => h.on('close', r));
+        h.stdout.once('data', () => resolve({ closed })); // wrapped: resolving WITH a promise would wait for the release
+      });
+      const idL = (await kc83('d-lock', 'The lockwood83 quarry ships slate to the coast every week. Masons split it by hand.', modelEnv83)).out.entry.id;
+      let held83 = (await holder83(1500)).closed;
+      const shortL = await cliAsync83({}, 'approve-wisdom', idL);
+      await held83;
+      held83 = (await holder83(8000)).closed;
+      const longL = await cliAsync83({}, 'revoke-wisdom', idL);
+      await held83;
+      ok(shortL.code === 0 && shortL.out?.changed === true && longL.code === 1 && /^ERROR: database is locked/m.test(longL.err) && !/\n\s+at /.test(longL.err) && o83.recall(idL).tier === 'wisdom',
+        'F3: a write lock held 1.5 s (under busy_timeout) → the approval waits and lands; held 8 s → exit 1, "ERROR: database is locked" (no stack trace), nothing changed — the transient answer a caller re-reads and retries');
+
+      // F4 — an approval ends when another road moves the entry: promote --curated, or a demote and the earned rule.
+      const listing83 = () => o83.db.prepare(`SELECT id FROM entries WHERE status = 'active' AND tier = 'wisdom'
+        AND json_extract(provenance, '$.approval.by') = 'operator-approval' AND json_extract(provenance, '$.approval.to') = tier
+        AND json_extract(provenance, '$.approval.revokedAt') IS NULL AND json_extract(provenance, '$.approval.endedAt') IS NULL`).all().map((r) => r.id);
+      const idCu = (await kc83('d-cur', 'The curatorial83 museum restored a steam crane for the quay. Volunteers rebuilt its boiler.', modelEnv83)).out.entry.id;
+      const idEa = (await kc83('d-earn', 'The earnshaw83 market sells heritage apples every Saturday. Growers bring forty kinds.', modelEnv83)).out.entry.id;
+      const ok83 = [await o83.approveWisdom(idCu), await o83.approveWisdom(idEa)].every((r) => r.changed === true) && listing83().includes(idCu) && listing83().includes(idEa);
+      await o83.promote(idCu, 'wisdom', { curated: true }); // an agent's curated write: wisdom by another road
+      await o83.promote(idEa, 'memory'); // an agent's demote
+      o83.db.prepare('UPDATE entries SET retrieval_count=5, trust_score=0.7, helpful_count=2 WHERE id=?').run(idEa);
+      const me83 = await o83.maintain({ force: true });
+      const vCu = view77(o83, idCu), vEa = view77(o83, idEa), pCu = o83.recall(idCu).provenance.approval, pEa = o83.recall(idEa).provenance.approval;
+      ok(ok83 && me83.promoted.some((p) => p.id === idEa) && o83.recall(idEa).tier === 'wisdom' && pCu.endedBy === 'promote' && pCu.endedTier === 'wisdom' && !!pCu.endedAt && pEa.endedTier === 'memory'
+        && vCu.approval.revocable === false && vCu.approval.approvedAt === null && vCu.promotion.wisdomBy === null && vEa.approval.revocable === false && vEa.promotion.wisdomBy === null
+        && (await o83.revokeWisdom(idCu)).denied === 'not-operator-approved' && (await o83.revokeWisdom(idEa)).denied === 'not-operator-approved'
+        && (await o83.approveWisdom(idCu)).denied === 'already-wisdom' && !listing83().includes(idCu) && !listing83().includes(idEa) && listing83().includes(eM) && o83.recall(idCu).tier === 'wisdom',
+        'F4: promote --curated on an approved entry, and a demote followed by the earned rule, end the record (endedAt / endedBy / endedTier): not live, not revocable, wisdomBy null, revoke-wisdom refuses (never moves earned or curated wisdom down), approve answers already-wisdom, the OPERATIONS listing leaves both out');
+      await o83.promote(idEa, 'memory');
+      const reA83 = await o83.approveWisdom(idEa);
+      ok(reA83.changed === true && view77(o83, idEa).approval.revocable === true && o83.recall(idEa).provenance.approvalHistory?.at(-1)?.endedTier === 'memory', 'F4: a later approval writes a fresh live record; the ended one moves to approvalHistory');
+
+      // F5 — strict claim-resolve and claims-deferred: anything but the named forms is a usage error and writes nothing.
+      const p83 = await pair83('d-p', 'The fenwick83 drawbridge lifts for barges at noon every day.', 'The fenwick83 drawbridge never lifts for barges at noon every day.');
+      const d5 = digest83();
+      const bad83 = [['--replace-neighbour'], ['--replace_neighbor'], ['--replace-neighbor=1'], ['--Replace-Neighbor'], ['--reject-neighbor'], ['--reject', '--reject'], ['--replace-neighbor', '--replace-neighbor'], ['--reject', '--replace-neighbor'], ['--curated']]
+        .map((f) => cli83({}, 'claim-resolve', p83.d, ...f));
+      const two83 = cli83({}, 'claim-resolve', p83.d, p83.n), none83 = cli83({}, 'claim-resolve');
+      const cd83 = [['--foo'], ['--library', L83, '--library', L83], ['--library=kb-83'], ['--library', L83, '--limit', '5', '--limit', '6'], ['--library', L83, '--dryRun']].map((f) => cli83({}, 'claims-deferred', ...f));
+      ok([...bad83, two83, none83, ...cd83].every((r) => r.code === 1 && /ERROR:/.test(r.err) && r.out === null) && digest83() === d5 && st83(p83.d) === 'deferred',
+        'F5: claim-resolve with a misspelt / =value / repeated / second resolution flag, --curated, two ids or none, and claims-deferred with an unknown, repeated or =value flag → exit 1, ERROR:, nothing written (the misspelling no longer accepts the claim)');
+
+      // F6 + M16 — --replace-neighbor flags only rule (ii): the multi-word label the contested claim names, not the
+      // neighbour capture's own nodes (rule i, which supersedeClaim keeps).
+      const named83 = o83.graph.upsertNode({ type: 'concept', label: 'fenwick83 drawbridge barges', source: 'elsewhere-83' });
+      const nbPath83 = o83.claims.get(p83.n).source.path;
+      const own83 = o83.db.prepare('SELECT id FROM nodes WHERE source = ?').all(nbPath83).map((r) => r.id);
+      const rp83 = await o83.resolveDeferredReplacingNeighbor(p83.d);
+      ok(rp83.success === true && rp83.stalePath.includes(named83) && !!o83.graph.node(named83).properties.staleReview && own83.length > 0 && own83.every((n) => !rp83.stalePath.includes(n) && !o83.graph.node(n).properties.staleReview),
+        `F6/M16: the replacement flags the label it names (rule ii) and none of the ${own83.length} nodes the neighbour's capture created (rule i)`);
+
+      // F7 — note / via rules (each flag once; no CR, C1, separators, bidi controls; 500 UTF-16 units; the `password: …` form).
+      const L7 = o83.db.prepare('SELECT COUNT(*) c FROM log').get().c;
+      const bad7 = [['--note', 'a', '--note', 'b'], ['--via', 'kc', '--via', 'kc2'], ['--note', 'line one\r\nline two'], ['--note', 'next\u0085line'], ['--note', 'para\u2028graph'], ['--note', 'pa\u2029ra'],
+        ['--note', 'rtl \u202Eoverride'], ['--note', 'iso \u2066late'], ['--note', 'login password: hunter2hunter2']].map((a) => cli83({}, 'approve-wisdom', eF, ...a));
+      const badR7 = cli83({}, 'revoke-wisdom', eM, '--note', 'x', '--note', 'y');
+      ok([...bad7, badR7].every((r) => r.code === 1 && /ERROR:/.test(r.err)) && o83.db.prepare('SELECT COUNT(*) c FROM log').get().c === L7 && o83.recall(eM).tier === 'wisdom',
+        'F7: a repeated --note / --via, a CR, a C1 control, U+2028 / U+2029, a bidi override or isolate, and a `password: …` note → exit 1, nothing written');
+      const e250 = '\u{1F600}'.repeat(250), e251 = '\u{1F600}'.repeat(251);
+      const ok7 = cli83({}, 'approve-wisdom', eF, '--note', e250, '--via', 'knowledge-capture'), over7 = cli83({}, 'approve-wisdom', eF, '--note', e251);
+      ok(ok7.code === 0 && ok7.out?.denied === 'fallback-extraction' && over7.code === 1 && /500 UTF-16 code units \(got 502\)/.test(over7.err) && cli83({}, 'approve-wisdom', eF, '--note', 'tab\tand\nnewline').code === 0,
+        'F7: the note limit is 500 UTF-16 code units (250 emoji pass, 251 do not); newline and tab are allowed');
+
+      // F8 + M15 — the replace transaction holds both claim writes and its log row: an abort in either rolls all of it back.
+      const t83 = await pair83('d-t', 'The galloway83 pump primes the kelvane coolant loops at dawn.', 'The galloway83 pump never primes the kelvane coolant loops at dawn.');
+      const rcpt83 = () => o83.db.prepare("SELECT COUNT(*) c FROM audit WHERE kind='transition:supersede'").get().c;
+      const try83 = async () => { try { await o83.resolveDeferredReplacingNeighbor(t83.d); return null; } catch (e) { return e.message; } };
+      const r0 = rcpt83();
+      o83.db.exec(`CREATE TRIGGER t83_nb BEFORE UPDATE OF status ON claims WHEN OLD.id = '${t83.n}' AND NEW.status = 'superseded' BEGIN SELECT RAISE(ABORT, 'injected-83-neighbour'); END;`);
+      const x1 = await try83();
+      o83.db.exec('DROP TRIGGER t83_nb');
+      o83.db.exec("CREATE TRIGGER t83_log BEFORE INSERT ON log WHEN NEW.operation = 'claim-resolve' AND json_extract(NEW.detail, '$.success') = 1 BEGIN SELECT RAISE(ABORT, 'injected-83-log'); END;");
+      const x2 = await try83();
+      o83.db.exec('DROP TRIGGER t83_log');
+      ok(/injected-83-neighbour/.test(x1 || '') && /injected-83-log/.test(x2 || '') && st83(t83.d) === 'deferred' && st83(t83.n) === 'active' && rcpt83() === r0,
+        'F8/M15: an abort on the neighbour write, or on the claim-resolve log row, rolls the whole replacement back (claim still deferred, neighbour active, no transition receipt): one transaction');
+      const x3 = await o83.resolveDeferredReplacingNeighbor(t83.d);
+      ok(x3.changed === true && st83(t83.n) === 'superseded' && JSON.parse(o83.db.prepare("SELECT detail FROM log WHERE operation='claim-resolve' ORDER BY id DESC LIMIT 1").get().detail).neighbor === t83.n, 'without the injected faults it lands, with its log row');
+
+      // M08 / M10 / M17 — the in-transaction re-checks and the liveness of `revocable`.
+      const ev83 = o83.gov.evaluator;
+      const idR8 = (await kc83('d-m08', 'The ravelston83 weir lifts its gates when the river runs high. Wardens log each lift.', modelEnv83)).out.entry.id;
+      ev83.evaluate = function (op, ctx) { if (op === 'approve-wisdom' && ctx.id === idR8) o83.db.prepare("UPDATE entries SET status='archived' WHERE id=?").run(idR8); return Object.getPrototypeOf(this).evaluate.call(this, op, ctx); };
+      const m08 = await o83.approveWisdom(idR8);
+      delete ev83.evaluate;
+      ok(m08.denied === 'not-active' && o83.recall(idR8).status === 'archived' && o83.recall(idR8).tier === 'memory' && !o83.recall(idR8).provenance.approval,
+        'M08: an archive landing between the checks and the write → not-active from the re-check under the lock; the row is not resurrected into wisdom');
+      const idR10 = (await kc83('d-m10', 'The tollcross83 ferry carries cyclists across the lake at noon. Riders board from the slipway.', modelEnv83)).out.entry.id;
+      await o83.approveWisdom(idR10);
+      ev83.evaluate = function (op, ctx) { if (op === 'revoke-wisdom' && ctx.id === idR10) o83.db.prepare("UPDATE entries SET provenance=json_set(provenance,'$.approval.endedAt','2026-11-10T00:00:00.000Z','$.approval.endedBy','promote') WHERE id=?").run(idR10); return Object.getPrototypeOf(this).evaluate.call(this, op, ctx); };
+      const m10 = await o83.revokeWisdom(idR10);
+      delete ev83.evaluate;
+      ok(m10.denied === 'not-operator-approved' && o83.recall(idR10).tier === 'wisdom',
+        'M10: another road ending the approval between the checks and the write → not-operator-approved from the re-check; the entry stays wisdom');
+      const idR17 = (await kc83('d-m17', 'The ashcombe83 chapel choir rehearses on Thursdays. Singers warm up with long scales.', modelEnv83)).out.entry.id;
+      await o83.approveWisdom(idR17);
+      const live17 = view77(o83, idR17).approval.revocable;
+      await o83.archiveEntries({ ids: [idR17] });
+      ok(live17 === true && view77(o83, idR17).approval.revocable === false && (await o83.revokeWisdom(idR17)).denied === 'not-active', 'M17: an approved entry archived since is not revocable (entries agrees with revoke-wisdom: not-active)');
+
+      // M19 — a legacy claim (no source.sourceId) maps to its library doc through its source path.
+      const h83 = await pair83('d-h', 'The harrowgate83 kiln fires pottery every Thursday night.', 'The harrowgate83 kiln never fires pottery every Thursday night.');
+      o83.db.prepare("UPDATE claims SET source=json_remove(source,'$.sourceId') WHERE id=?").run(h83.d);
+      const lg83 = o83.deferredClaimsForLibrary({ libraryId: L83, limit: 200 }).claims.find((c) => c.id === h83.d);
+      ok(!o83.claims.get(h83.d).source.sourceId && lg83?.libraryId === L83 && lg83.docId === 'd-h-d' && lg83.entryId === h83.dEntry && lg83.sourceTitle === 'Title d-h-d',
+        'M19: a legacy claim without source.sourceId is still listed, mapped through its source path to its doc id and the active entry');
+
+      // F9 + D2 — the generated CLI table lists the bracket flags; §6 says who can run the writes.
+      const ref83 = fs.readFileSync(path.join(bin53, '..', '..', '..', 'docs', 'reference', 'CLI.md'), 'utf8');
+      const im83 = fs.readFileSync(path.join(bin53, '..', '..', '..', 'docs', 'INTEGRATION-MODES.md'), 'utf8').replace(/\s+/g, ' ');
+      ok(ref83.includes('| `claim-resolve` | `--reject` `--replace-neighbor` |') && ref83.includes('| `claims-deferred` | `--library` `--limit` `--offset` |') && /anything with shell access to the store/.test(im83)
+        && /Retries and unknown outcomes/.test(im83) && /exit 0/.test(im83),
+        'F9/D2: docs/reference/CLI.md lists --replace-neighbor and the claims-deferred flags (gen-docs reads bracket flags); §6 states the retry contract and that anything with shell access to the store can run these writes');
+    } finally { o83.close(); await fake83.close(); }
   }
 
   console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} — ${pass} passed, ${fail} failed`);

@@ -175,9 +175,11 @@ export class StateDB {
     } catch (e) { try { this.db.exec('ROLLBACK'); } catch {} throw e; }
   }
 
-  /** Run fn inside a transaction; rolls back on throw (atomic writes across tables). */
-  tx(fn) {
-    this.db.exec('BEGIN');
+  /** Run fn inside a transaction; rolls back on throw (atomic writes across tables). `immediate` takes the write
+   *  lock at BEGIN (waiting out busy_timeout), for a read-check-write that must not fail with SQLITE_BUSY on the
+   *  upgrade from read to write when another process committed meanwhile. */
+  tx(fn, { immediate = false } = {}) {
+    this.db.exec(immediate ? 'BEGIN IMMEDIATE' : 'BEGIN');
     try { const r = fn(); this.db.exec('COMMIT'); return r; }
     catch (e) { try { this.db.exec('ROLLBACK'); } catch {} throw e; }
   }
