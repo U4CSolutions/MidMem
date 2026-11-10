@@ -19,11 +19,25 @@ Entries live in three **tiers**:
 |---|---|---|---|
 | `fact` | raw, unprocessed capture | 7d lease | direct store |
 | `memory` | synthesized knowledge with context | 30d lease | ingest/remember default |
-| `wisdom` | curated, verified knowledge | permanent | **earned** (usage + helpful feedback) or explicitly curated |
+| `wisdom` | curated, verified knowledge | permanent | **earned** (usage + helpful feedback), **approved by the operator** (one entry at a time) or explicitly curated |
 
 Retrieval **renews leases** (decay-by-disuse); repeatedly-unhelpful entries get archived by the
-maintenance sweep; promotion is earned by usage/feedback — **never by an LLM's judgment of
-itself**. Wisdom is curated-only: governance blocks uncurated writes.
+maintenance sweep. **Promotion is earned by use, or approved by the operator in person — never by
+an LLM's judgment** (of itself or of anything else). Wisdom is curated-only: governance blocks
+uncurated writes, and the one other road in is the operator's approval.
+
+**Operator-approved wisdom** (operator decision 2026-11-10; `approve-wisdom`, [INTEGRATION-MODES.md
+§6](INTEGRATION-MODES.md) item 6(e)). The operator may approve ONE `memory` entry into `wisdom`. The
+approval stands in for the **usage evidence** of the earned rule (retrievals, trust, helpful votes) and
+for nothing else: the entry must still be active, in `memory`, not a `working` entry, above the
+write-time grounding floor, and not flagged instruction-like; governance and the transition verifier
+still run, with their receipts. It is not curation — authority stays what it was (`web` for a capture),
+so no protected recall slots — and `revoke-wisdom` takes it back (the entry returns to `memory` with a
+fresh lease and can then earn wisdom by use like any other). This is not LLM judgment in a promotion
+path, so the roadmap's non-goals — no LLM in any verifier or tagger path, promotion never by LLM
+judgment — stay true: the decision is a person's, made on one entry, recorded with when and through which
+system; every check is the same deterministic code; and a model may at most **prepare** a case for the
+operator to read — it never decides, and nothing it says is ever sent as an approval.
 
 Orthogonal to tier, every entry has a **memory function** — `working | episodic | semantic |
 procedural | prospective` — so retrieval can filter by *role* ("give me procedures") regardless
@@ -37,7 +51,10 @@ Facts extracted from sources become **claims** with provenance. Claims have real
   novel / corroborating / superseding-candidate / additive / **contradictory**.
 - **Contradictory claims are deferred**, not stored as truth: they land in the **pending
   ledger** awaiting explicit accept/reject (TARL). Deferred claims are invisible to
-  current-fact retrieval until resolved.
+  current-fact retrieval until resolved. A third judgment (2026-11-10), **replace the neighbour**,
+  accepts the claim and supersedes the live claim it contradicts in one step — never a neighbour of
+  higher authority (a web claim never replaces an operator-authored one). All three are explicit:
+  nothing resolves a deferred claim automatically.
 - **Supersede** replaces an outdated claim, cross-linked both directions; `claims` (current
   mode) always returns the freshest non-superseded fact.
 - **Validity windows** (PGMem): corroboration extends `lastObserved`/`supportCount`;

@@ -107,7 +107,9 @@ MIDMEM_LLM_ENABLED=0 node test/smoke.mjs      # entire contract passes offline
 
 **Claim.** Tiers `fact` (7d TTL) → `memory` (30d) → `wisdom` (no TTL, curated-only). Retrieval
 renews leases (decay-by-disuse); promotion is earned from usage/trust counters and additionally
-gated by the write-time-grounding transition verifier — never by asking a model. Forced/daily
+gated by the write-time-grounding transition verifier — never by asking a model. (Since 2026-11-10 the
+operator may approve one `memory` entry into `wisdom` in place of the usage evidence — `approve-wisdom`,
+[CONCEPTS.md](CONCEPTS.md); the verifier gate and governance still run, and no model decides.) Forced/daily
 maintain runs retention: old `log`/`audit` rows, orphan vectors, **orphan edges** (§8), bounded
 by `MIDMEM_RETENTION_DAYS` (default 90). Anything that ingests inside `maintain()` is
 re-entrancy-guarded (`_maintaining`) — the time throttle alone is not a safe guard.

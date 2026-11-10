@@ -76,6 +76,8 @@ equipped by the **MidMem Skills Library** that ships in [`skills/`](skills/).
   optional token budget. Vectors are incremental — lexical works standalone.
 - **Vector backend is pluggable**: `sqlite` (in-DB JSON cosine, zero-dep, default) or `qdrant` (external ANN).
 - **Tiers**: `fact` (raw, 7d TTL) → `memory` (synthesized, 30d) → `wisdom` (curated, ∞), with trust scoring.
+  Wisdom is earned by use, approved by the operator one entry at a time (`approve-wisdom`, revocable; never by a
+  model — [INTEGRATION-MODES §6](docs/INTEGRATION-MODES.md) 6(e)) or explicitly curated.
 - **Scope**: every entry is `openclaw` | `hermes` | `shared` — private working memory + a shared commons.
 - **Hand-off gate ("firstware")**: pushes a memory brief into an agent hand-off so the receiver can't overlook it.
 
